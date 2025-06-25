@@ -1,0 +1,201 @@
+<?xml version="1.0"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.debezium</groupId>
+        <artifactId>debezium-parent</artifactId>
+        <version>3.2.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>debezium-connector-cockroachdb</artifactId>
+    <version>3.2.0-SNAPSHOT</version>
+    <name>Debezium Connector for CockroachDB</name>
+    <description>Kafka Connect source connector for CockroachDB changefeeds</description>
+    <packaging>jar</packaging>
+
+    <properties>
+        <version.debezium>${project.version}</version.debezium>
+        <cockroachdb.image>cockroachdb/cockroach</cockroachdb.image>
+        <cockroachdb.image.tag>v25.2.1</cockroachdb.image.tag>
+        <cockroachdb.init.timeout>300000</cockroachdb.init.timeout>
+        <docker.skip>false</docker.skip>
+        <docker.showLogs>true</docker.showLogs>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-core</artifactId>
+                <version>${version.debezium}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-embedded</artifactId>
+                <version>${version.debezium}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- Core Debezium APIs -->
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>connect-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+
+        <!-- Test and runtime tooling -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <includes>
+                    <include>**/*</include>
+                </includes>
+            </resource>
+        </resources>
+
+        <plugins>
+            <!-- Compiler Plugin -->
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
+                    <release>17</release>
+                </configuration>
+            </plugin>
+
+            <!-- Docker support for CockroachDB test container -->
+            <plugin>
+                <groupId>io.fabric8</groupId>
+                <artifactId>docker-maven-plugin</artifactId>
+                <configuration>
+                    <verbose>true</verbose>
+                    <imagePullPolicy>IfNotPresent</imagePullPolicy>
+                    <images>
+                        <image>
+                            <name>cockroachdb:${cockroachdb.image.tag}</name>
+                            <run>
+                                <cmd>start-single-node --insecure</cmd>
+                                <env>
+                                    <COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING>true</COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING>
+                                </env>
+                                <ports>
+                                    <port>26257:26257</port>
+                                    <port>8080:8080</port>
+                                </ports>
+                                <wait>
+                                    <tcp>localhost:26257</tcp>
+                                    <time>${cockroachdb.init.timeout}</time>
+                                </wait>
+                            </run>
+                        </image>
+                    </images>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>start-cockroachdb</id>
+                        <phase>pre-integration-test</phase>
+                        <goals>
+                            <goal>start</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>stop-cockroachdb</id>
+                        <phase>post-integration-test</phase>
+                        <goals>
+                            <goal>stop</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Failsafe for integration test lifecycle -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <skipTests>${skipITs}</skipTests>
+                    <systemPropertyVariables>
+                        <cockroachdb.host>localhost</cockroachdb.host>
+                        <cockroachdb.port>26257</cockroachdb.port>
+                    </systemPropertyVariables>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <profile>
+            <id>skip-integration-tests</id>
+            <activation>
+                <property>
+                    <name>skipITs</name>
+                </property>
+            </activation>
+            <properties>
+                <docker.skip>true</docker.skip>
+            </properties>
+        </profile>
+        <profile>
+            <id>quick</id>
+            <activation>
+                <property>
+                    <name>quick</name>
+                </property>
+            </activation>
+            <properties>
+                <skipITs>true</skipITs>
+                <docker.skip>true</docker.skip>
+            </properties>
+        </profile>
+    </profiles>
+</project>

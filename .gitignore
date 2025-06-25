@@ -1,0 +1,44 @@
+# Java build
+/target/
+/out/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# VSCode
+.vscode/
+
+# MacOS
+.DS_Store
+
+# Logs
+*.log
+
+# Maven
+.settings/
+.classpath
+.project
+
+# Gradle (if any future use)
+/.gradle/
+build/
+
+# Local config
+*.local
+.env
+*.swp
+
+# Test output
+test-output/
+surefire-reports/
+failsafe-reports/
+
+# JReleaser output (if used)
+out/
+
+# Other tools
+*.orig
+*.rej
