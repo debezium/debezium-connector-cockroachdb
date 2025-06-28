@@ -216,27 +216,6 @@
                 </configuration>
             </plugin>
 
-            <!-- Build Helper Plugin for integration test sources -->
-            <plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>build-helper-maven-plugin</artifactId>
-                <version>3.5.0</version>
-                <executions>
-                    <execution>
-                        <id>add-integration-test-source</id>
-                        <phase>pre-integration-test</phase>
-                        <goals>
-                            <goal>add-test-source</goal>
-                        </goals>
-                        <configuration>
-                            <sources>
-                                <source>src/it/java</source>
-                            </sources>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-
             <!-- Docker support for CockroachDB test container -->
             <plugin>
                 <groupId>io.fabric8</groupId>
