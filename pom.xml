@@ -27,7 +27,7 @@
     <properties>
         <version.debezium>${project.version}</version.debezium>
         <cockroachdb.image>cockroachdb/cockroach</cockroachdb.image>
-        <cockroachdb.image.tag>v25.2.1</cockroachdb.image.tag>
+        <cockroachdb.image.tag>v25.2.2</cockroachdb.image.tag>
         <cockroachdb.init.timeout>300000</cockroachdb.init.timeout>
         <docker.skip>false</docker.skip>
         <docker.showLogs>true</docker.showLogs>
