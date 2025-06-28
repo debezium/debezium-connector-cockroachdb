@@ -18,10 +18,12 @@ This connector leverages CockroachDB's native changefeed functionality to captur
 
 ## Prerequisites
 
-- **CockroachDB v25.2+** with changefeed feature enabled
+- **CockroachDB v25.2+** with changefeed feature enabled (enriched envelope support requires v25.2+)
 - **Kafka Connect** (or compatible sink)
 - **Java 17+**
 - **Maven 3.9.8+**
+
+**Important:** The enriched envelope feature, which provides full Debezium compatibility including operation types (`op` field), is only available in CockroachDB v25.2 and later. Earlier versions will not support the recommended changefeed configuration.
 
 ## Quick Start
 
@@ -75,11 +77,22 @@ INSERT INTO users (id, name, email) VALUES
 ### 5. Create a Changefeed
 
 ```sql
--- Create a changefeed with enriched envelope
+-- Create a changefeed with enriched envelope for Debezium compatibility
 CREATE CHANGEFEED FOR TABLE users 
 INTO 'kafka://localhost:9092' 
-WITH updated, resolved = '10s', envelope = 'wrapped';
+WITH envelope = 'enriched',
+     enriched_properties = 'source,schema',
+     diff,
+     updated,
+     resolved = '10s';
 ```
+
+**Changefeed Options Explained:**
+- `envelope = 'enriched'`: Provides the richest metadata including operation types (`op` field)
+- `enriched_properties = 'source,schema'`: Includes source metadata and schema information
+- `diff`: Includes the previous state of the row in the `before` field
+- `updated`: Includes the commit timestamp in the `updated` field
+- `resolved = '10s'`: Emits resolved timestamps every 10 seconds for consistency
 
 ### 6. Configure the Connector
 
@@ -201,69 +214,131 @@ kafka-console-consumer --bootstrap-server localhost:9092 \
 
 ## Change Event Format
 
-The connector produces change events in the following format:
+The connector produces change events in CockroachDB's enriched envelope format:
 
 ```json
 {
-  "schema": {
-    "type": "struct",
-    "fields": [
-      {
-        "field": "before",
-        "type": {
-          "type": "struct",
-          "fields": [
-            {"field": "id", "type": "int32"},
-            {"field": "name", "type": "string"},
-            {"field": "email", "type": "string"}
-          ]
-        }
-      },
-      {
-        "field": "after",
-        "type": {
-          "type": "struct",
-          "fields": [
-            {"field": "id", "type": "int32"},
-            {"field": "name", "type": "string"},
-            {"field": "email", "type": "string"}
-          ]
-        }
-      },
-      {"field": "source", "type": "struct"},
-      {"field": "op", "type": "string"},
-      {"field": "ts_ms", "type": "int64"}
-    ]
+  "after": {
+    "id": 1,
+    "name": "John Doe",
+    "email": "john@example.com",
+    "created_at": "2025-01-15T10:30:00Z"
   },
-  "payload": {
-    "before": null,
+  "before": null,
+  "key": {
+    "id": 1
+  },
+  "updated": "2025-01-15T10:30:00.123456Z",
+  "op": "c",
+  "ts_ns": 1642234567890123456,
+  "source": {
+    "changefeed_sink": "kafka",
+    "cluster_id": "12345678-1234-1234-1234-123456789abc",
+    "cluster_name": "my-cluster",
+    "database_name": "testdb",
+    "db_version": "v25.2.1",
+    "job_id": 123456,
+    "mvcc_timestamp": "1642234567.890123456",
+    "node_id": 1,
+    "node_name": "cockroach-0",
+    "origin": "cockroachdb",
+    "primary_keys": ["id"],
+    "schema_name": "public",
+    "source_node_locality": "cloud=gce,region=us-east1,zone=us-east1-b",
+    "table_name": "users",
+    "ts_hlc": "1642234567.890123456",
+    "ts_ns": "1642234567890123456"
+  },
+  "schema": {
     "after": {
-      "id": 1,
-      "name": "John Doe",
-      "email": "john@example.com"
+      "fields": [
+        {"field": "id", "type": "int", "optional": false},
+        {"field": "name", "type": "string", "optional": false},
+        {"field": "email", "type": "string", "optional": true},
+        {"field": "created_at", "type": "timestamp", "optional": true}
+      ],
+      "name": "after_schema"
     },
-    "source": {
-      "version": "3.2.0-SNAPSHOT",
-      "connector": "cockroachdb",
-      "name": "cockroachdb-server",
-      "ts_ms": 1640995200000,
-      "snapshot": "false",
-      "db": "testdb",
-      "schema": "public",
-      "table": "users"
-    },
-    "op": "c",
-    "ts_ms": 1640995200000
+    "before": {
+      "fields": [
+        {"field": "id", "type": "int", "optional": false},
+        {"field": "name", "type": "string", "optional": false},
+        {"field": "email", "type": "string", "optional": true},
+        {"field": "created_at", "type": "timestamp", "optional": true}
+      ],
+      "name": "before_schema"
+    }
   }
 }
 ```
 
+**Envelope Fields Explained:**
+
+- `after`: The new state of the row after the change
+- `before`: The previous state of the row (null for inserts, populated for updates/deletes when `diff` is enabled)
+- `key`: The primary key of the changed row
+- `updated`: Timestamp when the change was committed
+- `op`: Operation type (`c` for INSERT, `u` for UPDATE, `d` for DELETE)
+- `ts_ns`: Processing timestamp in nanoseconds
+- `source`: Metadata about the source of the change event
+- `schema`: Schema information for the `after` and `before` fields (when `enriched_properties = 'schema'` is enabled)
+
 ## Operation Types
 
-- `c` - Create (INSERT)
-- `u` - Update (UPDATE)
-- `d` - Delete (DELETE)
-- `r` - Read (SNAPSHOT)
+The `op` field indicates the type of database operation that triggered the change event. This field is only available when using `envelope = 'enriched'`:
+
+- `c` - Create (INSERT): A new row was inserted
+- `u` - Update (UPDATE): An existing row was modified
+- `d` - Delete (DELETE): A row was removed
+
+**Note:** The `op` field is not available in other envelope types like `wrapped` or `bare`. For full Debezium compatibility, always use `envelope = 'enriched'`.
+
+## Envelope Types
+
+CockroachDB supports different envelope types for changefeed messages. The connector is designed to work with the `enriched` envelope for maximum compatibility with Debezium:
+
+### Enriched Envelope (Recommended)
+```sql
+CREATE CHANGEFEED FOR TABLE users 
+INTO 'kafka://localhost:9092' 
+WITH envelope = 'enriched',
+     enriched_properties = 'source,schema',
+     diff,
+     updated;
+```
+
+**Features:**
+- Full metadata including operation types (`op` field)
+- Source information (cluster, database, table details)
+- Schema information for data interpretation
+- Before/after data for change tracking
+- Timestamps for ordering and consistency
+
+### Wrapped Envelope
+```sql
+CREATE CHANGEFEED FOR TABLE users 
+INTO 'kafka://localhost:9092' 
+WITH envelope = 'wrapped';
+```
+
+**Features:**
+- Basic change data with primary key
+- Limited metadata
+- No operation type information
+- Not recommended for Debezium integration
+
+### Bare Envelope
+```sql
+CREATE CHANGEFEED FOR TABLE users 
+INTO 'kafka://localhost:9092' 
+WITH envelope = 'bare';
+```
+
+**Features:**
+- Raw row data at the top level
+- Metadata nested under `__crdb__` field
+- Minimal overhead
+- Not suitable for Debezium integration
 
 ## Troubleshooting
 
@@ -276,71 +351,28 @@ The connector produces change events in the following format:
 
 2. **Changefeed Not Working**
    - Ensure changefeeds are enabled: `SET CLUSTER SETTING kv.rangefeed.enabled = true;`
-   - Verify CockroachDB version is 25.2+
-   - Check changefeed permissions
+   - Verify CockroachDB version is 25.2+ (required for enriched envelope)
+   - Check that the changefeed is using `envelope = 'enriched'` for full Debezium compatibility
+   - Verify the changefeed job is running: `SHOW CHANGEFEED JOBS;`
 
-3. **Schema Evolution Issues**
-   - Monitor connector logs for schema change events
-   - Verify downstream systems can handle schema changes
+3. **Missing Operation Types**
+   - Ensure `envelope = 'enriched'` is set in the changefeed configuration
+   - The `op` field is only available with enriched envelopes
+
+4. **Missing Before/After Data**
+   - Add `diff` option to the changefeed to include the `before` field
+   - The `before` field will be null for inserts and populated for updates/deletes
+
+5. **Missing Source Metadata**
+   - Add `enriched_properties = 'source,schema'` to include source information
+   - This provides cluster, database, and table metadata
+
+6. **Timestamp Issues**
+   - Use `updated` option to include commit timestamps
+   - For ordering, use `ts_hlc` from the source field rather than top-level `ts_ns`
 
 ### Logging
 
 Enable debug logging for troubleshooting:
 
-```properties
-# In logback.xml or application.properties
-loggers=io.debezium.connector.cockroachdb=DEBUG
 ```
-
-### Health Checks
-
-```bash
-# Check connector health
-curl -X GET http://localhost:8083/connectors/cockroachdb-connector/status
-
-# View connector metrics
-curl -X GET http://localhost:8083/connectors/cockroachdb-connector/metrics
-```
-
-## Development
-
-### Building from Source
-
-```bash
-git clone <repository-url>
-cd debezium-connector-cockroachdb
-mvn clean package
-```
-
-### Running Tests
-
-```bash
-# Unit tests
-mvn test
-
-# Integration tests
-mvn verify
-```
-
-### Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Submit a pull request
-
-## License
-
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-## Support
-
-- **Issues**: [GitHub Issues](https://github.com/debezium/debezium-connector-cockroachdb/issues)
-- **Documentation**: [Debezium Documentation](https://debezium.io/documentation/)
-- **Community**: [Debezium Community](https://debezium.io/community/)
-
-## Version History
-
-- **3.3.0** - Initial MVP release with enriched envelope support
-- **3.2.0** - Development version
