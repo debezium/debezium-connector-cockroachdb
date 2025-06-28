@@ -327,24 +327,14 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public enum SnapshotIsolationMode implements EnumeratedValue {
 
         /**
-         * This mode uses SERIALIZABLE isolation level.
+         * This mode uses SERIALIZABLE isolation level (default for CockroachDB).
          */
         SERIALIZABLE("serializable"),
 
         /**
-         * This mode uses REPEATABLE READ isolation level.
-         */
-        REPEATABLE_READ("repeatable_read"),
-
-        /**
          * This mode uses READ COMMITTED isolation level.
          */
-        READ_COMMITTED("read_committed"),
-
-        /**
-         * This mode uses READ UNCOMMITTED isolation level.
-         */
-        READ_UNCOMMITTED("read_uncommitted");
+        READ_COMMITTED("read_committed");
 
         private final String value;
 

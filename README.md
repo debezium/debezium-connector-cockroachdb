@@ -111,7 +111,7 @@ Create a connector configuration file `cockroachdb-connector.json`:
     "database.server.name": "cockroachdb-server",
     "topic.prefix": "cockroachdb",
     "snapshot.mode": "initial",
-    "snapshot.isolation.mode": "read_committed",
+    "snapshot.isolation.mode": "serializable",
     "snapshot.locking.mode": "shared",
     "database.sslmode": "disable",
     "status.update.interval.ms": "10000",
@@ -179,7 +179,7 @@ kafka-console-consumer --bootstrap-server localhost:9092 \
 | Property | Description | Default |
 |----------|-------------|---------|
 | `snapshot.mode` | Snapshot mode (`initial`, `never`, `when_needed`) | `initial` |
-| `snapshot.isolation.mode` | Snapshot isolation level | `read_committed` |
+| `snapshot.isolation.mode` | Snapshot isolation level (`serializable`, `read_committed`) | `serializable` |
 | `snapshot.locking.mode` | Snapshot locking mode | `shared` |
 | `database.sslmode` | SSL mode (`disable`, `require`, `verify-ca`, `verify-full`) | `disable` |
 | `database.sslrootcert` | SSL root certificate path | - |
@@ -191,6 +191,8 @@ kafka-console-consumer --bootstrap-server localhost:9092 \
 | `read.only` | Use read-only connection | `false` |
 | `status.update.interval.ms` | Status update interval | `10000` |
 | `unavailable.value.placeholder` | Placeholder for unavailable values | `hex:FF` |
+
+**Note:** CockroachDB only supports two isolation levels: SERIALIZABLE (default) and READ COMMITTED. SERIALIZABLE is the strongest ANSI transaction isolation level and is recommended for most use cases as it provides the strongest consistency guarantees. READ COMMITTED is available for applications that need higher concurrency with minimal transaction retries.
 
 ### SSL Configuration Examples
 
@@ -375,4 +377,60 @@ WITH envelope = 'bare';
 
 Enable debug logging for troubleshooting:
 
+```properties
+# In logback.xml or application.properties
+loggers=io.debezium.connector.cockroachdb=DEBUG
 ```
+
+### Health Checks
+
+```bash
+# Check connector health
+curl -X GET http://localhost:8083/connectors/cockroachdb-connector/status
+
+# View connector metrics
+curl -X GET http://localhost:8083/connectors/cockroachdb-connector/metrics
+```
+
+## Development
+
+### Building from Source
+
+```bash
+git clone <repository-url>
+cd debezium-connector-cockroachdb
+mvn clean package
+```
+
+### Running Tests
+
+```bash
+# Unit tests
+mvn test
+
+# Integration tests
+mvn verify
+```
+
+### Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new functionality
+5. Submit a pull request
+
+## License
+
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+## Support
+
+- **Issues**: [GitHub Issues](https://github.com/debezium/debezium-connector-cockroachdb/issues)
+- **Documentation**: [Debezium Documentation](https://debezium.io/documentation/)
+- **Community**: [Debezium Community](https://debezium.io/community/)
+
+## Version History
+
+- **3.3.0** - Initial MVP release with enriched envelope support
+- **3.2.0** - Development version
