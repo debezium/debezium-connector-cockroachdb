@@ -17,6 +17,13 @@
     <description>Kafka Connect source connector for CockroachDB changefeeds</description>
     <packaging>jar</packaging>
 
+    <scm>
+        <connection>scm:git:git@github.com:debezium/debezium-connector-cockroachdb.git</connection>
+        <developerConnection>scm:git:git@github.com:debezium/debezium-connector-cockroachdb.git</developerConnection>
+        <url>https://github.com/debezium/debezium-connector-cockroachdb</url>
+        <tag>HEAD</tag>
+    </scm>
+
     <properties>
         <version.debezium>${project.version}</version.debezium>
         <cockroachdb.image>cockroachdb/cockroach</cockroachdb.image>
@@ -38,6 +45,16 @@
                 <artifactId>debezium-embedded</artifactId>
                 <version>${version.debezium}</version>
             </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-api</artifactId>
+                <version>${version.debezium}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-connector-jdbc</artifactId>
+                <version>${version.debezium}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -46,6 +63,14 @@
         <dependency>
             <groupId>io.debezium</groupId>
             <artifactId>debezium-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-connector-jdbc</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.kafka</groupId>
@@ -74,6 +99,12 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-inline</artifactId>
+            <version>5.2.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>
             <scope>test</scope>
@@ -81,6 +112,77 @@
         <dependency>
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Debezium Storage Modules -->
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-storage-kafka</artifactId>
+            <version>${version.debezium}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-storage-file</artifactId>
+            <version>${version.debezium}</version>
+        </dependency>
+        <!-- Provided for build consistency -->
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-ide-configs</artifactId>
+            <version>${version.debezium}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-checkstyle</artifactId>
+            <version>${version.debezium}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-assembly-descriptors</artifactId>
+            <version>${version.debezium}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-revapi</artifactId>
+            <version>${version.debezium}</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- Test dependencies for integration tests -->
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-core</artifactId>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-embedded</artifactId>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-embedded</artifactId>
+            <version>${version.debezium}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.apicurio</groupId>
+            <artifactId>apicurio-registry-utils-converter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.confluent</groupId>
+            <artifactId>kafka-connect-avro-converter</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -95,6 +197,15 @@
             </resource>
         </resources>
 
+        <testResources>
+            <testResource>
+                <directory>src/test/resources</directory>
+                <includes>
+                    <include>**/*</include>
+                </includes>
+            </testResource>
+        </testResources>
+
         <plugins>
             <!-- Compiler Plugin -->
             <plugin>
@@ -103,6 +214,27 @@
                 <configuration>
                     <release>17</release>
                 </configuration>
+            </plugin>
+
+            <!-- Build Helper Plugin for integration test sources -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <id>add-integration-test-source</id>
+                        <phase>pre-integration-test</phase>
+                        <goals>
+                            <goal>add-test-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>src/it/java</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
 
             <!-- Docker support for CockroachDB test container -->
@@ -127,6 +259,49 @@
                                 <wait>
                                     <url>http://localhost:8080</url>
                                     <time>${cockroachdb.init.timeout}</time>
+                                </wait>
+                            </run>
+                        </image>
+                        <image>
+                            <name>confluentinc/cp-kafka:7.4.0</name>
+                            <run>
+                                <env>
+                                    <KAFKA_BROKER_ID>1</KAFKA_BROKER_ID>
+                                    <KAFKA_ZOOKEEPER_CONNECT>localhost:2181</KAFKA_ZOOKEEPER_CONNECT>
+                                    <KAFKA_LISTENER_SECURITY_PROTOCOL_MAP>PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT</KAFKA_LISTENER_SECURITY_PROTOCOL_MAP>
+                                    <KAFKA_ADVERTISED_LISTENERS>PLAINTEXT://localhost:9092,PLAINTEXT_HOST://localhost:29092</KAFKA_ADVERTISED_LISTENERS>
+                                    <KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR>1</KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR>
+                                    <KAFKA_TRANSACTION_STATE_LOG_MIN_ISR>1</KAFKA_TRANSACTION_STATE_LOG_MIN_ISR>
+                                    <KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR>1</KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR>
+                                    <KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS>0</KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS>
+                                    <KAFKA_JMX_PORT>9101</KAFKA_JMX_PORT>
+                                    <KAFKA_JMX_HOSTNAME>localhost</KAFKA_JMX_HOSTNAME>
+                                    <KAFKA_AUTO_CREATE_TOPICS_ENABLE>true</KAFKA_AUTO_CREATE_TOPICS_ENABLE>
+                                </env>
+                                <ports>
+                                    <port>9092:9092</port>
+                                    <port>29092:29092</port>
+                                    <port>9101:9101</port>
+                                </ports>
+                                <wait>
+                                    <tcp>localhost:9092</tcp>
+                                    <time>60000</time>
+                                </wait>
+                            </run>
+                        </image>
+                        <image>
+                            <name>confluentinc/cp-zookeeper:7.4.0</name>
+                            <run>
+                                <env>
+                                    <ZOOKEEPER_CLIENT_PORT>2181</ZOOKEEPER_CLIENT_PORT>
+                                    <ZOOKEEPER_TICK_TIME>2000</ZOOKEEPER_TICK_TIME>
+                                </env>
+                                <ports>
+                                    <port>2181:2181</port>
+                                </ports>
+                                <wait>
+                                    <tcp>localhost:2181</tcp>
+                                    <time>30000</time>
                                 </wait>
                             </run>
                         </image>
@@ -159,6 +334,9 @@
                     <systemPropertyVariables>
                         <cockroachdb.host>localhost</cockroachdb.host>
                         <cockroachdb.port>26257</cockroachdb.port>
+                        <kafka.bootstrap.servers>localhost:9092</kafka.bootstrap.servers>
+                        <kafka.advertised.listeners>localhost:29092</kafka.advertised.listeners>
+                        <zookeeper.connect>localhost:2181</zookeeper.connect>
                     </systemPropertyVariables>
                 </configuration>
                 <executions>
@@ -198,4 +376,5 @@
             </properties>
         </profile>
     </profiles>
+
 </project>
