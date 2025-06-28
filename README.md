@@ -32,7 +32,7 @@ This connector leverages CockroachDB's native changefeed functionality to captur
 ```bash
 git clone <repository-url>
 cd debezium-connector-cockroachdb
-mvn clean package
+./mvnw clean package
 ```
 
 ### 2. Start CockroachDB
@@ -399,17 +399,20 @@ curl -X GET http://localhost:8083/connectors/cockroachdb-connector/metrics
 ```bash
 git clone <repository-url>
 cd debezium-connector-cockroachdb
-mvn clean package
+./mvnw clean package
 ```
 
 ### Running Tests
 
 ```bash
-# Unit tests
-mvn test
+# Unit tests (no Docker required)
+./mvnw test
 
-# Integration tests
-mvn verify
+# Integration tests (requires Docker for CockroachDB, Kafka, and Zookeeper)
+./mvnw verify
+
+# Skip integration tests (useful for CI or when Docker is not available)
+./mvnw verify -DskipITs=true
 ```
 
 ### Contributing
