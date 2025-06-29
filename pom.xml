@@ -185,6 +185,32 @@
             <artifactId>kafka-connect-avro-converter</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Testcontainers for integration testing -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>kafka</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -213,97 +239,10 @@
                 <version>3.11.0</version>
                 <configuration>
                     <release>17</release>
+                    <compilerArgs>
+                        <arg>-Xlint:-options</arg>
+                    </compilerArgs>
                 </configuration>
-            </plugin>
-
-            <!-- Docker support for CockroachDB test container -->
-            <plugin>
-                <groupId>io.fabric8</groupId>
-                <artifactId>docker-maven-plugin</artifactId>
-                <configuration>
-                    <verbose>true</verbose>
-                    <imagePullPolicy>IfNotPresent</imagePullPolicy>
-                    <images>
-                        <image>
-                            <name>${cockroachdb.image}:${cockroachdb.image.tag}</name>
-                            <run>
-                                <dependsOn>
-                                    <container>confluentinc/cp-kafka:7.4.0</container>
-                                </dependsOn>
-                                <cmd>start-single-node --insecure</cmd>
-                                <env>
-                                    <COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING>true</COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING>
-                                </env>
-                                <ports>
-                                    <port>26257:26257</port>
-                                    <port>8080:8080</port>
-                                </ports>
-                                <wait>
-                                    <url>http://localhost:8080</url>
-                                    <time>60000</time>
-                                </wait>
-                            </run>
-                        </image>
-                        <image>
-                            <name>confluentinc/cp-zookeeper:7.4.0</name>
-                            <run>
-                                <env>
-                                    <ZOOKEEPER_CLIENT_PORT>2181</ZOOKEEPER_CLIENT_PORT>
-                                    <ZOOKEEPER_TICK_TIME>2000</ZOOKEEPER_TICK_TIME>
-                                </env>
-                                <ports>
-                                    <port>2181:2181</port>
-                                </ports>
-                            </run>
-                        </image>
-                        <image>
-                            <name>confluentinc/cp-kafka:7.4.0</name>
-                            <run>
-                                <dependsOn>
-                                    <container>confluentinc/cp-zookeeper:7.4.0</container>
-                                </dependsOn>
-                                <env>
-                                    <KAFKA_BROKER_ID>1</KAFKA_BROKER_ID>
-                                    <KAFKA_ZOOKEEPER_CONNECT>localhost:2181</KAFKA_ZOOKEEPER_CONNECT>
-                                    <KAFKA_LISTENER_SECURITY_PROTOCOL_MAP>PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT</KAFKA_LISTENER_SECURITY_PROTOCOL_MAP>
-                                    <KAFKA_ADVERTISED_LISTENERS>PLAINTEXT://localhost:9092,PLAINTEXT_HOST://localhost:29092</KAFKA_ADVERTISED_LISTENERS>
-                                    <KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR>1</KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR>
-                                    <KAFKA_TRANSACTION_STATE_LOG_MIN_ISR>1</KAFKA_TRANSACTION_STATE_LOG_MIN_ISR>
-                                    <KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR>1</KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR>
-                                    <KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS>0</KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS>
-                                    <KAFKA_JMX_PORT>9101</KAFKA_JMX_PORT>
-                                    <KAFKA_JMX_HOSTNAME>localhost</KAFKA_JMX_HOSTNAME>
-                                    <KAFKA_AUTO_CREATE_TOPICS_ENABLE>true</KAFKA_AUTO_CREATE_TOPICS_ENABLE>
-                                </env>
-                                <ports>
-                                    <port>9092:9092</port>
-                                    <port>29092:29092</port>
-                                    <port>9101:9101</port>
-                                </ports>
-                                <wait>
-                                    <url>http://localhost:9092</url>
-                                    <time>60000</time>
-                                </wait>
-                            </run>
-                        </image>
-                    </images>
-                </configuration>
-                <executions>
-                    <execution>
-                        <id>start-cockroachdb</id>
-                        <phase>pre-integration-test</phase>
-                        <goals>
-                            <goal>start</goal>
-                        </goals>
-                    </execution>
-                    <execution>
-                        <id>stop-cockroachdb</id>
-                        <phase>post-integration-test</phase>
-                        <goals>
-                            <goal>stop</goal>
-                        </goals>
-                    </execution>
-                </executions>
             </plugin>
 
             <!-- Failsafe for integration test lifecycle -->

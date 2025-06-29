@@ -105,16 +105,21 @@ public class ChangefeedSchemaParser {
             Schema valueSchema = createEnvelopeSchema(valueNode);
             Struct value = new Struct(valueSchema);
             if (valueNode != null) {
-                if (valueNode.has("after"))
+                if (valueNode.has("after")) {
                     value.put("after", convertJsonToStruct(valueNode.get("after"), valueSchema.field("after").schema()));
-                if (valueNode.has("before"))
+                }
+                if (valueNode.has("before")) {
                     value.put("before", convertJsonToStruct(valueNode.get("before"), valueSchema.field("before").schema()));
-                if (valueNode.has("updated"))
+                }
+                if (valueNode.has("updated")) {
                     value.put("updated", convertJsonToStruct(valueNode.get("updated"), valueSchema.field("updated").schema()));
-                if (valueNode.has("diff"))
+                }
+                if (valueNode.has("diff")) {
                     value.put("diff", convertJsonToStruct(valueNode.get("diff"), valueSchema.field("diff").schema()));
-                if (valueNode.has("resolved"))
+                }
+                if (valueNode.has("resolved")) {
                     value.put("resolved", valueNode.get("resolved").asText());
+                }
             }
 
             return new ParsedChange(keySchema, key, valueSchema, value);

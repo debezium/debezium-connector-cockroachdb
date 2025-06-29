@@ -17,11 +17,17 @@ import java.util.Map;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.KafkaContainer;
+import org.testcontainers.containers.Network;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.utility.DockerImageName;
 
 /**
  * Integration test for CockroachDB connector with changefeed support.
@@ -29,26 +35,54 @@ import org.slf4j.LoggerFactory;
  *
  * @author Virag Tripathi
  */
+@Testcontainers
 public class CockroachDBConnectorIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBConnectorIT.class);
-
-    private static final String COCKROACHDB_HOST = System.getProperty("cockroachdb.host", "localhost");
-    private static final int COCKROACHDB_PORT = Integer.parseInt(System.getProperty("cockroachdb.port", "26257"));
-    private static final String KAFKA_BOOTSTRAP_SERVERS = System.getProperty("kafka.bootstrap.servers", "localhost:9092");
 
     private static final String DATABASE_NAME = "testdb";
     private static final String TABLE_NAME = "users";
     private static final String TOPIC_PREFIX = "test-cockroachdb";
 
+    // Create a shared network for all containers
+    private static final Network NETWORK = Network.newNetwork();
+
+    @Container
+    private static final KafkaContainer kafka = new KafkaContainer(
+            DockerImageName.parse("confluentinc/cp-kafka:7.4.0"))
+            .withNetwork(NETWORK)
+            .withNetworkAliases("kafka");
+
+    @Container
+    private static final GenericContainer<?> cockroachdb = new GenericContainer<>(DockerImageName.parse("cockroachdb/cockroach:v25.2.1"))
+            .withNetwork(NETWORK)
+            .withNetworkAliases("cockroachdb")
+            .withExposedPorts(26257, 8080)
+            .withCommand("start-single-node", "--insecure")
+            .withEnv("COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING", "true");
+
     private Connection connection;
     private KafkaConsumer<String, String> consumer;
 
-    @Before
+    @BeforeEach
     public void setUp() throws SQLException {
-        // Connect to CockroachDB
+        // Wait for containers to be ready
+        kafka.start();
+        cockroachdb.start();
+
+        // First connect to default database to create our test database
+        String defaultUrl = String.format("jdbc:postgresql://%s:%d/defaultdb?sslmode=disable",
+                cockroachdb.getHost(), cockroachdb.getMappedPort(26257));
+        try (Connection defaultConnection = DriverManager.getConnection(defaultUrl, "root", "")) {
+            try (Statement stmt = defaultConnection.createStatement()) {
+                stmt.execute("CREATE DATABASE IF NOT EXISTS " + DATABASE_NAME);
+                LOGGER.info("Created database: {}", DATABASE_NAME);
+            }
+        }
+
+        // Connect to our test database
         String url = String.format("jdbc:postgresql://%s:%d/%s?sslmode=disable",
-                COCKROACHDB_HOST, COCKROACHDB_PORT, DATABASE_NAME);
+                cockroachdb.getHost(), cockroachdb.getMappedPort(26257), DATABASE_NAME);
         connection = DriverManager.getConnection(url, "root", "");
 
         // Enable changefeeds
@@ -61,7 +95,7 @@ public class CockroachDBConnectorIT {
         setupKafkaConsumer();
     }
 
-    @After
+    @AfterEach
     public void tearDown() throws SQLException {
         if (consumer != null) {
             consumer.close();
@@ -87,14 +121,75 @@ public class CockroachDBConnectorIT {
     public void shouldCreateChangefeed() throws Exception {
         // Test changefeed creation
         try (Statement stmt = connection.createStatement()) {
-            // Create a simple changefeed
+            // Create a changefeed with enriched envelope (required for Debezium compatibility)
             stmt.execute(String.format(
-                    "CREATE CHANGEFEED FOR TABLE %s INTO 'kafka://%s' " +
-                            "WITH envelope = 'enriched'",
-                    TABLE_NAME, KAFKA_BOOTSTRAP_SERVERS));
+                    "CREATE CHANGEFEED FOR TABLE %s INTO 'kafka://kafka:9092' " +
+                            "WITH envelope = 'enriched', " +
+                            "enriched_properties = 'source,schema', " +
+                            "diff, " +
+                            "updated, " +
+                            "resolved = '10s'",
+                    TABLE_NAME));
 
             LOGGER.info("Successfully created changefeed for table: {}", TABLE_NAME);
+
+            // Wait a moment for the changefeed to start
+            Thread.sleep(2000);
+
+            // Verify the changefeed is running
+            var rs = stmt.executeQuery("SHOW CHANGEFEED JOBS");
+            assertThat(rs.next()).isTrue();
+            String status = rs.getString("status");
+            assertThat(status).isEqualTo("running");
+
+            LOGGER.info("Changefeed job is running with status: {}", status);
         }
+    }
+
+    @Test
+    public void shouldProduceChangeEvents() throws Exception {
+        // Create changefeed first
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(String.format(
+                    "CREATE CHANGEFEED FOR TABLE %s INTO 'kafka://kafka:9092' " +
+                            "WITH envelope = 'enriched', " +
+                            "enriched_properties = 'source,schema', " +
+                            "diff, " +
+                            "updated, " +
+                            "resolved = '10s'",
+                    TABLE_NAME));
+
+            // Wait for changefeed to start
+            Thread.sleep(3000);
+        }
+
+        // Insert a record to trigger change event
+        insertRecord(4, "Test User", "test@example.com");
+
+        // Wait for change event to be produced
+        Thread.sleep(2000);
+
+        // Subscribe to the topic
+        String topicName = TABLE_NAME; // CockroachDB uses table name as topic name
+        consumer.subscribe(java.util.Arrays.asList(topicName));
+
+        // Poll for messages
+        var records = consumer.poll(java.time.Duration.ofSeconds(10));
+
+        // Verify we received change events
+        assertThat(records).isNotEmpty();
+
+        for (var record : records) {
+            String value = record.value();
+            LOGGER.info("Received change event: {}", value);
+
+            // Verify it's a valid JSON with enriched envelope
+            assertThat(value).contains("\"op\":");
+            assertThat(value).contains("\"source\":");
+            assertThat(value).contains("\"after\":");
+        }
+
+        LOGGER.info("Successfully received {} change events", records.count());
     }
 
     @Test
@@ -184,7 +279,7 @@ public class CockroachDBConnectorIT {
 
     private void setupKafkaConsumer() {
         Map<String, Object> props = new HashMap<>();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA_BOOTSTRAP_SERVERS);
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers());
         props.put(ConsumerConfig.GROUP_ID_CONFIG, "test-consumer-group");
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
@@ -192,7 +287,7 @@ public class CockroachDBConnectorIT {
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
 
         consumer = new KafkaConsumer<>(props);
-        LOGGER.info("Set up Kafka consumer for: {}", KAFKA_BOOTSTRAP_SERVERS);
+        LOGGER.info("Set up Kafka consumer for: {}", kafka.getBootstrapServers());
     }
 
     private void insertRecord(int id, String name, String email) throws SQLException {
