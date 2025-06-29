@@ -50,11 +50,6 @@
                 <artifactId>debezium-api</artifactId>
                 <version>${version.debezium}</version>
             </dependency>
-            <dependency>
-                <groupId>io.debezium</groupId>
-                <artifactId>debezium-connector-jdbc</artifactId>
-                <version>${version.debezium}</version>
-            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -67,10 +62,6 @@
         <dependency>
             <groupId>io.debezium</groupId>
             <artifactId>debezium-api</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>io.debezium</groupId>
-            <artifactId>debezium-connector-jdbc</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.kafka</groupId>
@@ -203,6 +194,12 @@
         </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- PostgreSQL JDBC driver for CockroachDB connectivity -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <scope>test</scope>
         </dependency>
