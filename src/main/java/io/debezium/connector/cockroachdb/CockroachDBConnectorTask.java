@@ -28,7 +28,6 @@ import io.debezium.pipeline.ErrorHandler;
 public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartition, CockroachDBOffsetContext> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBConnectorTask.class);
-    private static final String CONTEXT_NAME = "cockroachdb-connector-task";
 
     private CockroachDBConnectorConfig connectorConfig;
     private CockroachDBTaskContext taskContext;
@@ -66,6 +65,11 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
     @Override
     public String version() {
         return Module.version();
+    }
+
+    @Override
+    public String connectorName() {
+        return Module.name();
     }
 
     @Override
