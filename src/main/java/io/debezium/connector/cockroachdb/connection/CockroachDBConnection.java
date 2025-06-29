@@ -8,7 +8,6 @@ package io.debezium.connector.cockroachdb.connection;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.time.Duration;
 import java.util.Properties;
 
 import org.slf4j.Logger;
@@ -26,10 +25,6 @@ import io.debezium.connector.cockroachdb.CockroachDBErrorHandler;
 public class CockroachDBConnection implements AutoCloseable {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBConnection.class);
-
-    private static final Duration CONNECTION_TIMEOUT = Duration.ofSeconds(30);
-    private static final Duration RETRY_DELAY = Duration.ofMillis(100);
-    private static final int MAX_RETRIES = 3;
 
     private final CockroachDBConnectorConfig config;
     private final CockroachDBErrorHandler errorHandler;
@@ -51,11 +46,12 @@ public class CockroachDBConnection implements AutoCloseable {
 
         int attempts = 0;
         SQLException lastException = null;
+        int maxRetries = config.getConnectionMaxRetries();
 
-        while (attempts < MAX_RETRIES) {
+        while (attempts < maxRetries) {
             try {
                 LOGGER.info("Attempting to connect to CockroachDB (attempt {}/{}): {}",
-                        attempts + 1, MAX_RETRIES, url);
+                        attempts + 1, maxRetries, url);
 
                 connection = DriverManager.getConnection(url, props);
 
@@ -72,25 +68,20 @@ public class CockroachDBConnection implements AutoCloseable {
                 lastException = e;
                 attempts++;
 
-                if (errorHandler.isTransientError(e) && attempts < MAX_RETRIES) {
-                    LOGGER.warn("Transient error connecting to CockroachDB (attempt {}/{}): {}",
-                            attempts, MAX_RETRIES, e.getMessage());
-
-                    try {
-                        Thread.sleep(RETRY_DELAY.toMillis() * attempts); // Exponential backoff
-                    }
-                    catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        throw new SQLException("Connection interrupted", ie);
+                try {
+                    long retryDelay = config.getConnectionRetryDelayMs() * attempts; // Exponential backoff
+                    if (!errorHandler.handleConnectionError(e, attempts, maxRetries, retryDelay)) {
+                        break; // Don't retry
                     }
                 }
-                else {
-                    break;
+                catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new SQLException("Connection interrupted", ie);
                 }
             }
         }
 
-        LOGGER.error("Failed to connect to CockroachDB after {} attempts", MAX_RETRIES);
+        LOGGER.error("Failed to connect to CockroachDB after {} attempts", maxRetries);
         throw lastException != null ? lastException : new SQLException("Failed to connect to CockroachDB");
     }
 
@@ -132,7 +123,7 @@ public class CockroachDBConnection implements AutoCloseable {
         }
 
         // Connection timeout
-        props.setProperty("connectTimeout", String.valueOf(CONNECTION_TIMEOUT.toSeconds()));
+        props.setProperty("connectTimeout", String.valueOf(config.getConnectionTimeoutMs() / 1000)); // Convert ms to seconds
 
         // SSL properties if configured
         CockroachDBConnectorConfig.SecureConnectionMode sslMode = CockroachDBConnectorConfig.SecureConnectionMode.parse(

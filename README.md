@@ -497,7 +497,137 @@ The project includes comprehensive integration tests that use the same Docker se
 | `status.update.interval.ms` | Status update interval | `10000` |
 | `unavailable.value.placeholder` | Placeholder for unavailable values | `hex:FF` |
 
+#### Changefeed Configuration
+
+| Property | Description | Default |
+|----------|-------------|---------|
+| `changefeed.envelope` | Changefeed envelope type (`wrapped`, `enriched`, `bare`) | `enriched` |
+| `changefeed.resolved.interval` | How often to emit resolved timestamps (e.g., "10s", "1m") | `10s` |
+| `changefeed.include.updated` | Include updated column values (enriched envelope only) | `true` |
+| `changefeed.include.diff` | Include diff information showing what changed (enriched envelope only) | `true` |
+| `changefeed.enriched.properties` | Comma-separated enriched properties (`source,schema`) | `source,schema` |
+| `changefeed.topic.prefix` | Optional prefix for changefeed topic names | - |
+| `changefeed.cursor` | Starting cursor position (`now` or timestamp) | `now` |
+| `changefeed.batch.size` | Number of rows to fetch per batch | `1000` |
+| `changefeed.poll.interval.ms` | Polling interval for changefeed events in milliseconds | `100` |
+
+#### Connection Configuration
+
+| Property | Description | Default |
+|----------|-------------|---------|
+| `connection.timeout.ms` | Connection timeout in milliseconds | `30000` |
+| `connection.retry.delay.ms` | Delay between connection retry attempts in milliseconds | `100` |
+| `connection.max.retries` | Maximum number of connection retry attempts | `3` |
+
 **Note:** CockroachDB only supports two isolation levels: SERIALIZABLE (default) and READ COMMITTED. SERIALIZABLE is the strongest ANSI transaction isolation level and is recommended for most use cases as it provides the strongest consistency guarantees. READ COMMITTED is available for applications that need higher concurrency with minimal transaction retries.
+
+### Configuration Examples
+
+#### Basic Configuration
+```json
+{
+  "connector.class": "io.debezium.connector.cockroachdb.CockroachDBConnector",
+  "database.hostname": "localhost",
+  "database.port": "26257",
+  "database.user": "root",
+  "database.password": "",
+  "database.dbname": "testdb",
+  "database.server.name": "cockroachdb-server",
+  "topic.prefix": "cockroachdb"
+}
+```
+
+#### Advanced Changefeed Configuration
+```json
+{
+  "connector.class": "io.debezium.connector.cockroachdb.CockroachDBConnector",
+  "database.hostname": "localhost",
+  "database.port": "26257",
+  "database.user": "root",
+  "database.password": "",
+  "database.dbname": "testdb",
+  "database.server.name": "cockroachdb-server",
+  
+  // Changefeed configuration
+  "changefeed.envelope": "enriched",
+  "changefeed.resolved.interval": "5s",
+  "changefeed.include.updated": true,
+  "changefeed.include.diff": true,
+  "changefeed.enriched.properties": "source,schema",
+  "changefeed.batch.size": 500,
+  "changefeed.poll.interval.ms": 50,
+  
+  // Connection configuration
+  "connection.timeout.ms": 60000,
+  "connection.retry.delay.ms": 200,
+  "connection.max.retries": 5
+}
+```
+
+#### High-Performance Configuration
+```json
+{
+  "connector.class": "io.debezium.connector.cockroachdb.CockroachDBConnector",
+  "database.hostname": "localhost",
+  "database.port": "26257",
+  "database.user": "root",
+  "database.password": "",
+  "database.dbname": "testdb",
+  "database.server.name": "cockroachdb-server",
+  
+  // Optimized for high throughput
+  "changefeed.batch.size": 2000,
+  "changefeed.poll.interval.ms": 25,
+  "changefeed.resolved.interval": "30s",
+  
+  // Aggressive connection retry for unstable networks
+  "connection.timeout.ms": 30000,
+  "connection.retry.delay.ms": 50,
+  "connection.max.retries": 10
+}
+```
+
+#### Development Configuration
+```json
+{
+  "connector.class": "io.debezium.connector.cockroachdb.CockroachDBConnector",
+  "database.hostname": "localhost",
+  "database.port": "26257",
+  "database.user": "root",
+  "database.password": "",
+  "database.dbname": "testdb",
+  "database.server.name": "cockroachdb-server",
+  
+  // Faster feedback for development
+  "changefeed.resolved.interval": "1s",
+  "changefeed.poll.interval.ms": 100,
+  "changefeed.batch.size": 100,
+  
+  // Quick failure for development
+  "connection.timeout.ms": 5000,
+  "connection.retry.delay.ms": 100,
+  "connection.max.retries": 2
+}
+```
+
+### Configuration Best Practices
+
+#### Changefeed Configuration
+- **Envelope Type**: Use `enriched` for full Debezium compatibility with operation types
+- **Resolved Interval**: Use shorter intervals (5-10s) for real-time applications, longer intervals (30s+) for batch processing
+- **Batch Size**: Increase for high-throughput scenarios, decrease for low-latency requirements
+- **Poll Interval**: Lower values provide faster event processing but higher CPU usage
+
+#### Connection Configuration
+- **Timeout**: Increase for high-latency networks or large databases
+- **Retry Delay**: Use exponential backoff (current implementation multiplies by attempt number)
+- **Max Retries**: Higher values for unstable networks, lower values for quick failure detection
+
+#### Performance Tuning
+- **High Throughput**: Increase batch size, decrease poll interval, use longer resolved intervals
+- **Low Latency**: Decrease batch size, decrease poll interval, use shorter resolved intervals
+- **Network Issues**: Increase connection timeout, retry delay, and max retries
+- **Resource Constraints**: Decrease batch size and poll frequency
 
 ### Changefeed Configuration
 

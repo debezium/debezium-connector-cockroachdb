@@ -47,18 +47,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
 
-    // Polling interval for checking if the context is still running
-    private static final Duration POLL_INTERVAL = Duration.ofMillis(100);
-
-    // Template for creating CockroachDB changefeeds with enriched envelope
-    // The enriched envelope provides additional metadata beyond just the changed data
-    private static final String CHANGEFEED_QUERY_TEMPLATE = "EXPERIMENTAL CHANGEFEED FOR TABLE %s WITH " +
-            "envelope = 'enriched', " + // Use enriched envelope for additional metadata
-            "enriched_properties = 'source,schema', " + // Include source and schema information
-            "updated, " + // Include updated column values
-            "diff, " + // Include diff information showing what changed
-            "cursor = '%s'"; // Resume from this cursor position
-
     private final CockroachDBConnectorConfig config;
     private final EventDispatcher<CockroachDBPartition, TableId> dispatcher;
     private final CockroachDBSchema schema;
@@ -109,7 +97,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
             // Keep the connection alive and monitor for changes
             // This loop ensures we stay connected and can detect when the context stops
-            Metronome metronome = Metronome.sleeper(POLL_INTERVAL, clock);
+            Duration pollInterval = Duration.ofMillis(config.getChangefeedPollIntervalMs());
+            Metronome metronome = Metronome.sleeper(pollInterval, clock);
             while (context.isRunning() && running.get()) {
                 metronome.pause();
             }
@@ -143,23 +132,23 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             throws SQLException, InterruptedException {
 
         // Get the cursor position to resume from
-        // If no cursor exists, start from "now" (current time)
+        // If no cursor exists, start from the configured default
         String cursor = offsetContext.getCursor();
         if (cursor == null) {
-            cursor = "now"; // Start from current time if no cursor
-            LOGGER.debug("No cursor found, starting changefeed from current time for table {}", table);
+            cursor = config.getChangefeedCursor(); // Use configured default cursor
+            LOGGER.debug("No cursor found, starting changefeed from configured cursor '{}' for table {}", cursor, table);
         }
         else {
             LOGGER.debug("Resuming changefeed from cursor {} for table {}", cursor, table);
         }
 
         // Build the changefeed query with the enriched envelope configuration
-        String changefeedQuery = String.format(CHANGEFEED_QUERY_TEMPLATE, table, cursor);
+        String changefeedQuery = buildChangefeedQuery(table, cursor);
         LOGGER.info("Creating changefeed for table {}: {}", table, changefeedQuery);
 
         try (Statement stmt = connection.connection().createStatement()) {
             // Set a reasonable fetch size to avoid memory issues with large result sets
-            stmt.setFetchSize(1000);
+            stmt.setFetchSize(config.getChangefeedBatchSize());
 
             try (ResultSet rs = stmt.executeQuery(changefeedQuery)) {
                 // Process each row from the changefeed result set
@@ -292,5 +281,43 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     public void stop() {
         running.set(false);
         LOGGER.info("Stop requested for CockroachDB streaming change event source");
+    }
+
+    /**
+     * Builds a changefeed query based on the connector configuration.
+     *
+     * @param table The table to create the changefeed for
+     * @param cursor The cursor position to start from
+     * @return The complete changefeed query string
+     */
+    private String buildChangefeedQuery(TableId table, String cursor) {
+        StringBuilder query = new StringBuilder();
+        query.append("CREATE CHANGEFEED FOR TABLE ").append(table).append(" WITH ");
+
+        // Add envelope type
+        query.append("envelope = '").append(config.getChangefeedEnvelope()).append("'");
+
+        // Add enriched properties if using enriched envelope
+        if ("enriched".equals(config.getChangefeedEnvelope())) {
+            query.append(", enriched_properties = '").append(config.getChangefeedEnrichedProperties()).append("'");
+
+            // Add updated flag if configured
+            if (config.isChangefeedIncludeUpdated()) {
+                query.append(", updated");
+            }
+
+            // Add diff flag if configured
+            if (config.isChangefeedIncludeDiff()) {
+                query.append(", diff");
+            }
+        }
+
+        // Add resolved interval
+        query.append(", resolved = '").append(config.getChangefeedResolvedInterval()).append("'");
+
+        // Add cursor
+        query.append(", cursor = '").append(cursor).append("'");
+
+        return query.toString();
     }
 }

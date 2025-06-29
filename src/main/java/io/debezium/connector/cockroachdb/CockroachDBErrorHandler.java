@@ -111,4 +111,31 @@ public class CockroachDBErrorHandler {
 
         return false;
     }
+
+    /**
+     * Handles a connection error with retry logic.
+     * This method centralizes connection retry logic and can be used by connection classes.
+     *
+     * @param throwable the exception that occurred
+     * @param attempt the current attempt number (1-based)
+     * @param maxRetries the maximum number of retry attempts
+     * @param retryDelayMs the delay between retries in milliseconds
+     * @return true if the error should be retried, false otherwise
+     * @throws InterruptedException if the retry delay is interrupted
+     */
+    public boolean handleConnectionError(Throwable throwable, int attempt, int maxRetries, long retryDelayMs)
+            throws InterruptedException {
+
+        if (isTransientError(throwable) && attempt < maxRetries) {
+            LOGGER.warn("Transient connection error (attempt {}/{}): {}. Retrying in {}ms...",
+                    attempt, maxRetries, throwable.getMessage(), retryDelayMs);
+
+            Thread.sleep(retryDelayMs);
+            return true; // Should retry
+        }
+
+        LOGGER.error("Non-transient connection error or max retries exceeded (attempt {}/{}): {}",
+                attempt, maxRetries, throwable.getMessage());
+        return false; // Should not retry
+    }
 }

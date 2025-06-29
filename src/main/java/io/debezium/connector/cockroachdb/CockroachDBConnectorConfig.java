@@ -193,6 +193,125 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDescription("Switched connector to use alternative methods to deliver signals to Debezium instead "
                     + "of writing to signaling table");
 
+    // Changefeed-specific configuration fields
+    public static final Field CHANGEFEED_ENVELOPE = Field.create("changefeed.envelope")
+            .withDisplayName("Changefeed envelope type")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 0))
+            .withDefault("enriched")
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("The envelope type for changefeed events. Options: 'wrapped', 'enriched', 'bare'. "
+                    + "'wrapped' provides the old and new values in a structured format. "
+                    + "'enriched' provides additional metadata like source, schema, and diff information. "
+                    + "'bare' provides just the key and value without additional metadata.");
+
+    public static final Field CHANGEFEED_RESOLVED_INTERVAL = Field.create("changefeed.resolved.interval")
+            .withDisplayName("Changefeed resolved interval")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 1))
+            .withDefault("10s")
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("How often to emit resolved timestamps. Format: '10s', '1m', etc. "
+                    + "Resolved timestamps are used for consistency tracking.");
+
+    public static final Field CHANGEFEED_INCLUDE_UPDATED = Field.create("changefeed.include.updated")
+            .withDisplayName("Include updated column values")
+            .withType(Type.BOOLEAN)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 2))
+            .withDefault(true)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("Whether to include updated column values in changefeed events. "
+                    + "Only applies when envelope is 'enriched'.");
+
+    public static final Field CHANGEFEED_INCLUDE_DIFF = Field.create("changefeed.include.diff")
+            .withDisplayName("Include diff information")
+            .withType(Type.BOOLEAN)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 3))
+            .withDefault(true)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("Whether to include diff information showing what changed. "
+                    + "Only applies when envelope is 'enriched'.");
+
+    public static final Field CHANGEFEED_ENRICHED_PROPERTIES = Field.create("changefeed.enriched.properties")
+            .withDisplayName("Enriched properties")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 4))
+            .withDefault("source,schema")
+            .withWidth(Width.MEDIUM)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("Comma-separated list of enriched properties to include. "
+                    + "Options: 'source', 'schema'. Only applies when envelope is 'enriched'.");
+
+    public static final Field CHANGEFEED_TOPIC_PREFIX = Field.create("changefeed.topic.prefix")
+            .withDisplayName("Changefeed topic prefix")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 5))
+            .withDefault("")
+            .withWidth(Width.MEDIUM)
+            .withImportance(Importance.LOW)
+            .withDescription("Optional prefix for changefeed topic names. "
+                    + "If not specified, the database server name is used.");
+
+    public static final Field CHANGEFEED_CURSOR = Field.create("changefeed.cursor")
+            .withDisplayName("Changefeed cursor")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 6))
+            .withDefault("now")
+            .withWidth(Width.MEDIUM)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("The cursor position to start the changefeed from. "
+                    + "Use 'now' to start from current time, or specify a timestamp like '2023-01-01 00:00:00'.");
+
+    public static final Field CHANGEFEED_BATCH_SIZE = Field.create("changefeed.batch.size")
+            .withDisplayName("Changefeed batch size")
+            .withType(Type.INT)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 7))
+            .withDefault(1000)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDescription("The number of rows to fetch in each batch when processing changefeed results.");
+
+    public static final Field CHANGEFEED_POLL_INTERVAL = Field.create("changefeed.poll.interval.ms")
+            .withDisplayName("Changefeed poll interval (ms)")
+            .withType(Type.LONG)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 8))
+            .withDefault(100L)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDescription("How often to poll for new changefeed events in milliseconds.");
+
+    // Connection-related configuration fields
+    public static final Field CONNECTION_TIMEOUT_MS = Field.create("connection.timeout.ms")
+            .withDisplayName("Connection timeout (ms)")
+            .withType(Type.LONG)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 10))
+            .withDefault(30000L)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("How long to wait for a connection to be established in milliseconds.");
+
+    public static final Field CONNECTION_RETRY_DELAY_MS = Field.create("connection.retry.delay.ms")
+            .withDisplayName("Connection retry delay (ms)")
+            .withType(Type.LONG)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 11))
+            .withDefault(100L)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDescription("Delay between connection retry attempts in milliseconds.");
+
+    public static final Field CONNECTION_MAX_RETRIES = Field.create("connection.max.retries")
+            .withDisplayName("Connection max retries")
+            .withType(Type.INT)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 12))
+            .withDefault(3)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("Maximum number of connection retry attempts before giving up.");
+
     private static final ConfigDefinition CONFIG_DEFINITION = RelationalDatabaseConnectorConfig.CONFIG_DEFINITION.edit()
             .name("CockroachDB")
             .type(
@@ -682,6 +801,56 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     }
 
     public String getPassword() {
-        return config.getString(PASSWORD);
+        return config.getString(RelationalDatabaseConnectorConfig.PASSWORD);
+    }
+
+    // Changefeed configuration getters
+    public String getChangefeedEnvelope() {
+        return config.getString(CHANGEFEED_ENVELOPE);
+    }
+
+    public String getChangefeedResolvedInterval() {
+        return config.getString(CHANGEFEED_RESOLVED_INTERVAL);
+    }
+
+    public boolean isChangefeedIncludeUpdated() {
+        return config.getBoolean(CHANGEFEED_INCLUDE_UPDATED);
+    }
+
+    public boolean isChangefeedIncludeDiff() {
+        return config.getBoolean(CHANGEFEED_INCLUDE_DIFF);
+    }
+
+    public String getChangefeedEnrichedProperties() {
+        return config.getString(CHANGEFEED_ENRICHED_PROPERTIES);
+    }
+
+    public String getChangefeedTopicPrefix() {
+        return config.getString(CHANGEFEED_TOPIC_PREFIX);
+    }
+
+    public String getChangefeedCursor() {
+        return config.getString(CHANGEFEED_CURSOR);
+    }
+
+    public int getChangefeedBatchSize() {
+        return config.getInteger(CHANGEFEED_BATCH_SIZE);
+    }
+
+    public long getChangefeedPollIntervalMs() {
+        return config.getLong(CHANGEFEED_POLL_INTERVAL);
+    }
+
+    // Connection-related configuration getters
+    public long getConnectionTimeoutMs() {
+        return config.getLong(CONNECTION_TIMEOUT_MS);
+    }
+
+    public long getConnectionRetryDelayMs() {
+        return config.getLong(CONNECTION_RETRY_DELAY_MS);
+    }
+
+    public int getConnectionMaxRetries() {
+        return config.getInteger(CONNECTION_MAX_RETRIES);
     }
 }
