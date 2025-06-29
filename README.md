@@ -2,6 +2,14 @@
 
 An incubating Debezium CDC connector for CockroachDB database; Please log issues in our tracker at https://issues.redhat.com/projects/DBZ/
 
+[![License](http://img.shields.io/:license-apache%202.0-brightgreen.svg)](http://www.apache.org/licenses/LICENSE-2.0.html)
+[![Maven Central](https://maven-badges.herokuapp.com/maven-central/io.debezium/debezium-connector-cockroachdb/badge.svg)](http://search.maven.org/#search%7Cga%7C1%7Cg%3A%22io.debezium%22%20a%3A%22debezium-connector-cockroachdb%22)
+[![User chat](https://img.shields.io/badge/chat-users-brightgreen.svg)](https://debezium.zulipchat.com/#narrow/stream/302529-users)
+[![Developer chat](https://img.shields.io/badge/chat-devs-brightgreen.svg)](https://debezium.zulipchat.com/#narrow/stream/302533-dev)
+[![CockroachDB Community](https://img.shields.io/badge/chat-cockroachdb%20community-brightgreen.svg)](https://debezium.zulipchat.com/#narrow/channel/510960-community-cockroachdb)
+[![Google Group](https://img.shields.io/:mailing%20list-debezium-brightgreen.svg)](https://groups.google.com/forum/#!forum/debezium)
+[![Stack Overflow](http://img.shields.io/:stack%20overflow-debezium-brightgreen.svg)](http://stackoverflow.com/questions/tagged/debezium)
+
 ---
 
 # Debezium Connector for CockroachDB
