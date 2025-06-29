@@ -31,11 +31,15 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
     private CockroachDBConnectorConfig connectorConfig;
     private CockroachDBTaskContext taskContext;
     private CockroachDBSchema schema;
+    private CockroachDBErrorHandler errorHandler;
 
     @Override
     public ChangeEventSourceCoordinator<CockroachDBPartition, CockroachDBOffsetContext> start(Configuration config) {
         this.connectorConfig = new CockroachDBConnectorConfig(config);
         LOGGER.info("Starting CockroachDB connector task with config: {}", config);
+
+        // Initialize error handler with null queue for now
+        this.errorHandler = new CockroachDBErrorHandler(connectorConfig, null);
 
         // TODO: Initialize schema and task context
         // TODO: Set up changefeed streaming
@@ -76,5 +80,9 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
     public void commit() throws InterruptedException {
         // Optional: implement offset commit logic if needed
         LOGGER.debug("CockroachDBConnectorTask commit() called");
+    }
+
+    public CockroachDBErrorHandler getErrorHandler() {
+        return errorHandler;
     }
 }
