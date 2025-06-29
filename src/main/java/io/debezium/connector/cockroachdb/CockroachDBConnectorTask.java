@@ -6,6 +6,7 @@
 package io.debezium.connector.cockroachdb;
 
 import java.util.List;
+import java.util.Optional;
 
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.connect.source.SourceRecord;
@@ -16,6 +17,7 @@ import io.debezium.config.Configuration;
 import io.debezium.config.Field;
 import io.debezium.connector.common.BaseSourceTask;
 import io.debezium.pipeline.ChangeEventSourceCoordinator;
+import io.debezium.pipeline.ErrorHandler;
 
 /**
  * Kafka Connect SourceTask implementation for CockroachDB changefeeds.
@@ -82,7 +84,7 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
         LOGGER.debug("CockroachDBConnectorTask commit() called");
     }
 
-    public CockroachDBErrorHandler getErrorHandler() {
-        return errorHandler;
+    public Optional<ErrorHandler> getErrorHandler() {
+        return Optional.empty();
     }
 }
