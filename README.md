@@ -33,7 +33,7 @@ cp target/debezium-connector-cockroachdb-3.2.0-SNAPSHOT-test-uber-jar-with-depen
 ### 2. Start Infrastructure
 
 ```bash
-docker compose up -d
+docker compose -f scripts/docker-compose.yml up -d
 ```
 
 ### 3. Create Test Table and Grant Privileges
@@ -129,7 +129,7 @@ Example connector configuration:
 | `cockroachdb.changefeed.envelope`            | enriched               | Envelope type: enriched, wrapped, bare      |
 | `cockroachdb.changefeed.enriched.properties` | source                 | Comma-separated enriched properties         |
 | `cockroachdb.changefeed.sink.type`           | kafka                  | Sink type (kafka, webhook, pubsub, etc.)    |
-| `cockroachdb.changefeed.sink.uri`            | kafka://localhost:9092 | Sink URI (format depends on sink type)     |
+| `cockroachdb.changefeed.sink.uri`            | kafka://localhost:9092 | Sink URI (format depends on sink type)      |
 | `cockroachdb.changefeed.sink.topic.prefix`   | ""                     | Optional prefix for sink topic names        |
 | `cockroachdb.changefeed.sink.options`        | ""                     | Additional sink options in key=value format |
 | `cockroachdb.changefeed.resolved.interval`   | 10s                    | Resolved timestamp interval                 |
@@ -184,7 +184,7 @@ Run all tests:
 
 Run end-to-end test:
 ```bash
-./scripts/run-tests.sh --cleanup-start --cleanup-exit test-end-to-end-sink.sh
+./scripts/test-simple.sh
 ```
 
 ## Troubleshooting

@@ -221,7 +221,7 @@ public class CockroachDBConnection implements AutoCloseable {
             String dbName = config.getDatabaseName();
             stmt.execute("SELECT EXISTS (SELECT 1 FROM information_schema.tables t " +
                     "JOIN information_schema.table_privileges tp ON t.table_name = tp.table_name " +
-                    "WHERE t.table_schema = 'public' AND tp.privilege_type = 'CHANGEFEED' " +
+                    "WHERE t.table_schema = '" + config.getSchemaName() + "' AND tp.privilege_type = 'CHANGEFEED' " +
                     "AND tp.grantee = '" + config.getUser() + "' LIMIT 1)");
             var rs = stmt.getResultSet();
             if (rs != null && rs.next()) {
@@ -234,7 +234,7 @@ public class CockroachDBConnection implements AutoCloseable {
             }
 
             // Check if user can create changefeeds (basic test)
-            stmt.execute("SELECT 1 WHERE EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' LIMIT 1)");
+            stmt.execute("SELECT 1 WHERE EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = '" + config.getSchemaName() + "' LIMIT 1)");
             rs = stmt.getResultSet();
             if (rs != null && !rs.next()) {
                 throw new SQLException("No accessible tables found in database '" + dbName + "'. " +

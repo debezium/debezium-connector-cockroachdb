@@ -289,7 +289,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDisplayName("Changefeed sink URI")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 10))
-            .withDefault("kafka://localhost:9092")
+            .withDefault("kafka://kafka-test:9092")
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
             .withDescription("The URI for the changefeed sink. Format depends on sink type: "
@@ -344,6 +344,15 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withImportance(Importance.MEDIUM)
             .withDescription("Maximum number of connection retry attempts before giving up.");
 
+    public static final Field SCHEMA_NAME = Field.create("cockroachdb.schema.name")
+            .withDisplayName("Schema name")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR, 1))
+            .withDefault("public")
+            .withWidth(Width.MEDIUM)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("The schema name to monitor for changes. Defaults to 'public' schema.");
+
     private static final ConfigDefinition CONFIG_DEFINITION = RelationalDatabaseConnectorConfig.CONFIG_DEFINITION.edit()
             .name("CockroachDB")
             .type(
@@ -372,6 +381,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     SNAPSHOT_LOCKING_MODE,
                     UNAVAILABLE_VALUE_PLACEHOLDER,
                     READ_ONLY_CONNECTION,
+                    SCHEMA_NAME,
                     CHANGEFEED_ENVELOPE,
                     CHANGEFEED_RESOLVED_INTERVAL,
                     CHANGEFEED_INCLUDE_UPDATED,
@@ -918,5 +928,9 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public int getConnectionMaxRetries() {
         return config.getInteger(CONNECTION_MAX_RETRIES);
+    }
+
+    public String getSchemaName() {
+        return config.getString(SCHEMA_NAME);
     }
 }

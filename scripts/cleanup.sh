@@ -33,8 +33,8 @@ cleanup_containers() {
     print_status "Cleaning up CockroachDB connector test environment..."
     
     # Stop and remove containers using docker-compose
-    print_status "Stopping docker-compose services..."
-    docker-compose down -v 2>/dev/null || true
+print_status "Stopping docker-compose services..."
+docker-compose -f scripts/docker-compose.yml down -v 2>/dev/null || true
     
     # Remove any remaining containers with our project name
     print_status "Removing containers with project label..."

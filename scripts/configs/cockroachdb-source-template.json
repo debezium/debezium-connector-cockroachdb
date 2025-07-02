@@ -1,0 +1,33 @@
+{
+  "name": "cockroachdb-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.cockroachdb.CockroachDBConnector",
+    "database.hostname": "${COCKROACHDB_HOST:-cockroachdb}",
+    "database.port": "${COCKROACHDB_PORT:-26257}",
+    "database.user": "${DATABASE_USER:-testuser}",
+    "database.password": "${DATABASE_PASSWORD:-}",
+    "database.dbname": "${DATABASE_NAME:-testdb}",
+    "database.server.name": "${DATABASE_SERVER_NAME:-cockroachdb}",
+    "cockroachdb.schema.name": "${SCHEMA_NAME:-public}",
+    "table.include.list": "${SCHEMA_NAME:-public}.${TABLE_NAME:-products}",
+    "cockroachdb.changefeed.envelope": "${CHANGEFEED_ENVELOPE:-enriched}",
+    "cockroachdb.changefeed.enriched.properties": "${CHANGEFEED_ENRICHED_PROPERTIES:-source,schema}",
+    "cockroachdb.changefeed.include.updated": "${CHANGEFEED_INCLUDE_UPDATED:-true}",
+    "cockroachdb.changefeed.include.diff": "${CHANGEFEED_INCLUDE_DIFF:-true}",
+    "cockroachdb.changefeed.resolved.interval": "${CHANGEFEED_RESOLVED_INTERVAL:-10s}",
+    "cockroachdb.changefeed.cursor": "${CHANGEFEED_CURSOR:-now}",
+    "cockroachdb.changefeed.sink.type": "${CHANGEFEED_SINK_TYPE:-kafka}",
+    "cockroachdb.changefeed.sink.uri": "kafka://${KAFKA_HOST:-kafka-test}:${KAFKA_PORT:-9092}",
+    "cockroachdb.changefeed.sink.topic.prefix": "${CHANGEFEED_SINK_TOPIC_PREFIX:-}",
+    "cockroachdb.changefeed.sink.options": "${CHANGEFEED_SINK_OPTIONS:-}",
+    "cockroachdb.changefeed.batch.size": "${CHANGEFEED_BATCH_SIZE:-1000}",
+    "cockroachdb.changefeed.poll.interval.ms": "${CHANGEFEED_POLL_INTERVAL_MS:-100}",
+    "connection.timeout.ms": "${CONNECTION_TIMEOUT_MS:-30000}",
+    "connection.retry.delay.ms": "${CONNECTION_RETRY_DELAY_MS:-100}",
+    "connection.max.retries": "${CONNECTION_MAX_RETRIES:-3}",
+    "key.converter": "${KEY_CONVERTER:-org.apache.kafka.connect.json.JsonConverter}",
+    "value.converter": "${VALUE_CONVERTER:-org.apache.kafka.connect.json.JsonConverter}",
+    "key.converter.schemas.enable": "${KEY_CONVERTER_SCHEMAS_ENABLE:-false}",
+    "value.converter.schemas.enable": "${VALUE_CONVERTER_SCHEMAS_ENABLE:-false}"
+  }
+} 

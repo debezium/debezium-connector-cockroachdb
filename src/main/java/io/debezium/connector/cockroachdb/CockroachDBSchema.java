@@ -6,7 +6,6 @@
 package io.debezium.connector.cockroachdb;
 
 import java.sql.ResultSet;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -74,22 +73,24 @@ public class CockroachDBSchema extends RelationalDatabaseSchema {
 
         // Query for tables in the configured database
         String sql = "SELECT table_schema, table_name FROM information_schema.tables " +
-                "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'";
+                "WHERE table_schema = ? AND table_type = 'BASE TABLE'";
 
-        try (Statement stmt = connection.connection().createStatement();
-                ResultSet rs = stmt.executeQuery(sql)) {
+        try (var pstmt = connection.connection().prepareStatement(sql)) {
+            pstmt.setString(1, config.getSchemaName());
+            try (ResultSet rs = pstmt.executeQuery()) {
 
-            while (rs.next()) {
-                String schemaName = rs.getString("table_schema");
-                String tableName = rs.getString("table_name");
-                TableId tableId = new TableId(config.getDatabaseName(), schemaName, tableName);
+                while (rs.next()) {
+                    String schemaName = rs.getString("table_schema");
+                    String tableName = rs.getString("table_name");
+                    TableId tableId = new TableId(config.getDatabaseName(), schemaName, tableName);
 
-                // Add the table to the schema registry
-                LOGGER.info("Found table: {}", tableId);
-                discoveredTables.add(tableId);
+                    // Add the table to the schema registry
+                    LOGGER.info("Found table: {}", tableId);
+                    discoveredTables.add(tableId);
 
-                // Load and register the complete table structure
-                loadTableStructure(connection, tableId);
+                    // Load and register the complete table structure
+                    loadTableStructure(connection, tableId);
+                }
             }
         }
 

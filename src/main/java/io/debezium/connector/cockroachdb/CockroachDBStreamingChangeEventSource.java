@@ -211,7 +211,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
         // Configure Kafka consumer
         java.util.Properties props = new java.util.Properties();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "kafka-test:9092");
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, config.getChangefeedSinkUri().replace("kafka://", ""));
         props.put(ConsumerConfig.GROUP_ID_CONFIG, "cockroachdb-connector-" + table.table());
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());

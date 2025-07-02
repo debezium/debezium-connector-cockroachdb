@@ -54,7 +54,7 @@ public class CockroachDBConnectorIT {
             .withNetworkAliases("kafka");
 
     @Container
-    private static final GenericContainer<?> cockroachdb = new GenericContainer<>(DockerImageName.parse("cockroachdb/cockroach:v25.2.1"))
+    private static final GenericContainer<?> cockroachdb = new GenericContainer<>(DockerImageName.parse("cockroachdb/cockroach:v25.2.2"))
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb")
             .withExposedPorts(26257, 8080)

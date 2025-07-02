@@ -35,7 +35,7 @@
         <formatter.version>0.10.0</formatter.version>
         <version.debezium>${project.version}</version.debezium>
         <cockroachdb.image>cockroachdb/cockroach</cockroachdb.image>
-        <cockroachdb.version>v23.1.13</cockroachdb.version>
+        <cockroachdb.version>v25.2.2</cockroachdb.version>
         <cockroachdb.port>26257</cockroachdb.port>
         <cockroachdb.http.port>8080</cockroachdb.http.port>
         <cockroachdb.user>root</cockroachdb.user>
