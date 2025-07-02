@@ -42,3 +42,9 @@ out/
 # Other tools
 *.orig
 *.rej
+
+# Local documentation (not for public repo)
+ARCHITECTURE_RESEARCH.md
+
+# Built plugin directory (contains JARs)
+/plugin/

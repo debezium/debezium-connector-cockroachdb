@@ -120,6 +120,15 @@ public class ChangefeedSchemaParser {
                 if (valueNode.has("resolved")) {
                     value.put("resolved", valueNode.get("resolved").asText());
                 }
+                if (valueNode.has("op")) {
+                    value.put("op", valueNode.get("op").asText());
+                }
+                if (valueNode.has("source")) {
+                    value.put("source", convertJsonToStruct(valueNode.get("source"), valueSchema.field("source").schema()));
+                }
+                if (valueNode.has("ts_ns")) {
+                    value.put("ts_ns", valueNode.get("ts_ns").asLong());
+                }
             }
 
             return new ParsedChange(keySchema, key, valueSchema, value);
@@ -313,6 +322,9 @@ public class ChangefeedSchemaParser {
         builder.field("updated", node != null && node.has("updated") ? createSchemaFromJson(node.get("updated")) : SchemaBuilder.struct().optional().build());
         builder.field("diff", node != null && node.has("diff") ? createSchemaFromJson(node.get("diff")) : SchemaBuilder.struct().optional().build());
         builder.field("resolved", Schema.OPTIONAL_STRING_SCHEMA);
+        builder.field("op", Schema.OPTIONAL_STRING_SCHEMA);
+        builder.field("source", node != null && node.has("source") ? createSchemaFromJson(node.get("source")) : SchemaBuilder.struct().optional().build());
+        builder.field("ts_ns", Schema.OPTIONAL_INT64_SCHEMA);
         return builder.build();
     }
 }

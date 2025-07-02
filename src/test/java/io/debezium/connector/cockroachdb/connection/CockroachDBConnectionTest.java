@@ -58,8 +58,14 @@ public class CockroachDBConnectionTest {
         try (MockedStatic<DriverManager> driverManagerMock = Mockito.mockStatic(DriverManager.class)) {
             Connection mockConnection = mock(Connection.class);
             Statement mockStatement = mock(Statement.class);
+            java.sql.ResultSet mockResultSet = mock(java.sql.ResultSet.class);
 
             when(mockConnection.createStatement()).thenReturn(mockStatement);
+            when(mockStatement.execute(Mockito.anyString())).thenReturn(true);
+            when(mockStatement.getResultSet()).thenReturn(mockResultSet);
+            when(mockResultSet.next()).thenReturn(true, true, true); // For rangefeed, privilege, and table checks
+            when(mockResultSet.getString(1)).thenReturn("true"); // Rangefeed enabled
+            when(mockResultSet.getBoolean(1)).thenReturn(true); // Has privilege
             driverManagerMock.when(() -> DriverManager.getConnection(Mockito.anyString(), Mockito.any()))
                     .thenReturn(mockConnection);
 
@@ -107,8 +113,14 @@ public class CockroachDBConnectionTest {
         try (MockedStatic<DriverManager> driverManagerMock = Mockito.mockStatic(DriverManager.class)) {
             Connection mockConnection = mock(Connection.class);
             Statement mockStatement = mock(Statement.class);
+            java.sql.ResultSet mockResultSet = mock(java.sql.ResultSet.class);
 
             when(mockConnection.createStatement()).thenReturn(mockStatement);
+            when(mockStatement.execute(Mockito.anyString())).thenReturn(true);
+            when(mockStatement.getResultSet()).thenReturn(mockResultSet);
+            when(mockResultSet.next()).thenReturn(true, true, true); // For rangefeed, privilege, and table checks
+            when(mockResultSet.getString(1)).thenReturn("true"); // Rangefeed enabled
+            when(mockResultSet.getBoolean(1)).thenReturn(true); // Has privilege
             driverManagerMock.when(() -> DriverManager.getConnection(Mockito.anyString(), Mockito.any()))
                     .thenReturn(mockConnection);
 
@@ -137,8 +149,14 @@ public class CockroachDBConnectionTest {
         try (MockedStatic<DriverManager> driverManagerMock = Mockito.mockStatic(DriverManager.class)) {
             Connection mockConnection = mock(Connection.class);
             Statement mockStatement = mock(Statement.class);
+            java.sql.ResultSet mockResultSet = mock(java.sql.ResultSet.class);
 
             when(mockConnection.createStatement()).thenReturn(mockStatement);
+            when(mockStatement.execute(Mockito.anyString())).thenReturn(true);
+            when(mockStatement.getResultSet()).thenReturn(mockResultSet);
+            when(mockResultSet.next()).thenReturn(true, true, true); // For rangefeed, privilege, and table checks
+            when(mockResultSet.getString(1)).thenReturn("true"); // Rangefeed enabled
+            when(mockResultSet.getBoolean(1)).thenReturn(true); // Has privilege
             driverManagerMock.when(() -> DriverManager.getConnection(Mockito.anyString(), Mockito.any()))
                     .thenReturn(mockConnection);
 

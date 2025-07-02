@@ -47,6 +47,7 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
     private String cursor;
     private Instant timestamp;
     private TransactionContext transactionContext;
+    private Long kafkaOffset; // Track Kafka offset for hybrid approach
 
     public CockroachDBOffsetContext(CockroachDBConnectorConfig connectorConfig) {
         super(new SourceInfo(connectorConfig), false);
@@ -54,8 +55,20 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
         this.logicalName = connectorConfig.getLogicalName();
         this.partition = Collections.singletonMap("server", logicalName);
         this.sourceInfo = new SourceInfo(connectorConfig);
-        this.cursor = null;
-        this.timestamp = Instant.EPOCH;
+        this.cursor = connectorConfig.getChangefeedCursor();
+        this.timestamp = Instant.now();
+        this.kafkaOffset = null;
+    }
+
+    public CockroachDBOffsetContext(CockroachDBConnectorConfig config, String cursor, Instant timestamp, Long kafkaOffset) {
+        super(new SourceInfo(config), false);
+        this.connectorConfig = config;
+        this.logicalName = config.getLogicalName();
+        this.partition = Collections.singletonMap("server", logicalName);
+        this.sourceInfo = new SourceInfo(config);
+        this.cursor = cursor;
+        this.timestamp = timestamp;
+        this.kafkaOffset = kafkaOffset;
     }
 
     public void setTimestamp(Instant timestamp) {
@@ -150,5 +163,13 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
 
     public String getCursor() {
         return this.cursor;
+    }
+
+    public Long getKafkaOffset() {
+        return kafkaOffset;
+    }
+
+    public void setKafkaOffset(Long kafkaOffset) {
+        this.kafkaOffset = kafkaOffset;
     }
 }

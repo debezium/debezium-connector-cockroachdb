@@ -194,95 +194,127 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     + "of writing to signaling table");
 
     // Changefeed-specific configuration fields
-    public static final Field CHANGEFEED_ENVELOPE = Field.create("changefeed.envelope")
+    public static final Field CHANGEFEED_ENVELOPE = Field.create("cockroachdb.changefeed.envelope")
             .withDisplayName("Changefeed envelope type")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 0))
             .withDefault("enriched")
             .withWidth(Width.SHORT)
-            .withImportance(Importance.MEDIUM)
-            .withDescription("The envelope type for changefeed events. Options: 'wrapped', 'enriched', 'bare'. "
-                    + "'wrapped' provides the old and new values in a structured format. "
-                    + "'enriched' provides additional metadata like source, schema, and diff information. "
-                    + "'bare' provides just the key and value without additional metadata.");
+            .withImportance(Importance.HIGH)
+            .withDescription("The envelope type for changefeed events. Options: 'enriched', 'wrapped', 'bare'.");
 
-    public static final Field CHANGEFEED_RESOLVED_INTERVAL = Field.create("changefeed.resolved.interval")
+    public static final Field CHANGEFEED_RESOLVED_INTERVAL = Field.create("cockroachdb.changefeed.resolved.interval")
             .withDisplayName("Changefeed resolved interval")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 1))
             .withDefault("10s")
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
-            .withDescription("How often to emit resolved timestamps. Format: '10s', '1m', etc. "
-                    + "Resolved timestamps are used for consistency tracking.");
+            .withDescription("The interval for resolved timestamp messages. Format: '10s', '1m', etc.");
 
-    public static final Field CHANGEFEED_INCLUDE_UPDATED = Field.create("changefeed.include.updated")
-            .withDisplayName("Include updated column values")
+    public static final Field CHANGEFEED_INCLUDE_UPDATED = Field.create("cockroachdb.changefeed.include.updated")
+            .withDisplayName("Include updated column information")
             .withType(Type.BOOLEAN)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 2))
-            .withDefault(true)
+            .withDefault(false)
             .withWidth(Width.SHORT)
-            .withImportance(Importance.MEDIUM)
-            .withDescription("Whether to include updated column values in changefeed events. "
-                    + "Only applies when envelope is 'enriched'.");
+            .withImportance(Importance.LOW)
+            .withDescription("Whether to include information about which columns were updated in UPDATE events.");
 
-    public static final Field CHANGEFEED_INCLUDE_DIFF = Field.create("changefeed.include.diff")
+    public static final Field CHANGEFEED_INCLUDE_DIFF = Field.create("cockroachdb.changefeed.include.diff")
             .withDisplayName("Include diff information")
             .withType(Type.BOOLEAN)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 3))
-            .withDefault(true)
+            .withDefault(false)
             .withWidth(Width.SHORT)
-            .withImportance(Importance.MEDIUM)
-            .withDescription("Whether to include diff information showing what changed. "
-                    + "Only applies when envelope is 'enriched'.");
+            .withImportance(Importance.LOW)
+            .withDescription("Whether to include before/after diff information in changefeed events.");
 
-    public static final Field CHANGEFEED_ENRICHED_PROPERTIES = Field.create("changefeed.enriched.properties")
-            .withDisplayName("Enriched properties")
+    public static final Field CHANGEFEED_ENRICHED_PROPERTIES = Field.create("cockroachdb.changefeed.enriched.properties")
+            .withDisplayName("Changefeed enriched properties")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 4))
-            .withDefault("source,schema")
+            .withDefault("source")
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
-            .withDescription("Comma-separated list of enriched properties to include. "
-                    + "Options: 'source', 'schema'. Only applies when envelope is 'enriched'.");
+            .withDescription("Comma-separated list of properties to include in enriched envelope: 'source', 'schema', 'mvcc'.");
 
-    public static final Field CHANGEFEED_TOPIC_PREFIX = Field.create("changefeed.topic.prefix")
+    public static final Field CHANGEFEED_TOPIC_PREFIX = Field.create("cockroachdb.changefeed.topic.prefix")
             .withDisplayName("Changefeed topic prefix")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 5))
             .withDefault("")
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.LOW)
-            .withDescription("Optional prefix for changefeed topic names. "
-                    + "If not specified, the database server name is used.");
+            .withDescription("Optional prefix for changefeed topic names.");
 
-    public static final Field CHANGEFEED_CURSOR = Field.create("changefeed.cursor")
+    public static final Field CHANGEFEED_CURSOR = Field.create("cockroachdb.changefeed.cursor")
             .withDisplayName("Changefeed cursor")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 6))
             .withDefault("now")
             .withWidth(Width.MEDIUM)
-            .withImportance(Importance.MEDIUM)
-            .withDescription("The cursor position to start the changefeed from. "
-                    + "Use 'now' to start from current time, or specify a timestamp like '2023-01-01 00:00:00'.");
+            .withImportance(Importance.HIGH)
+            .withDescription("The cursor position to start changefeed from. Use 'now' for current time or a timestamp.");
 
-    public static final Field CHANGEFEED_BATCH_SIZE = Field.create("changefeed.batch.size")
+    public static final Field CHANGEFEED_BATCH_SIZE = Field.create("cockroachdb.changefeed.batch.size")
             .withDisplayName("Changefeed batch size")
             .withType(Type.INT)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 7))
             .withDefault(1000)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
-            .withDescription("The number of rows to fetch in each batch when processing changefeed results.");
+            .withDescription("The batch size for changefeed processing.");
 
-    public static final Field CHANGEFEED_POLL_INTERVAL = Field.create("changefeed.poll.interval.ms")
+    public static final Field CHANGEFEED_POLL_INTERVAL = Field.create("cockroachdb.changefeed.poll.interval.ms")
             .withDisplayName("Changefeed poll interval (ms)")
             .withType(Type.LONG)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 8))
             .withDefault(100L)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
-            .withDescription("How often to poll for new changefeed events in milliseconds.");
+            .withDescription("The poll interval in milliseconds for changefeed processing.");
+
+    // Sink configuration fields
+    public static final Field CHANGEFEED_SINK_TYPE = Field.create("cockroachdb.changefeed.sink.type")
+            .withDisplayName("Changefeed sink type")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 9))
+            .withDefault("kafka")
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.HIGH)
+            .withDescription("The type of sink for changefeed events. Options: 'kafka', 'pubsub', 'webhook', 'cloudstorage'.");
+
+    public static final Field CHANGEFEED_SINK_URI = Field.create("cockroachdb.changefeed.sink.uri")
+            .withDisplayName("Changefeed sink URI")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 10))
+            .withDefault("kafka://localhost:9092")
+            .withWidth(Width.LONG)
+            .withImportance(Importance.HIGH)
+            .withDescription("The URI for the changefeed sink. Format depends on sink type: "
+                    + "'kafka://host:port' for Kafka, "
+                    + "'pubsub://project:topic' for Pub/Sub, "
+                    + "'webhook://url' for Webhook, "
+                    + "'cloudstorage://bucket' for Cloud Storage.");
+
+    public static final Field CHANGEFEED_SINK_TOPIC_PREFIX = Field.create("cockroachdb.changefeed.sink.topic.prefix")
+            .withDisplayName("Changefeed sink topic prefix")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 11))
+            .withDefault("")
+            .withWidth(Width.MEDIUM)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("Optional prefix for sink topic names. If not specified, the database server name is used.");
+
+    public static final Field CHANGEFEED_SINK_OPTIONS = Field.create("cockroachdb.changefeed.sink.options")
+            .withDisplayName("Changefeed sink options")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 12))
+            .withWidth(Width.LONG)
+            .withImportance(Importance.LOW)
+            .withDescription("Additional options for the sink in key=value format, comma-separated. "
+                    + "Example: 'compression=gzip,retry_count=3'");
 
     // Connection-related configuration fields
     public static final Field CONNECTION_TIMEOUT_MS = Field.create("connection.timeout.ms")
@@ -328,14 +360,31 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     SSL_CLIENT_KEY,
                     SSL_CLIENT_KEY_PASSWORD,
                     TCP_KEEPALIVE,
-                    STATUS_UPDATE_INTERVAL_MS)
+                    STATUS_UPDATE_INTERVAL_MS,
+                    CONNECTION_TIMEOUT_MS,
+                    CONNECTION_RETRY_DELAY_MS,
+                    CONNECTION_MAX_RETRIES)
             .events(
                     SOURCE_INFO_STRUCT_MAKER)
             .connector(
                     SNAPSHOT_MODE,
                     SNAPSHOT_ISOLATION_MODE,
                     SNAPSHOT_LOCKING_MODE,
-                    UNAVAILABLE_VALUE_PLACEHOLDER)
+                    UNAVAILABLE_VALUE_PLACEHOLDER,
+                    READ_ONLY_CONNECTION,
+                    CHANGEFEED_ENVELOPE,
+                    CHANGEFEED_RESOLVED_INTERVAL,
+                    CHANGEFEED_INCLUDE_UPDATED,
+                    CHANGEFEED_INCLUDE_DIFF,
+                    CHANGEFEED_ENRICHED_PROPERTIES,
+                    CHANGEFEED_TOPIC_PREFIX,
+                    CHANGEFEED_CURSOR,
+                    CHANGEFEED_BATCH_SIZE,
+                    CHANGEFEED_POLL_INTERVAL,
+                    CHANGEFEED_SINK_TYPE,
+                    CHANGEFEED_SINK_URI,
+                    CHANGEFEED_SINK_TOPIC_PREFIX,
+                    CHANGEFEED_SINK_OPTIONS)
             .create();
 
     public static final Field.Set ALL_FIELDS = Field.setOf(CONFIG_DEFINITION.all());
@@ -839,6 +888,23 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public long getChangefeedPollIntervalMs() {
         return config.getLong(CHANGEFEED_POLL_INTERVAL);
+    }
+
+    // Sink-related getter methods
+    public String getChangefeedSinkType() {
+        return config.getString(CHANGEFEED_SINK_TYPE);
+    }
+
+    public String getChangefeedSinkUri() {
+        return config.getString(CHANGEFEED_SINK_URI);
+    }
+
+    public String getChangefeedSinkTopicPrefix() {
+        return config.getString(CHANGEFEED_SINK_TOPIC_PREFIX);
+    }
+
+    public String getChangefeedSinkOptions() {
+        return config.getString(CHANGEFEED_SINK_OPTIONS);
     }
 
     // Connection-related configuration getters

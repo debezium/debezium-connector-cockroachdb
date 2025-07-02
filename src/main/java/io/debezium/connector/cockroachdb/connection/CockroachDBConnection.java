@@ -60,7 +60,10 @@ public class CockroachDBConnection implements AutoCloseable {
                     stmt.execute("SELECT 1");
                 }
 
-                LOGGER.info("Successfully connected to CockroachDB");
+                // Check permissions for changefeed operations
+                checkChangefeedPermissions();
+
+                LOGGER.info("Successfully connected to CockroachDB with required permissions");
                 return;
 
             }
@@ -172,6 +175,76 @@ public class CockroachDBConnection implements AutoCloseable {
         catch (SQLException e) {
             LOGGER.debug("Error checking connection validity: {}", e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Checks if the database user has the required permissions for changefeed operations.
+     * This method performs early validation to fail fast if permissions are insufficient.
+     *
+     * @throws SQLException if permission checks fail
+     */
+    private void checkChangefeedPermissions() throws SQLException {
+        LOGGER.debug("Checking changefeed permissions for user: {}", config.getUser());
+
+        try (var stmt = connection.createStatement()) {
+            // Check if rangefeed is enabled (gracefully handle permission errors)
+            boolean rangefeedEnabled = false;
+            try {
+                stmt.execute("SHOW CLUSTER SETTING kv.rangefeed.enabled");
+                var rs = stmt.getResultSet();
+                if (rs != null && rs.next()) {
+                    String rangefeedSetting = rs.getString(1);
+                    rangefeedEnabled = "true".equalsIgnoreCase(rangefeedSetting);
+                    LOGGER.debug("Rangefeed setting: {}", rangefeedSetting);
+                }
+            }
+            catch (SQLException e) {
+                if (e.getMessage().contains("VIEWCLUSTERSETTING") || e.getMessage().contains("MODIFYCLUSTERSETTING")) {
+                    LOGGER.warn("Cannot check rangefeed cluster setting due to insufficient privileges. " +
+                            "Assuming rangefeed is enabled. If changefeeds fail, ensure 'kv.rangefeed.enabled = true' " +
+                            "and grant VIEWCLUSTERSETTING to user '{}': GRANT VIEWCLUSTERSETTING TO {}",
+                            config.getUser(), config.getUser());
+                    rangefeedEnabled = true; // Assume it's enabled and proceed
+                }
+                else {
+                    throw e; // Re-throw other SQL exceptions
+                }
+            }
+
+            if (!rangefeedEnabled) {
+                throw new SQLException("Rangefeed is disabled. Enable rangefeed by setting 'kv.rangefeed.enabled = true' " +
+                        "in your CockroachDB cluster configuration. This is required for changefeeds to work.");
+            }
+
+            // Check if user has CHANGEFEED privilege on at least one table
+            String dbName = config.getDatabaseName();
+            stmt.execute("SELECT EXISTS (SELECT 1 FROM information_schema.tables t " +
+                    "JOIN information_schema.table_privileges tp ON t.table_name = tp.table_name " +
+                    "WHERE t.table_schema = 'public' AND tp.privilege_type = 'CHANGEFEED' " +
+                    "AND tp.grantee = '" + config.getUser() + "' LIMIT 1)");
+            var rs = stmt.getResultSet();
+            if (rs != null && rs.next()) {
+                boolean hasPrivilege = rs.getBoolean(1);
+                if (!hasPrivilege) {
+                    throw new SQLException("User '" + config.getUser() + "' lacks CHANGEFEED privilege on any table in database '" + dbName + "'. " +
+                            "Grant the privilege with: GRANT CHANGEFEED ON TABLE table_name TO " + config.getUser());
+                }
+                LOGGER.debug("User has CHANGEFEED privilege on at least one table in database: {}", dbName);
+            }
+
+            // Check if user can create changefeeds (basic test)
+            stmt.execute("SELECT 1 WHERE EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' LIMIT 1)");
+            rs = stmt.getResultSet();
+            if (rs != null && !rs.next()) {
+                throw new SQLException("No accessible tables found in database '" + dbName + "'. " +
+                        "Ensure the user has SELECT privilege on at least one table.");
+            }
+
+        }
+        catch (SQLException e) {
+            LOGGER.error("Permission check failed: {}", e.getMessage());
+            throw e;
         }
     }
 
