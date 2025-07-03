@@ -34,7 +34,7 @@ cleanup_containers() {
     
     # Stop and remove containers using docker-compose
 print_status "Stopping docker-compose services..."
-docker-compose -f scripts/docker-compose.yml down -v 2>/dev/null || true
+docker-compose -f src/test/scripts/docker-compose.yml down -v 2>/dev/null || true
     
     # Remove any remaining containers with our project name
     print_status "Removing containers with project label..."

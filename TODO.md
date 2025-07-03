@@ -2,7 +2,7 @@
 
 ## 🎯 Current Status: INCUBATING
 
-The connector is now **incubating** with production-grade implementation complete. This document tracks the roadmap for future enhancements and eventual graduation to production readiness.
+The connector is now **incubating** with core implementation complete. This document tracks the roadmap for future enhancements and eventual graduation to production readiness.
 
 ### ✅ Completed Features
 
@@ -15,7 +15,7 @@ The connector is now **incubating** with production-grade implementation complet
 - [x] Permission validation
 - [x] End-to-end testing framework
 - [x] Documentation and examples
-- [x] **Production-grade connector implementation**
+- [x] **Core connector implementation**
 - [x] **Full Debezium coordinator pattern**
 - [x] **Configurable defaults (no hardcoded values)**
 - [x] **Schema evolution support**
@@ -24,6 +24,7 @@ The connector is now **incubating** with production-grade implementation complet
 - [x] **Event deduplication**
 - [x] **Graceful shutdown**
 - [x] **Comprehensive error handling**
+- [x] **Integration tests documented in main README** (both automated and manual)
 
 ### 🚧 Phase 1: Incubation Hardening (✅ COMPLETED)
 
@@ -149,13 +150,12 @@ The connector is now **incubating** with production-grade implementation complet
 
 ### 📚 Resources
 
-- [CockroachDB Changefeed Documentation](https://www.cockroachlabs.com/docs/stable/create-changefeed)
-- [Debezium Connector Development Guide](https://debezium.io/documentation/reference/development/connectors.html)
+- [CockroachDB Changefeed Documentation](https://www.cockroachlabs.com/docs/v25.2/create-and-configure-changefeeds)
 - [Kafka Connect Framework](https://kafka.apache.org/documentation/#connect)
 - [Debezium Architecture](https://debezium.io/documentation/reference/architecture.html)
 
 ### 🤝 Contributing
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+We welcome contributions! Please see [CONTRIBUTING.md](https://github.com/debezium/debezium/blob/main/CONTRIBUTE.md) for guidelines.
 
-**Note**: This connector is currently incubating with production-grade implementation complete. For production use, ensure proper testing and validation in your environment. 
+**Note**: This connector is currently incubating with core implementation complete. For production use, ensure proper testing and validation in your environment. 

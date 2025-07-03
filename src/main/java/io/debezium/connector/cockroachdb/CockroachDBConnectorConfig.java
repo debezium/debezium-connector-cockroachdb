@@ -234,24 +234,15 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDisplayName("Changefeed enriched properties")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 4))
-            .withDefault("source")
-            .withWidth(Width.MEDIUM)
+            .withDefault("source,schema")
+            .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withDescription("Comma-separated list of properties to include in enriched envelope: 'source', 'schema', 'mvcc'.");
-
-    public static final Field CHANGEFEED_TOPIC_PREFIX = Field.create("cockroachdb.changefeed.topic.prefix")
-            .withDisplayName("Changefeed topic prefix")
-            .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 5))
-            .withDefault("")
-            .withWidth(Width.MEDIUM)
-            .withImportance(Importance.LOW)
-            .withDescription("Optional prefix for changefeed topic names.");
 
     public static final Field CHANGEFEED_CURSOR = Field.create("cockroachdb.changefeed.cursor")
             .withDisplayName("Changefeed cursor")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 6))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 5))
             .withDefault("now")
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.HIGH)
@@ -260,7 +251,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_BATCH_SIZE = Field.create("cockroachdb.changefeed.batch.size")
             .withDisplayName("Changefeed batch size")
             .withType(Type.INT)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 7))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 5))
             .withDefault(1000)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
@@ -269,7 +260,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_POLL_INTERVAL = Field.create("cockroachdb.changefeed.poll.interval.ms")
             .withDisplayName("Changefeed poll interval (ms)")
             .withType(Type.LONG)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 8))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 6))
             .withDefault(100L)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
@@ -279,7 +270,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_SINK_TYPE = Field.create("cockroachdb.changefeed.sink.type")
             .withDisplayName("Changefeed sink type")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 9))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 7))
             .withDefault("kafka")
             .withWidth(Width.SHORT)
             .withImportance(Importance.HIGH)
@@ -288,7 +279,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_SINK_URI = Field.create("cockroachdb.changefeed.sink.uri")
             .withDisplayName("Changefeed sink URI")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 10))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 8))
             .withDefault("kafka://kafka-test:9092")
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
@@ -301,16 +292,18 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_SINK_TOPIC_PREFIX = Field.create("cockroachdb.changefeed.sink.topic.prefix")
             .withDisplayName("Changefeed sink topic prefix")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 11))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 9))
             .withDefault("")
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
-            .withDescription("Optional prefix for sink topic names. If not specified, the database server name is used.");
+            .withDescription("Prefix for changefeed topic names. Used to create topics in format: prefix.database.schema.table. " +
+                    "For multi-tenant deployments, consider using a unique prefix per tenant. " +
+                    "If not specified, defaults to 'cockroachdb'.");
 
     public static final Field CHANGEFEED_SINK_OPTIONS = Field.create("cockroachdb.changefeed.sink.options")
             .withDisplayName("Changefeed sink options")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 12))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 10))
             .withWidth(Width.LONG)
             .withImportance(Importance.LOW)
             .withDescription("Additional options for the sink in key=value format, comma-separated. "
@@ -347,11 +340,11 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field SCHEMA_NAME = Field.create("cockroachdb.schema.name")
             .withDisplayName("Schema name")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR, 1))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 11))
             .withDefault("public")
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
-            .withDescription("The schema name to monitor for changes. Defaults to 'public' schema.");
+            .withDescription("The schema name to use for changefeed operations.");
 
     private static final ConfigDefinition CONFIG_DEFINITION = RelationalDatabaseConnectorConfig.CONFIG_DEFINITION.edit()
             .name("CockroachDB")
@@ -387,7 +380,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     CHANGEFEED_INCLUDE_UPDATED,
                     CHANGEFEED_INCLUDE_DIFF,
                     CHANGEFEED_ENRICHED_PROPERTIES,
-                    CHANGEFEED_TOPIC_PREFIX,
                     CHANGEFEED_CURSOR,
                     CHANGEFEED_BATCH_SIZE,
                     CHANGEFEED_POLL_INTERVAL,
@@ -882,10 +874,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public String getChangefeedEnrichedProperties() {
         return config.getString(CHANGEFEED_ENRICHED_PROPERTIES);
-    }
-
-    public String getChangefeedTopicPrefix() {
-        return config.getString(CHANGEFEED_TOPIC_PREFIX);
     }
 
     public String getChangefeedCursor() {

@@ -45,6 +45,11 @@ out/
 
 # Local documentation (not for public repo)
 ARCHITECTURE_RESEARCH.md
+ARCHITECTURE.md
+PARAMETERIZATION_GUIDE.md
+SINK_AGNOSTIC_DESIGN.md
+VISUAL_DESIGN_GUIDE.md
+ARCHITECTURE_SUMMARY.md
 
 # Built plugin directory (contains JARs)
 /plugin/

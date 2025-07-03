@@ -56,23 +56,8 @@ public class CockroachDBConnectorTask extends SourceTask {
         final Configuration config = Configuration.from(props);
         final CockroachDBConnectorConfig connectorConfig = new CockroachDBConnectorConfig(config);
 
-        // Log configuration in a readable multi-line format
-        LOGGER.info("Starting CockroachDB connector task with configuration:");
-        LOGGER.info("  Database Host: {}", connectorConfig.getHostname());
-        LOGGER.info("  Database Port: {}", connectorConfig.getPort());
-        LOGGER.info("  Database Name: {}", connectorConfig.getDatabaseName());
-        LOGGER.info("  Database User: {}", connectorConfig.getUser());
-        LOGGER.info("  Changefeed Envelope: {}", connectorConfig.getChangefeedEnvelope());
-        LOGGER.info("  Changefeed Enriched Properties: {}", connectorConfig.getChangefeedEnrichedProperties());
-        LOGGER.info("  Changefeed Include Updated: {}", connectorConfig.isChangefeedIncludeUpdated());
-        LOGGER.info("  Changefeed Include Diff: {}", connectorConfig.isChangefeedIncludeDiff());
-        LOGGER.info("  Changefeed Resolved Interval: {}", connectorConfig.getChangefeedResolvedInterval());
-        LOGGER.info("  Changefeed Poll Interval: {}ms", connectorConfig.getChangefeedPollIntervalMs());
-        LOGGER.info("  Connection Max Retries: {}", connectorConfig.getConnectionMaxRetries());
-        LOGGER.info("  Connection Retry Delay: {}ms", connectorConfig.getConnectionRetryDelayMs());
-        LOGGER.info("  Connection Timeout: {}ms", connectorConfig.getConnectionTimeoutMs());
-        LOGGER.info("  SSL Mode: {}", connectorConfig.getSslMode());
-        LOGGER.info("  TCP Keep Alive: {}", connectorConfig.isTcpKeepAlive());
+        // Log configuration with masked passwords like other connectors
+        LOGGER.info("Starting CockroachDB connector task with configuration: {}", config.withMaskedPasswords());
 
         // Topic naming strategy and schema name adjuster
         final TopicNamingStrategy<TableId> topicNamingStrategy = new TopicNamingStrategy<TableId>() {
@@ -106,11 +91,19 @@ public class CockroachDBConnectorTask extends SourceTask {
                 // No configuration needed for this simple implementation
             }
         };
-        final SchemaNameAdjuster schemaNameAdjuster = connectorConfig.schemaNameAdjuster();
 
-        // Schema and task context
+        // Initialize schema
         this.schema = new CockroachDBSchema(connectorConfig, topicNamingStrategy);
-        this.schema.initialize(connectorConfig);
+
+        try {
+            this.schema.initialize(connectorConfig);
+        }
+        catch (Exception e) {
+            LOGGER.error("Failed to initialize schema - connector will fail to start", e);
+            throw new RuntimeException("Failed to initialize schema", e);
+        }
+
+        // Initialize task context
         this.taskContext = new CockroachDBTaskContext(connectorConfig, schema, topicNamingStrategy);
 
         // Initialize partition and offset context
@@ -130,7 +123,9 @@ public class CockroachDBConnectorTask extends SourceTask {
                 executeStreaming(connectorConfig);
             }
             catch (Exception e) {
-                LOGGER.error("Error in streaming thread", e);
+                LOGGER.error("Error in streaming thread - connector will fail", e);
+                // Mark the task as failed
+                running = false;
             }
         });
         streamingThread.setName("cockroachdb-streaming");

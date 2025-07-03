@@ -27,7 +27,7 @@
     "connection.max.retries": "${CONNECTION_MAX_RETRIES:-3}",
     "key.converter": "${KEY_CONVERTER:-org.apache.kafka.connect.json.JsonConverter}",
     "value.converter": "${VALUE_CONVERTER:-org.apache.kafka.connect.json.JsonConverter}",
-    "key.converter.schemas.enable": "${KEY_CONVERTER_SCHEMAS_ENABLE:-false}",
-    "value.converter.schemas.enable": "${VALUE_CONVERTER_SCHEMAS_ENABLE:-false}"
+    "key.converter.schemas.enable": "false",
+    "value.converter.schemas.enable": "false"
   }
 } 

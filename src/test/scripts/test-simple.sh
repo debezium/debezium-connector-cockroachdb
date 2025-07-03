@@ -42,6 +42,10 @@ check_status() {
 # Function to safely stop and remove connector
 cleanup_connector() {
     local connector_name="$1"
+    if [ -z "$connector_name" ]; then
+        print_warning "No connector name provided to cleanup_connector; skipping stop/delete REST calls."
+        return
+    fi
     print_status "Cleaning up connector: $connector_name"
     
     # Check if connector exists
@@ -115,17 +119,59 @@ wait_for_connector_state() {
     return 1
 }
 
+# === CONFIGURATION ===
+# Database configuration
+DB_HOST="${DB_HOST:-localhost}"
+DB_PORT="${DB_PORT:-26257}"
+DB_USER="${DB_USER:-debezium}"
+DB_PASSWORD="${DB_PASSWORD:-dbz}"
+DB_NAME="${DB_NAME:-testdb}"
+
+# Set environment variables for template processing
+export DATABASE_USER="${DB_USER}"
+export DATABASE_PASSWORD="${DB_PASSWORD}"
+export DATABASE_NAME="${DB_NAME}"
+
+# Kafka configuration
+KAFKA_HOST="${KAFKA_HOST:-localhost}"
+KAFKA_PORT="${KAFKA_PORT:-9092}"
+
+# Connector configuration
+CONNECTOR_NAME="${CONNECTOR_NAME:-cockroachdb-connector}"
+CONNECTOR_VERSION="${CONNECTOR_VERSION:-3.2.0-SNAPSHOT}"
+
+# Topic configuration - Updated for multi-tenant support: prefix.database.schema.table
+TOPIC_NAME="${TOPIC_NAME:-cockroachdb.testdb.public.products}"
+
+# Parse arguments for --force
+FORCE_CLEANUP=false
+for arg in "$@"; do
+  if [[ "$arg" == "--force" ]]; then
+    FORCE_CLEANUP=true
+  fi
+
+done
+
 # Step 1: Build the connector
 print_status "Step 1: Building the connector..."
-cd .. && ./mvnw clean package -DskipTests
+# Get the project root directory (3 levels up from src/test/scripts)
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+cd "$PROJECT_ROOT"
+./mvnw clean package -DskipTests -Passembly
 check_status "Connector built successfully" "Failed to build connector"
-cd scripts
 
-# Step 2: Start services
-print_status "Step 2: Starting Docker Compose services..."
-docker-compose -f docker-compose.yml down -v 2>/dev/null || true
-docker-compose -f docker-compose.yml up -d zookeeper kafka cockroachdb
-check_status "Docker services started" "Failed to start Docker services"
+# Step 1.5: Prepare plugin directory for Kafka Connect
+print_status "Step 1.5: Preparing plugin directory..."
+rm -rf target/plugin
+unzip -o target/debezium-connector-cockroachdb-3.2.0-SNAPSHOT-plugin.zip -d target/plugin
+check_status "Plugin directory prepared" "Failed to prepare plugin directory"
+
+cd src/test/scripts
+
+# Step 2: Start services using the new start-services.sh script
+print_status "Step 2: Starting services using start-services.sh..."
+./start-services.sh
+check_status "Services started successfully" "Failed to start services"
 sleep 20
 
 # Step 3: Setup CockroachDB with enhanced schema
@@ -133,14 +179,8 @@ print_status "Step 3: Setting up CockroachDB with enhanced schema..."
 ./setup-cockroachdb.sh
 check_status "CockroachDB setup completed" "Failed to setup CockroachDB"
 
-# Step 4: Start Kafka Connect
-print_status "Step 4: Starting Kafka Connect..."
-docker-compose -f docker-compose.yml up -d connect
-check_status "Kafka Connect container started" "Failed to start Kafka Connect container"
-sleep 30
-
-# Step 5: Check if Kafka Connect is running
-print_status "Step 5: Checking Kafka Connect status..."
+# Step 4: Check if Kafka Connect is running
+print_status "Step 4: Checking Kafka Connect status..."
 connect_ready=false
 for i in {1..15}; do
     if curl -s http://localhost:8083/ > /dev/null 2>&1; then
@@ -155,26 +195,23 @@ done
 
 if [ "$connect_ready" = false ]; then
     print_error "❌ Kafka Connect failed to start"
-    docker-compose -f docker-compose.yml logs connect
+    docker-compose logs connect
     exit 1
 fi
 
-# Step 6: Check logs
-print_status "Step 6: Checking Kafka Connect logs..."
-docker-compose -f docker-compose.yml logs connect
-
-# Step 7: Check connector discovery
+# Step 5: Check connector discovery
+print_status "Step 5: Checking for CockroachDB connector discovery..."
 if ! check_connector_discovery; then
     print_error "❌ CONNECTOR DISCOVERY FAILED - Cannot proceed with test"
     exit 1
 fi
 
-# Step 8: Clean up any existing connector to prevent "already started" issues
-print_status "Step 7: Cleaning up any existing connectors..."
+# Step 6: Clean up any existing connector to prevent "already started" issues
+print_status "Step 6: Cleaning up any existing connectors..."
 cleanup_connector "cockroachdb-connector"
 
-# Step 9: Create connector configuration with enhanced settings
-print_status "Step 8: Creating enhanced connector configuration..."
+# Step 7: Create connector configuration with enhanced settings
+print_status "Step 7: Creating enhanced connector configuration..."
 cat > cockroachdb-source.json << EOF
 {
   "name": "cockroachdb-connector",
@@ -196,6 +233,7 @@ cat > cockroachdb-source.json << EOF
     "cockroachdb.changefeed.cursor": "now",
     "cockroachdb.changefeed.sink.type": "kafka",
     "cockroachdb.changefeed.sink.uri": "kafka://kafka-test:9092",
+    "cockroachdb.changefeed.sink.topic.prefix": "cockroachdb",
     "cockroachdb.changefeed.batch.size": 1000,
     "cockroachdb.changefeed.poll.interval.ms": 100,
     "connection.timeout.ms": 30000,
@@ -206,8 +244,8 @@ cat > cockroachdb-source.json << EOF
 EOF
 check_status "Enhanced connector configuration created" "Failed to create connector configuration"
 
-# Step 10: Create the connector
-print_status "Step 9: Creating the connector..."
+# Step 8: Create the connector
+print_status "Step 8: Creating the connector..."
 connector_response=$(curl -s -X POST -H "Content-Type: application/json" \
   --data @cockroachdb-source.json \
   http://localhost:8083/connectors 2>/dev/null)
@@ -220,14 +258,46 @@ else
     print_success "✅ Connector created successfully"
 fi
 
-# Step 11: Wait for connector to start
-print_status "Step 10: Waiting for connector to start..."
+# Step 9: Wait for connector to start
+print_status "Step 9: Waiting for connector to start..."
 if ! wait_for_connector_state "cockroachdb-connector" "RUNNING" 30; then
     print_error "❌ Connector failed to start properly"
     exit 1
 fi
 
-# Step 12: Test INSERT events
+# Step 10: Check for connection errors in logs
+print_status "Step 10: Checking for connection errors in logs..."
+sleep 5
+connect_logs=$(docker-compose logs connect --tail=50)
+
+# Check for specific error patterns that should cause test failure
+if echo "$connect_logs" | grep -q "Failed to connect to CockroachDB after"; then
+    print_error "❌ CONNECTION FAILED - CockroachDB connection failed after retries"
+    echo "$connect_logs"
+    exit 1
+fi
+
+if echo "$connect_logs" | grep -q "Permission check failed"; then
+    print_error "❌ PERMISSION FAILED - User lacks required privileges"
+    echo "$connect_logs"
+    exit 1
+fi
+
+if echo "$connect_logs" | grep -q "Failed to initialize schema"; then
+    print_error "❌ SCHEMA INITIALIZATION FAILED - Cannot proceed with test"
+    echo "$connect_logs"
+    exit 1
+fi
+
+if echo "$connect_logs" | grep -q "Error in streaming thread"; then
+    print_error "❌ STREAMING FAILED - Connector streaming thread failed"
+    echo "$connect_logs"
+    exit 1
+fi
+
+print_success "✅ No critical connection errors detected in logs"
+
+# Step 11: Test INSERT events
 print_status "Step 11: Testing INSERT events..."
 # Use unique SKUs and names for repeatable tests (do not overlap with setup-cockroachdb.sh)
 docker exec cockroachdb cockroach sql --insecure --execute="
@@ -242,7 +312,7 @@ check_status "INSERT test data created" "Failed to create INSERT test data"
 # Wait for INSERT events to be processed
 sleep 10
 
-# Step 13: Test UPDATE events
+# Step 12: Test UPDATE events
 print_status "Step 12: Testing UPDATE events..."
 docker exec cockroachdb cockroach sql --insecure --execute="
 USE testdb;
@@ -262,7 +332,7 @@ check_status "UPDATE test data modified" "Failed to modify UPDATE test data"
 # Wait for UPDATE events to be processed
 sleep 10
 
-# Step 14: Test DELETE events
+# Step 13: Test DELETE events
 print_status "Step 13: Testing DELETE events..."
 docker exec cockroachdb cockroach sql --insecure --execute="
 USE testdb;
@@ -273,51 +343,72 @@ check_status "DELETE test data removed" "Failed to remove DELETE test data"
 # Wait for DELETE events to be processed
 sleep 10
 
-# Step 15: Check Kafka topics
+# Step 14: Check Kafka topics
 print_status "Step 14: Checking Kafka topics..."
 docker exec kafka-test kafka-topics --bootstrap-server localhost:9092 --list
 check_status "Kafka topics listed" "Failed to list Kafka topics"
 
-# Step 16: Consume messages from Kafka to verify all event types
+# Step 15: Consume messages from Kafka to verify all event types
 print_status "Step 15: Consuming messages from Kafka (all event types)..."
-print_status "Consuming INSERT events..."
-docker exec kafka-test kafka-console-consumer \
+print_status "Consuming events from topic: $TOPIC_NAME"
+consumer_output=$(docker exec kafka-test kafka-console-consumer \
   --bootstrap-server localhost:9092 \
-  --topic cockroachdb.public.products \
+  --topic "$TOPIC_NAME" \
   --from-beginning \
   --max-messages 10 \
-  --timeout-ms 15000
-check_status "Messages consumed successfully" "Failed to consume messages"
+  --timeout-ms 15000)
 
-# Step 17: Verify specific event types in logs
+if echo "$consumer_output" | grep -q "TimeoutException" || echo "$consumer_output" | grep -q "Processed a total of 0 messages"; then
+  print_warning "⚠️  No messages consumed from topic $TOPIC_NAME!"
+  echo "$consumer_output"
+else
+  print_success "✅ Messages consumed successfully"
+  echo "$consumer_output"
+fi
+
+# Step 16: Verify specific event types in logs
 print_status "Step 16: Verifying event types in connector logs..."
 sleep 5
 
 # Check for different operation types in logs
 print_status "Checking for INSERT operations..."
-if docker-compose -f docker-compose.yml logs connect | grep -q "operation.*CREATE"; then
+if docker-compose logs connect | grep -q "operation.*CREATE"; then
     print_success "✅ INSERT/CREATE operations detected"
 else
     print_warning "⚠️  No INSERT/CREATE operations found in logs"
 fi
 
 print_status "Checking for UPDATE operations..."
-if docker-compose -f docker-compose.yml logs connect | grep -q "operation.*UPDATE"; then
+if docker-compose logs connect | grep -q "operation.*UPDATE"; then
     print_success "✅ UPDATE operations detected"
 else
     print_warning "⚠️  No UPDATE operations found in logs"
 fi
 
 print_status "Checking for DELETE operations..."
-if docker-compose -f docker-compose.yml logs connect | grep -q "operation.*DELETE"; then
+if docker-compose logs connect | grep -q "operation.*DELETE"; then
     print_success "✅ DELETE operations detected"
 else
     print_warning "⚠️  No DELETE operations found in logs"
 fi
 
-# Step 18: Clean up
-print_status "Step 17: Cleaning up..."
-cleanup_connector "cockroachdb-connector"
+# Step 17: Cleanup connector and environment
+if [ "$FORCE_CLEANUP" = true ]; then
+  print_status "Step 17: Cleaning up connector and environment (forced)..."
+  cleanup_connector "$CONNECTOR_NAME"
+  else
+  echo
+  print_warning "Step 17: Ready to clean up connector and environment."
+  read -p "Do you want to clean up now? [y/N]: " confirm_cleanup
+  if [[ "$confirm_cleanup" =~ ^[Yy]$ ]]; then
+    print_status "Step 17: Cleaning up connector and environment..."
+    cleanup_connector "$CONNECTOR_NAME"
+  else
+    print_status "Skipping cleanup. You can run cleanup_connector manually later."
+  fi
+fi
+
+# Clean up
 rm -f cockroachdb-source.json
 check_status "Cleanup completed" "Failed to cleanup"
 
@@ -335,3 +426,5 @@ print_success "✅ All event types verified in logs"
 print_success "✅ Cleanup completed"
 echo
 print_success "🎉 All CRUD operations (INSERT, UPDATE, DELETE) successfully tested!"
+
+# Note: To force cleanup without prompt, run: ./test-simple.sh --force

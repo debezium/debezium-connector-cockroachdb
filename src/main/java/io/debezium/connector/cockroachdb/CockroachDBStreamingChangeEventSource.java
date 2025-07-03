@@ -141,34 +141,17 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                                 CockroachDBOffsetContext offsetContext,
                                                 ChangeEventSourceContext context)
             throws SQLException, InterruptedException {
+        // Create changefeed for the table
+        String changefeedQuery = buildSinkChangefeedQuery(table, offsetContext.getCursor());
+        LOGGER.info("Creating sink changefeed for table {}: {}", table, changefeedQuery);
 
-        // Get the cursor position to resume from
-        String cursor = offsetContext.getCursor();
-        if (cursor == null) {
-            cursor = config.getChangefeedCursor(); // Use configured default cursor
-            LOGGER.debug("No cursor found, starting changefeed from configured cursor '{}' for table {}", cursor, table);
+        try (Statement stmt = connection.connection().createStatement()) {
+            stmt.execute(changefeedQuery);
+            LOGGER.info("Successfully created changefeed for table {}", table);
         }
-        else {
-            LOGGER.debug("Resuming changefeed from cursor {} for table {}", cursor, table);
-        }
-
-        // Check if changefeed already exists for this table
-        if (changefeedExists(connection, table)) {
-            LOGGER.info("Changefeed already exists for table {}, skipping creation", table);
-        }
-        else {
-            // Build the sink changefeed query
-            String changefeedQuery = buildSinkChangefeedQuery(table, cursor);
-            LOGGER.info("Creating sink changefeed for table {}: {}", table, changefeedQuery);
-
-            try (Statement stmt = connection.connection().createStatement()) {
-                stmt.execute(changefeedQuery);
-                LOGGER.info("Successfully created changefeed for table {}", table);
-            }
-            catch (SQLException e) {
-                LOGGER.error("Failed to create changefeed for table {}: {}", table, e.getMessage(), e);
-                throw e;
-            }
+        catch (SQLException e) {
+            LOGGER.error("Failed to create changefeed for table {}: {}", table, e.getMessage(), e);
+            throw e;
         }
 
         // Consume events from the Kafka topic
@@ -207,7 +190,15 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * 4. Implement webhook authentication if required
      */
     private void consumeFromKafkaTopic(TableId table, CockroachDBOffsetContext offsetContext, ChangeEventSourceContext context) throws InterruptedException {
-        String topicName = table.table(); // The changefeed writes to a topic named after the table
+        // Use the same topic naming logic as buildSinkChangefeedQuery for consistency
+        String topicPrefix = config.getChangefeedSinkTopicPrefix();
+        if (topicPrefix == null || topicPrefix.trim().isEmpty()) {
+            topicPrefix = "cockroachdb";
+        }
+
+        // Include database name in topic for multi-tenant support: prefix.database.schema.table
+        String databaseName = config.getDatabaseName();
+        String topicName = topicPrefix + "." + databaseName + "." + table.schema() + "." + table.table();
 
         // Configure Kafka consumer
         java.util.Properties props = new java.util.Properties();
@@ -511,8 +502,27 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         StringBuilder query = new StringBuilder();
         query.append("CREATE CHANGEFEED FOR TABLE ").append(table.toString());
 
-        // Use configurable sink URI (now has default value)
+        // Use configurable sink URI with proper topic naming for multi-tenant support
         String sinkUri = config.getChangefeedSinkUri();
+
+        // Build topic name using configurable prefix and include database name for multi-tenant support
+        String topicPrefix = config.getChangefeedSinkTopicPrefix();
+        if (topicPrefix == null || topicPrefix.trim().isEmpty()) {
+            topicPrefix = "cockroachdb";
+        }
+
+        // Include database name in topic for multi-tenant support: prefix.database.schema.table
+        String databaseName = config.getDatabaseName();
+        String topicName = topicPrefix + "." + databaseName + "." + table.schema() + "." + table.table();
+
+        // Append the topic name to the sink URI
+        if (sinkUri.contains("?")) {
+            sinkUri += "&topic_name=" + topicName;
+        }
+        else {
+            sinkUri += "?topic_name=" + topicName;
+        }
+
         query.append(" INTO '").append(sinkUri).append("'");
 
         // Use configurable envelope type (now has default value)

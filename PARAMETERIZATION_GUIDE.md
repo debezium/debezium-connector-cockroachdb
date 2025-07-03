@@ -44,8 +44,30 @@ The following environment variables can be used to customize the connector:
 | `KAFKA_PORT` | `9092` | Kafka port |
 
 #### **Configuration Templates**
-- **Template**: `scripts/configs/cockroachdb-source-template.json`
-- **Processor**: `scripts/process-config-template.sh`
+- **Template**: `src/test/scripts/configs/cockroachdb-source-template.json`
+- **Processor**: `src/test/scripts/process-config-template.sh`
+
+### Changefeed Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `cockroachdb.changefeed.envelope` | `enriched` | Changefeed envelope type (enriched, key_only, row) |
+| `cockroachdb.changefeed.enriched.properties` | `source,schema` | Properties to include in enriched envelope |
+| `cockroachdb.changefeed.include.updated` | `true` | Include updated column information |
+| `cockroachdb.changefeed.include.diff` | `true` | Include diff information for updates |
+| `cockroachdb.changefeed.resolved.interval` | `10s` | Resolved timestamp interval |
+| `cockroachdb.changefeed.cursor` | `now` | Starting cursor position |
+| `cockroachdb.changefeed.batch.size` | `1000` | Batch size for changefeed processing |
+| `cockroachdb.changefeed.poll.interval.ms` | `100` | Polling interval in milliseconds |
+
+### Sink Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `cockroachdb.changefeed.sink.type` | `kafka` | Sink type (kafka, webhook, etc.) |
+| `cockroachdb.changefeed.sink.uri` | `kafka://localhost:9092` | Sink URI for changefeed output |
+| `cockroachdb.changefeed.sink.topic.prefix` | `` | Topic prefix for sink output |
+| `cockroachdb.changefeed.sink.options` | `` | Additional sink options |
 
 ## 🚀 **How to Use Parameterization**
 
@@ -58,7 +80,7 @@ export TABLE_NAME=orders
 export DATABASE_NAME=production_db
 
 # Process template to generate configuration
-cd scripts
+cd src/test/scripts
 ./process-config-template.sh configs/cockroachdb-source-template.json configs/cockroachdb-production.json
 ```
 
@@ -93,7 +115,7 @@ services:
       - DATABASE_NAME=testdb
       - DATABASE_USER=debezium
     volumes:
-      - ./scripts/configs:/kafka/config
+      - ./src/test/scripts/configs:/kafka/config
 ```
 
 ## 📋 **Remaining Hardcoded Values (Future Phases)**
@@ -113,12 +135,12 @@ services:
 ### **Configuration Template Processor**
 ```bash
 # Usage
-./scripts/process-config-template.sh <template_file> <output_file>
+./src/test/scripts/process-config-template.sh <template_file> <output_file>
 
 # Example
-./scripts/process-config-template.sh \
-  scripts/configs/cockroachdb-source-template.json \
-  scripts/configs/cockroachdb-production.json
+./src/test/scripts/process-config-template.sh \
+  src/test/scripts/configs/cockroachdb-source-template.json \
+  src/test/scripts/configs/cockroachdb-production.json
 ```
 
 ### **Environment Variable Examples**
@@ -154,12 +176,12 @@ export DATABASE_NAME=test_db
 ```bash
 # Test with custom schema
 SCHEMA_NAME=custom_schema TABLE_NAME=orders \
-  ./scripts/process-config-template.sh \
-  scripts/configs/cockroachdb-source-template.json \
-  scripts/configs/cockroachdb-custom.json
+  ./src/test/scripts/process-config-template.sh \
+  src/test/scripts/configs/cockroachdb-source-template.json \
+  src/test/scripts/configs/cockroachdb-custom.json
 
 # Verify the generated configuration
-cat scripts/configs/cockroachdb-custom.json
+cat src/test/scripts/configs/cockroachdb-custom.json
 ```
 
 ### **Test with Different Environments**

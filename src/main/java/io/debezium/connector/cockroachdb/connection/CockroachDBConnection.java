@@ -218,26 +218,43 @@ public class CockroachDBConnection implements AutoCloseable {
             }
 
             // Check if user has CHANGEFEED privilege on at least one table
+            // Use SHOW GRANTS instead of information_schema as it's more reliable in CockroachDB
             String dbName = config.getDatabaseName();
-            stmt.execute("SELECT EXISTS (SELECT 1 FROM information_schema.tables t " +
-                    "JOIN information_schema.table_privileges tp ON t.table_name = tp.table_name " +
-                    "WHERE t.table_schema = '" + config.getSchemaName() + "' AND tp.privilege_type = 'CHANGEFEED' " +
-                    "AND tp.grantee = '" + config.getUser() + "' LIMIT 1)");
-            var rs = stmt.getResultSet();
-            if (rs != null && rs.next()) {
-                boolean hasPrivilege = rs.getBoolean(1);
-                if (!hasPrivilege) {
-                    throw new SQLException("User '" + config.getUser() + "' lacks CHANGEFEED privilege on any table in database '" + dbName + "'. " +
-                            "Grant the privilege with: GRANT CHANGEFEED ON TABLE table_name TO " + config.getUser());
-                }
-                LOGGER.debug("User has CHANGEFEED privilege on at least one table in database: {}", dbName);
+            String schemaName = config.getSchemaName();
+
+            // Ensure schema name is not null
+            if (schemaName == null || schemaName.trim().isEmpty()) {
+                schemaName = "public"; // Default to public schema
+                LOGGER.debug("Schema name was null or empty, using default: {}", schemaName);
             }
 
+            LOGGER.debug("Checking CHANGEFEED privileges for schema: {}", schemaName);
+            stmt.execute("SHOW GRANTS ON TABLE " + schemaName + ".*");
+            var rs = stmt.getResultSet();
+            boolean hasChangefeedPrivilege = false;
+            if (rs != null) {
+                while (rs.next()) {
+                    String grantee = rs.getString("grantee");
+                    String privilegeType = rs.getString("privilege_type");
+                    if (config.getUser().equals(grantee) && "CHANGEFEED".equals(privilegeType)) {
+                        hasChangefeedPrivilege = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!hasChangefeedPrivilege) {
+                throw new SQLException(
+                        "User '" + config.getUser() + "' lacks CHANGEFEED privilege on any table in database '" + dbName + "' schema '" + schemaName + "'. " +
+                                "Grant the privilege with: GRANT CHANGEFEED ON TABLE " + schemaName + ".table_name TO " + config.getUser());
+            }
+            LOGGER.debug("User has CHANGEFEED privilege on at least one table in database: {} schema: {}", dbName, schemaName);
+
             // Check if user can create changefeeds (basic test)
-            stmt.execute("SELECT 1 WHERE EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = '" + config.getSchemaName() + "' LIMIT 1)");
+            stmt.execute("SELECT 1 WHERE EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = '" + schemaName + "' LIMIT 1)");
             rs = stmt.getResultSet();
             if (rs != null && !rs.next()) {
-                throw new SQLException("No accessible tables found in database '" + dbName + "'. " +
+                throw new SQLException("No accessible tables found in database '" + dbName + "' schema '" + schemaName + "'. " +
                         "Ensure the user has SELECT privilege on at least one table.");
             }
 
