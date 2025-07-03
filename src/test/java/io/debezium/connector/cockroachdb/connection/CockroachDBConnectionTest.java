@@ -58,14 +58,37 @@ public class CockroachDBConnectionTest {
         try (MockedStatic<DriverManager> driverManagerMock = Mockito.mockStatic(DriverManager.class)) {
             Connection mockConnection = mock(Connection.class);
             Statement mockStatement = mock(Statement.class);
-            java.sql.ResultSet mockResultSet = mock(java.sql.ResultSet.class);
+
+            // Create separate ResultSet mocks for each query
+            java.sql.ResultSet grantsRs = mock(java.sql.ResultSet.class);
+            java.sql.ResultSet tableCheckRs = mock(java.sql.ResultSet.class);
 
             when(mockConnection.createStatement()).thenReturn(mockStatement);
-            when(mockStatement.execute(Mockito.anyString())).thenReturn(true);
-            when(mockStatement.getResultSet()).thenReturn(mockResultSet);
-            when(mockResultSet.next()).thenReturn(true, true, true); // For rangefeed, privilege, and table checks
-            when(mockResultSet.getString(1)).thenReturn("true"); // Rangefeed enabled
-            when(mockResultSet.getBoolean(1)).thenReturn(true); // Has privilege
+
+            // Mock SHOW GRANTS query
+            when(grantsRs.next()).thenReturn(true, true, false);
+            when(grantsRs.getString("grantee")).thenReturn("root", "root");
+            when(grantsRs.getString("privilege_type")).thenReturn("CHANGEFEED", "SELECT");
+
+            // Mock table existence check
+            when(tableCheckRs.next()).thenReturn(true, false);
+
+            // Mock execute() to handle different queries
+            when(mockStatement.execute(Mockito.anyString())).thenAnswer(invocation -> {
+                String sql = invocation.getArgument(0, String.class);
+                if (sql.contains("kv.rangefeed.enabled")) {
+                    // Throw an exception to make the code assume rangefeed is enabled
+                    throw new SQLException("VIEWCLUSTERSETTING privilege required");
+                }
+                else if (sql.contains("SHOW GRANTS")) {
+                    when(mockStatement.getResultSet()).thenReturn(grantsRs);
+                }
+                else if (sql.contains("information_schema.tables")) {
+                    when(mockStatement.getResultSet()).thenReturn(tableCheckRs);
+                }
+                return true;
+            });
+
             driverManagerMock.when(() -> DriverManager.getConnection(Mockito.anyString(), Mockito.any()))
                     .thenReturn(mockConnection);
 
@@ -113,14 +136,37 @@ public class CockroachDBConnectionTest {
         try (MockedStatic<DriverManager> driverManagerMock = Mockito.mockStatic(DriverManager.class)) {
             Connection mockConnection = mock(Connection.class);
             Statement mockStatement = mock(Statement.class);
-            java.sql.ResultSet mockResultSet = mock(java.sql.ResultSet.class);
+
+            // Create separate ResultSet mocks for each query
+            java.sql.ResultSet grantsRs = mock(java.sql.ResultSet.class);
+            java.sql.ResultSet tableCheckRs = mock(java.sql.ResultSet.class);
 
             when(mockConnection.createStatement()).thenReturn(mockStatement);
-            when(mockStatement.execute(Mockito.anyString())).thenReturn(true);
-            when(mockStatement.getResultSet()).thenReturn(mockResultSet);
-            when(mockResultSet.next()).thenReturn(true, true, true); // For rangefeed, privilege, and table checks
-            when(mockResultSet.getString(1)).thenReturn("true"); // Rangefeed enabled
-            when(mockResultSet.getBoolean(1)).thenReturn(true); // Has privilege
+
+            // Mock SHOW GRANTS query
+            when(grantsRs.next()).thenReturn(true, true, false);
+            when(grantsRs.getString("grantee")).thenReturn("root", "root");
+            when(grantsRs.getString("privilege_type")).thenReturn("CHANGEFEED", "SELECT");
+
+            // Mock table existence check
+            when(tableCheckRs.next()).thenReturn(true, false);
+
+            // Mock execute() to handle different queries
+            when(mockStatement.execute(Mockito.anyString())).thenAnswer(invocation -> {
+                String sql = invocation.getArgument(0, String.class);
+                if (sql.contains("kv.rangefeed.enabled")) {
+                    // Throw an exception to make the code assume rangefeed is enabled
+                    throw new SQLException("VIEWCLUSTERSETTING privilege required");
+                }
+                else if (sql.contains("SHOW GRANTS")) {
+                    when(mockStatement.getResultSet()).thenReturn(grantsRs);
+                }
+                else if (sql.contains("information_schema.tables")) {
+                    when(mockStatement.getResultSet()).thenReturn(tableCheckRs);
+                }
+                return true;
+            });
+
             driverManagerMock.when(() -> DriverManager.getConnection(Mockito.anyString(), Mockito.any()))
                     .thenReturn(mockConnection);
 
@@ -149,14 +195,37 @@ public class CockroachDBConnectionTest {
         try (MockedStatic<DriverManager> driverManagerMock = Mockito.mockStatic(DriverManager.class)) {
             Connection mockConnection = mock(Connection.class);
             Statement mockStatement = mock(Statement.class);
-            java.sql.ResultSet mockResultSet = mock(java.sql.ResultSet.class);
+
+            // Create separate ResultSet mocks for each query
+            java.sql.ResultSet grantsRs = mock(java.sql.ResultSet.class);
+            java.sql.ResultSet tableCheckRs = mock(java.sql.ResultSet.class);
 
             when(mockConnection.createStatement()).thenReturn(mockStatement);
-            when(mockStatement.execute(Mockito.anyString())).thenReturn(true);
-            when(mockStatement.getResultSet()).thenReturn(mockResultSet);
-            when(mockResultSet.next()).thenReturn(true, true, true); // For rangefeed, privilege, and table checks
-            when(mockResultSet.getString(1)).thenReturn("true"); // Rangefeed enabled
-            when(mockResultSet.getBoolean(1)).thenReturn(true); // Has privilege
+
+            // Mock SHOW GRANTS query
+            when(grantsRs.next()).thenReturn(true, true, false);
+            when(grantsRs.getString("grantee")).thenReturn("root", "root");
+            when(grantsRs.getString("privilege_type")).thenReturn("CHANGEFEED", "SELECT");
+
+            // Mock table existence check
+            when(tableCheckRs.next()).thenReturn(true, false);
+
+            // Mock execute() to handle different queries
+            when(mockStatement.execute(Mockito.anyString())).thenAnswer(invocation -> {
+                String sql = invocation.getArgument(0, String.class);
+                if (sql.contains("kv.rangefeed.enabled")) {
+                    // Throw an exception to make the code assume rangefeed is enabled
+                    throw new SQLException("VIEWCLUSTERSETTING privilege required");
+                }
+                else if (sql.contains("SHOW GRANTS")) {
+                    when(mockStatement.getResultSet()).thenReturn(grantsRs);
+                }
+                else if (sql.contains("information_schema.tables")) {
+                    when(mockStatement.getResultSet()).thenReturn(tableCheckRs);
+                }
+                return true;
+            });
+
             driverManagerMock.when(() -> DriverManager.getConnection(Mockito.anyString(), Mockito.any()))
                     .thenReturn(mockConnection);
 
