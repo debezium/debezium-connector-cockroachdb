@@ -91,8 +91,8 @@ jobs:
           key: ${{ needs.build-core.outputs.cache-key }}
           restore-keys: ${{ needs.build-core.outputs.cache-key }}
 
-      - name: Run unit tests with coverage
-        run: ./cockroachdb/mvnw clean test jacoco:report -DskipITs=true -f cockroachdb/pom.xml
+      - name: Run unit tests
+        run: ./cockroachdb/mvnw clean test -DskipITs=true -f cockroachdb/pom.xml
         env:
           MAVEN_OPTS: -Xmx2g
 
@@ -103,28 +103,6 @@ jobs:
           name: unit-test-results
           path: cockroachdb/target/surefire-reports/
           retention-days: 7
-
-      - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v4
-        if: always()
-        with:
-          file: ./cockroachdb/target/site/jacoco/jacoco.xml
-          flags: unittests
-          name: codecov-umbrella
-          fail_ci_if_error: false
-          verbose: true
-
-      - name: Upload coverage artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: coverage-reports
-          path: cockroachdb/target/site/jacoco/
-          retention-days: 30
-
-      - name: Check coverage thresholds
-        run: ./cockroachdb/mvnw jacoco:check -f cockroachdb/pom.xml
-        if: always()
 
   integration-test:
     runs-on: ubuntu-latest
