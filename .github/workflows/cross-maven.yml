@@ -12,11 +12,14 @@
 name: Cross Maven CI
 
 on:
-  pull_request:
-    branches:
-      - main
-      - 3.*
-      - 4.*
+  # Disabled to prevent conflicts with main maven.yml workflow
+  # Uncomment below if you need cross-repository builds
+  # pull_request:
+  #   branches:
+  #     - main
+  #     - 3.*
+  #     - 4.*
+  workflow_dispatch: # Only manual triggers
 
 jobs:
   build:
