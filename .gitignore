@@ -1,0 +1,55 @@
+# Java build
+/target/
+/out/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# VSCode
+.vscode/
+
+# MacOS
+.DS_Store
+
+# Logs
+*.log
+
+# Maven
+.settings/
+.classpath
+.project
+
+# Gradle (if any future use)
+/.gradle/
+build/
+
+# Local config
+*.local
+.env
+*.swp
+
+# Test output
+test-output/
+surefire-reports/
+failsafe-reports/
+
+# JReleaser output (if used)
+out/
+
+# Other tools
+*.orig
+*.rej
+
+# Local documentation (not for public repo)
+ARCHITECTURE_RESEARCH.md
+ARCHITECTURE.md
+PARAMETERIZATION_GUIDE.md
+SINK_AGNOSTIC_DESIGN.md
+VISUAL_DESIGN_GUIDE.md
+ARCHITECTURE_SUMMARY.md
+
+# Built plugin directory (contains JARs)
+/plugin/
