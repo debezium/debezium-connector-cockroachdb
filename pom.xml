@@ -25,15 +25,75 @@
     </scm>
 
     <properties>
+        <!-- JDK version is controlled by Debezium Parent, do not change! -->
+        <maven.compiler.source>${debezium.java.source}</maven.compiler.source>
+        <maven.compiler.target>${debezium.java.specific.target}</maven.compiler.target>
+        <maven.compiler.release>${debezium.java.specific.target}</maven.compiler.release>
+        <maven.compiler.testSource>${debezium.java.source}</maven.compiler.testSource>
+        <maven.compiler.testTarget>${debezium.java.specific.target}</maven.compiler.testTarget>
+        <maven.compiler.testRelease>${debezium.java.specific.target}</maven.compiler.testRelease>
+
         <!-- Debezium parent -->
         <version.debezium>${project.version}</version.debezium>
 
-        <docker.skip>false</docker.skip>
-        <docker.showLogs>true</docker.showLogs>
-        <docker.filter>cockroachdb/cockroach:${cockroachdb.version}</docker.filter>
-        <docker.dbs>cockroachdb/cockroach:${cockroachdb.version}</docker.dbs>
         <cockroachdb.version>v25.2.3</cockroachdb.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-core</artifactId>
+                <version>${version.debezium}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-embedded</artifactId>
+                <version>${version.debezium}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-api</artifactId>
+                <version>${version.debezium}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-storage-kafka</artifactId>
+                <version>${version.debezium}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-storage-file</artifactId>
+                <version>${version.debezium}</version>
+            </dependency>
+
+            <!-- Provided for build consistency -->
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-ide-configs</artifactId>
+                <version>${version.debezium}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-checkstyle</artifactId>
+                <version>${version.debezium}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-assembly-descriptors</artifactId>
+                <version>${project.version}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-revapi</artifactId>
+                <version>${version.debezium}</version>
+                <scope>provided</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <!-- Core Debezium APIs -->
@@ -88,7 +148,6 @@
             <artifactId>junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
-
         <dependency>
             <groupId>org.mockito</groupId>
             <artifactId>mockito-core</artifactId>
@@ -103,6 +162,38 @@
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
             <scope>test</scope>
+        </dependency>
+
+        <!-- Debezium Storage Modules -->
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-storage-kafka</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-storage-file</artifactId>
+        </dependency>
+
+        <!-- Provided for build consistency -->
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-ide-configs</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-checkstyle</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-assembly-descriptors</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-revapi</artifactId>
+            <scope>provided</scope>
         </dependency>
 
         <!-- Debezium test dependencies -->
@@ -184,64 +275,6 @@
         </testResources>
 
         <plugins>
-            <!-- Compiler Plugin -->
-            <plugin>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <configuration>
-                    <release>21</release>
-                    <compilerArgs>
-                        <arg>-Xlint:-options</arg>
-                    </compilerArgs>
-                </configuration>
-            </plugin>
-
-            <!-- Resource Plugin for version generation -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-resources-plugin</artifactId>
-                <executions>
-                    <execution>
-                        <id>filter-resources</id>
-                        <phase>validate</phase>
-                        <goals>
-                            <goal>copy-resources</goal>
-                        </goals>
-                        <configuration>
-                            <outputDirectory>${project.build.outputDirectory}</outputDirectory>
-                            <resources>
-                                <resource>
-                                    <directory>src/main/resources</directory>
-                                    <filtering>true</filtering>
-                                </resource>
-                            </resources>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-
-            <!-- Surefire for unit tests -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <configuration>
-                    <argLine>${argLine}</argLine>
-                    <includes>
-                        <include>**/*Test.java</include>
-                        <include>**/*Tests.java</include>
-                    </includes>
-                    <excludes>
-                        <exclude>**/*IT.java</exclude>
-                    </excludes>
-                    <systemPropertyVariables>
-                        <cockroachdb.host>localhost</cockroachdb.host>
-                        <cockroachdb.port>26257</cockroachdb.port>
-                        <kafka.bootstrap.servers>localhost:9092</kafka.bootstrap.servers>
-                        <kafka.advertised.listeners>localhost:29092</kafka.advertised.listeners>
-                        <zookeeper.connect>localhost:2181</zookeeper.connect>
-                    </systemPropertyVariables>
-                </configuration>
-            </plugin>
-
             <!-- Failsafe for integration test lifecycle -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -266,63 +299,6 @@
                     </execution>
                 </executions>
             </plugin>
-
-            <plugin>
-                <artifactId>maven-assembly-plugin</artifactId>
-            </plugin>
-
-            <!-- Fabric8 Docker Maven Plugin for containerized testing -->
-            <plugin>
-                <groupId>io.fabric8</groupId>
-                <artifactId>docker-maven-plugin</artifactId>
-                <configuration>
-                    <watchInterval>500</watchInterval>
-                    <logDate>default</logDate>
-                    <verbose>true</verbose>
-                    <images>
-                        <image>
-                            <name>cockroachdb/cockroach:${cockroachdb.version}</name>
-                            <run>
-                                <namingStrategy>none</namingStrategy>
-                                <env>
-                                    <COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING>true</COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING>
-                                </env>
-                                <cmd>start-single-node --insecure</cmd>
-                                <ports>
-                                    <port>26257:26257</port>
-                                    <port>8080:8080</port>
-                                </ports>
-                                <log>
-                                    <prefix>cockroachdb</prefix>
-                                    <enabled>true</enabled>
-                                    <color>blue</color>
-                                </log>
-                                <wait>
-                                    <time>60000</time>
-                                    <log>node starting</log>
-                                </wait>
-                            </run>
-                        </image>
-                    </images>
-                </configuration>
-                <executions>
-                    <execution>
-                        <id>start</id>
-                        <phase>pre-integration-test</phase>
-                        <goals>
-                            <goal>start</goal>
-                        </goals>
-                    </execution>
-                    <execution>
-                        <id>stop</id>
-                        <phase>post-integration-test</phase>
-                        <goals>
-                            <goal>stop</goal>
-                        </goals>
-                    </execution>
-                </executions>
-            </plugin>
-
         </plugins>
     </build>
 
@@ -412,7 +388,5 @@
                 </plugins>
             </build>
         </profile>
-
     </profiles>
-
 </project>
