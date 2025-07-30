@@ -126,6 +126,11 @@ public class CockroachDBErrorHandler {
     public boolean handleConnectionError(Throwable throwable, int attempt, int maxRetries, long retryDelayMs)
             throws InterruptedException {
 
+        if (throwable == null) {
+            LOGGER.warn("Null throwable provided to handleConnectionError");
+            return false; // Should not retry
+        }
+
         if (isTransientError(throwable) && attempt < maxRetries) {
             LOGGER.warn("Transient connection error (attempt {}/{}): {}. Retrying in {}ms...",
                     attempt, maxRetries, throwable.getMessage(), retryDelayMs);

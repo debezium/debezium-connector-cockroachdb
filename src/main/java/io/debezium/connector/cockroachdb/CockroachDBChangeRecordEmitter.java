@@ -31,6 +31,23 @@ public class CockroachDBChangeRecordEmitter implements ChangeRecordEmitter<Cockr
 
     public CockroachDBChangeRecordEmitter(CockroachDBPartition partition, ChangefeedSchemaParser.ParsedChange change, CockroachDBOffsetContext offsetContext, Clock clock,
                                           Envelope.Operation operation) {
+        // Add null checks for required parameters
+        if (partition == null) {
+            throw new IllegalArgumentException("Partition cannot be null");
+        }
+        if (change == null) {
+            throw new IllegalArgumentException("Change cannot be null");
+        }
+        if (offsetContext == null) {
+            throw new IllegalArgumentException("Offset context cannot be null");
+        }
+        if (clock == null) {
+            throw new IllegalArgumentException("Clock cannot be null");
+        }
+        if (operation == null) {
+            throw new IllegalArgumentException("Operation cannot be null");
+        }
+
         this.partition = partition;
         this.change = change;
         this.offsetContext = offsetContext;
@@ -55,6 +72,22 @@ public class CockroachDBChangeRecordEmitter implements ChangeRecordEmitter<Cockr
 
     @Override
     public void emitChangeRecords(DataCollectionSchema schema, ChangeRecordEmitter.Receiver<CockroachDBPartition> receiver) throws InterruptedException {
+        // Add null checks for method parameters
+        if (schema == null) {
+            throw new IllegalArgumentException("Schema cannot be null");
+        }
+        if (receiver == null) {
+            throw new IllegalArgumentException("Receiver cannot be null");
+        }
+
+        // Add null checks for change data
+        if (change.key() == null) {
+            throw new IllegalStateException("Change key cannot be null");
+        }
+        if (change.value() == null) {
+            throw new IllegalStateException("Change value cannot be null");
+        }
+
         receiver.changeRecord(partition, schema, operation, change.key(), (Struct) change.value(), offsetContext, null);
     }
 }

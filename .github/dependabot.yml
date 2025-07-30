@@ -15,6 +15,14 @@ updates:
     commit-message:
       prefix: "deps"
       include: "scope"
+    # Group minor and patch updates together
+    groups:
+      maven-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # Enable version updates for GitHub Actions
   - package-ecosystem: "github-actions"

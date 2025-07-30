@@ -9,13 +9,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.apache.kafka.connect.data.Struct;
-import org.junit.Before;
-import org.junit.Test;
-
-import io.debezium.connector.cockroachdb.serialization.ChangefeedSchemaParser.ParsedChange;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 /**
- * Unit tests for ChangefeedSchemaParser.
+ * Tests for CockroachDB changefeed schema parsing.
  *
  * @author Virag Tripathi
  */
@@ -23,9 +21,10 @@ public class ChangefeedSchemaParserTest {
 
     private ChangefeedSchemaParser parser;
 
-    @Before
+    @BeforeEach
     public void setUp() {
-        parser = new ChangefeedSchemaParser();
+        // ChangefeedSchemaParser is a utility class with static methods
+        // No instance needed
     }
 
     @Test
@@ -33,7 +32,7 @@ public class ChangefeedSchemaParserTest {
         String keyJson = "{\"id\": 1}";
         String valueJson = "{\"after\": {\"id\": 1, \"name\": \"John Doe\", \"email\": \"john@example.com\"}, \"updated\": {\"name\": \"John Doe\"}}";
 
-        ParsedChange result = parser.parse(keyJson, valueJson);
+        ChangefeedSchemaParser.ParsedChange result = ChangefeedSchemaParser.parse(keyJson, valueJson);
 
         assertThat(result).isNotNull();
         assertThat(result.keySchema()).isNotNull();
@@ -56,7 +55,7 @@ public class ChangefeedSchemaParserTest {
         String keyJson = "{\"id\": 1}";
         String valueJson = "{\"after\": {\"id\": 1, \"name\": \"Jane Doe\", \"email\": \"jane@example.com\"}, \"before\": {\"id\": 1, \"name\": \"John Doe\", \"email\": \"john@example.com\"}, \"updated\": {\"name\": \"Jane Doe\"}, \"diff\": {\"name\": {\"before\": \"John Doe\", \"after\": \"Jane Doe\"}}}";
 
-        ParsedChange result = parser.parse(keyJson, valueJson);
+        ChangefeedSchemaParser.ParsedChange result = ChangefeedSchemaParser.parse(keyJson, valueJson);
 
         assertThat(result).isNotNull();
         assertThat(result.key()).isNotNull();
@@ -74,7 +73,7 @@ public class ChangefeedSchemaParserTest {
         String keyJson = "{\"id\": 1}";
         String valueJson = "{\"before\": {\"id\": 1, \"name\": \"John Doe\", \"email\": \"john@example.com\"}}";
 
-        ParsedChange result = parser.parse(keyJson, valueJson);
+        ChangefeedSchemaParser.ParsedChange result = ChangefeedSchemaParser.parse(keyJson, valueJson);
 
         assertThat(result).isNotNull();
         assertThat(result.key()).isNotNull();
@@ -90,7 +89,7 @@ public class ChangefeedSchemaParserTest {
         String keyJson = null;
         String valueJson = "{\"resolved\": \"1640995200.0000000000\"}";
 
-        ParsedChange result = parser.parse(keyJson, valueJson);
+        ChangefeedSchemaParser.ParsedChange result = ChangefeedSchemaParser.parse(keyJson, valueJson);
 
         assertThat(result).isNotNull();
         assertThat(result.key()).isNull();
@@ -105,7 +104,7 @@ public class ChangefeedSchemaParserTest {
         String keyJson = "{\"id\": 1}";
         String valueJson = "{\"after\": {\"id\": 1, \"name\": null, \"email\": \"john@example.com\"}}";
 
-        ParsedChange result = parser.parse(keyJson, valueJson);
+        ChangefeedSchemaParser.ParsedChange result = ChangefeedSchemaParser.parse(keyJson, valueJson);
 
         assertThat(result).isNotNull();
         Struct value = (Struct) result.value();
@@ -119,7 +118,7 @@ public class ChangefeedSchemaParserTest {
         String keyJson = "{\"id\": 1}";
         String valueJson = "{\"after\": {\"id\": 1, \"address\": {\"street\": \"123 Main St\", \"city\": \"New York\"}}}";
 
-        ParsedChange result = parser.parse(keyJson, valueJson);
+        ChangefeedSchemaParser.ParsedChange result = ChangefeedSchemaParser.parse(keyJson, valueJson);
 
         assertThat(result).isNotNull();
         Struct value = (Struct) result.value();
@@ -134,7 +133,7 @@ public class ChangefeedSchemaParserTest {
         String keyJson = "{\"id\": 1}";
         String valueJson = "{\"after\": {\"id\": 1, \"tags\": [\"tag1\", \"tag2\"]}}";
 
-        ParsedChange result = parser.parse(keyJson, valueJson);
+        ChangefeedSchemaParser.ParsedChange result = ChangefeedSchemaParser.parse(keyJson, valueJson);
 
         assertThat(result).isNotNull();
         Struct value = (Struct) result.value();
@@ -149,7 +148,7 @@ public class ChangefeedSchemaParserTest {
         String keyJson = "{\"id\": 1}";
         String valueJson = "{\"after\": {\"id\": 1, \"age\": 30, \"salary\": 50000.50, \"active\": true}}";
 
-        ParsedChange result = parser.parse(keyJson, valueJson);
+        ChangefeedSchemaParser.ParsedChange result = ChangefeedSchemaParser.parse(keyJson, valueJson);
 
         assertThat(result).isNotNull();
         Struct value = (Struct) result.value();
@@ -164,7 +163,7 @@ public class ChangefeedSchemaParserTest {
         String keyJson = "{\"id\": 1}";
         String valueJson = "{\"after\": {\"id\": 1, \"name\": \"John Doe\"}"; // Missing closing brace
 
-        assertThatThrownBy(() -> parser.parse(keyJson, valueJson))
+        assertThatThrownBy(() -> ChangefeedSchemaParser.parse(keyJson, valueJson))
                 .isInstanceOf(Exception.class);
     }
 
@@ -173,7 +172,7 @@ public class ChangefeedSchemaParserTest {
         String keyJson = "{}";
         String valueJson = "{}";
 
-        ParsedChange result = parser.parse(keyJson, valueJson);
+        ChangefeedSchemaParser.ParsedChange result = ChangefeedSchemaParser.parse(keyJson, valueJson);
 
         assertThat(result).isNotNull();
         assertThat(result.key()).isNotNull();
@@ -185,7 +184,7 @@ public class ChangefeedSchemaParserTest {
         String keyJson = "{\"id\": 1}";
         String valueJson = "{\"after\": {\"id\": 1, \"name\": \"John Doe\", \"email\": \"john@example.com\", \"metadata\": {\"created_at\": \"2023-01-01T00:00:00Z\", \"version\": 1}}, \"updated\": {\"name\": \"John Doe\"}, \"diff\": {\"name\": {\"before\": null, \"after\": \"John Doe\"}}, \"resolved\": \"1640995200.0000000000\"}";
 
-        ParsedChange result = parser.parse(keyJson, valueJson);
+        ChangefeedSchemaParser.ParsedChange result = ChangefeedSchemaParser.parse(keyJson, valueJson);
 
         assertThat(result).isNotNull();
         Struct value = (Struct) result.value();

@@ -1,3 +1,9 @@
+/*
+ * Copyright Debezium Authors.
+ *
+ * Licensed under the Apache Software License version 2.0, available at http://www.apache.org/licenses/LICENSE-2.0
+ */
+
 package io.debezium.connector.cockroachdb.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -16,9 +22,16 @@ import org.testcontainers.containers.KafkaContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.utility.DockerImageName;
 
 import io.debezium.connector.cockroachdb.CockroachDBConnector;
 
+/**
+ * Integration test for CockroachDB connector connection functionality.
+ * Tests database connectivity, authentication, and connection management.
+ *
+ * @author Virag Tripathi
+ */
 @Testcontainers
 public class CockroachDBConnectionIT {
 
@@ -26,13 +39,13 @@ public class CockroachDBConnectionIT {
 
     @Container
     private static final KafkaContainer kafka = new KafkaContainer(
-            "confluentinc/cp-kafka:7.4.0")
+            DockerImageName.parse("confluentinc/cp-kafka:7.4.0"))
             .withNetwork(NETWORK)
             .withNetworkAliases("kafka");
 
     @Container
     private static final CockroachContainer cockroachdb = new CockroachContainer(
-            "cockroachdb/cockroach:v25.2.2")
+            "cockroachdb/cockroach:v25.2.3")
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 
