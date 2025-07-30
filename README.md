@@ -1,6 +1,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Maven Central](https://maven-badges.herokuapp.com/maven-central/io.debezium/debezium-connector-cockroachdb/badge.svg)](https://maven-badges.herokuapp.com/maven-central/io.debezium/debezium-connector-cockroachdb)
 [![Build Status](https://github.com/debezium/debezium-connector-cockroachdb/workflows/CI/badge.svg)](https://github.com/debezium/debezium-connector-cockroachdb/actions)
+[![Community](https://img.shields.io/badge/Community-Zulip-blue.svg)](https://debezium.zulipchat.com/#narrow/channel/510960-community-cockroachdb)
 
 Copyright Debezium Authors.
 Licensed under the [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0).
@@ -18,7 +19,7 @@ The Debezium CockroachDB connector captures row-level changes from CockroachDB d
 ## Prerequisites
 
 * CockroachDB v25.2+ with [rangefeed enabled](https://www.cockroachlabs.com/docs/v25.2/create-and-configure-changefeeds.html#enable-rangefeeds) (enriched envelope support introduced in v25.2)
-* Kafka Connect (tested with Debezium Connect 3.0.0.Final)
+* Kafka Connect
 * JDK 21+
 * Maven 3.9.8 or later
 
