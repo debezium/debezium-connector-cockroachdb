@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.debezium</groupId>
         <artifactId>debezium-parent</artifactId>
-        <version>3.2.0-SNAPSHOT</version>
+        <version>3.3.0-SNAPSHOT</version>
         <relativePath/>
     </parent>
 
@@ -25,47 +25,12 @@
     </scm>
 
     <properties>
-        <debezium.version>3.2.0-SNAPSHOT</debezium.version>
-        <kafka.version>3.6.0</kafka.version>
-        <jackson.version>2.16.2</jackson.version>
-        <junit.version>5.10.0</junit.version>
-        <testcontainers.version>1.19.3</testcontainers.version>
-        <checkstyle.version>10.12.5</checkstyle.version>
-        <impsort.version>1.8.0</impsort.version>
-        <formatter.version>0.10.0</formatter.version>
-        <version.debezium>${project.version}</version.debezium>
-        <cockroachdb.image>cockroachdb/cockroach</cockroachdb.image>
-        <cockroachdb.version>v25.2.2</cockroachdb.version>
-        <cockroachdb.port>26257</cockroachdb.port>
-        <cockroachdb.http.port>8080</cockroachdb.http.port>
-        <cockroachdb.user>root</cockroachdb.user>
-        <cockroachdb.password></cockroachdb.password>
-        <cockroachdb.database>test</cockroachdb.database>
         <docker.skip>false</docker.skip>
         <docker.showLogs>true</docker.showLogs>
-        <docker.filter>debezium/cockroachdb-server</docker.filter>
-        <docker.dbs>debezium/cockroachdb-server</docker.dbs>
+        <docker.filter>cockroachdb/cockroach:${cockroachdb.version}</docker.filter>
+        <docker.dbs>cockroachdb/cockroach:${cockroachdb.version}</docker.dbs>
+        <cockroachdb.version>v25.2.3</cockroachdb.version>
     </properties>
-
-    <dependencyManagement>
-        <dependencies>
-            <dependency>
-                <groupId>io.debezium</groupId>
-                <artifactId>debezium-core</artifactId>
-                <version>${version.debezium}</version>
-            </dependency>
-            <dependency>
-                <groupId>io.debezium</groupId>
-                <artifactId>debezium-embedded</artifactId>
-                <version>${version.debezium}</version>
-            </dependency>
-            <dependency>
-                <groupId>io.debezium</groupId>
-                <artifactId>debezium-api</artifactId>
-                <version>${version.debezium}</version>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
 
     <dependencies>
         <!-- Core Debezium APIs -->
@@ -82,6 +47,8 @@
             <artifactId>connect-api</artifactId>
             <scope>provided</scope>
         </dependency>
+
+        <!-- JSON processing -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
@@ -99,26 +66,29 @@
             <artifactId>jackson-datatype-jsr310</artifactId>
         </dependency>
 
-        <!-- Test and runtime tooling -->
+        <!-- Runtime dependencies -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
             <scope>provided</scope>
         </dependency>
+
+        <!-- PostgreSQL JDBC driver for CockroachDB connectivity -->
         <dependency>
-            <groupId>junit</groupId>
-            <artifactId>junit</artifactId>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+        </dependency>
+
+        <!-- Test dependencies -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
+
         <dependency>
             <groupId>org.mockito</groupId>
             <artifactId>mockito-core</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.mockito</groupId>
-            <artifactId>mockito-inline</artifactId>
-            <version>5.2.0</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -132,43 +102,7 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- Debezium Storage Modules -->
-        <dependency>
-            <groupId>io.debezium</groupId>
-            <artifactId>debezium-storage-kafka</artifactId>
-            <version>${version.debezium}</version>
-        </dependency>
-        <dependency>
-            <groupId>io.debezium</groupId>
-            <artifactId>debezium-storage-file</artifactId>
-            <version>${version.debezium}</version>
-        </dependency>
-        <!-- Provided for build consistency -->
-        <dependency>
-            <groupId>io.debezium</groupId>
-            <artifactId>debezium-ide-configs</artifactId>
-            <version>${version.debezium}</version>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>io.debezium</groupId>
-            <artifactId>debezium-checkstyle</artifactId>
-            <version>${version.debezium}</version>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>io.debezium</groupId>
-            <artifactId>debezium-assembly-descriptors</artifactId>
-            <version>${project.version}</version>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>io.debezium</groupId>
-            <artifactId>debezium-revapi</artifactId>
-            <version>${version.debezium}</version>
-            <scope>provided</scope>
-        </dependency>
-        <!-- Test dependencies for integration tests -->
+        <!-- Debezium test dependencies -->
         <dependency>
             <groupId>io.debezium</groupId>
             <artifactId>debezium-core</artifactId>
@@ -184,24 +118,9 @@
         <dependency>
             <groupId>io.debezium</groupId>
             <artifactId>debezium-embedded</artifactId>
-            <version>${version.debezium}</version>
             <scope>test</scope>
         </dependency>
-        <dependency>
-            <groupId>org.awaitility</groupId>
-            <artifactId>awaitility</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>io.apicurio</groupId>
-            <artifactId>apicurio-registry-utils-converter</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>io.confluent</groupId>
-            <artifactId>kafka-connect-avro-converter</artifactId>
-            <scope>test</scope>
-        </dependency>
+
         <!-- Testcontainers for integration testing -->
         <dependency>
             <groupId>org.testcontainers</groupId>
@@ -220,23 +139,24 @@
         </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
-            <artifactId>postgresql</artifactId>
+            <artifactId>cockroachdb</artifactId>
             <scope>test</scope>
         </dependency>
-        <!-- PostgreSQL JDBC driver for CockroachDB connectivity -->
+
+        <!-- Additional test dependencies -->
         <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter</artifactId>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.junit.vintage</groupId>
-            <artifactId>junit-vintage-engine</artifactId>
-            <version>5.9.1</version>
+            <groupId>io.apicurio</groupId>
+            <artifactId>apicurio-registry-utils-converter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.confluent</groupId>
+            <artifactId>kafka-connect-avro-converter</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -264,7 +184,6 @@
             <!-- Compiler Plugin -->
             <plugin>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.11.0</version>
                 <configuration>
                     <release>21</release>
                     <compilerArgs>
@@ -277,7 +196,6 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-resources-plugin</artifactId>
-                <version>3.3.1</version>
                 <executions>
                     <execution>
                         <id>filter-resources</id>
@@ -302,9 +220,22 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.1.2</version>
                 <configuration>
                     <argLine>${argLine}</argLine>
+                    <includes>
+                        <include>**/*Test.java</include>
+                        <include>**/*Tests.java</include>
+                    </includes>
+                    <excludes>
+                        <exclude>**/*IT.java</exclude>
+                    </excludes>
+                    <systemPropertyVariables>
+                        <cockroachdb.host>localhost</cockroachdb.host>
+                        <cockroachdb.port>26257</cockroachdb.port>
+                        <kafka.bootstrap.servers>localhost:9092</kafka.bootstrap.servers>
+                        <kafka.advertised.listeners>localhost:29092</kafka.advertised.listeners>
+                        <zookeeper.connect>localhost:2181</zookeeper.connect>
+                    </systemPropertyVariables>
                 </configuration>
             </plugin>
 
@@ -335,9 +266,59 @@
 
             <plugin>
                 <artifactId>maven-assembly-plugin</artifactId>
-                <version>3.6.0</version>
             </plugin>
 
+            <!-- Fabric8 Docker Maven Plugin for containerized testing -->
+            <plugin>
+                <groupId>io.fabric8</groupId>
+                <artifactId>docker-maven-plugin</artifactId>
+                <configuration>
+                    <watchInterval>500</watchInterval>
+                    <logDate>default</logDate>
+                    <verbose>true</verbose>
+                    <images>
+                        <image>
+                            <name>cockroachdb/cockroach:${cockroachdb.version}</name>
+                            <run>
+                                <namingStrategy>none</namingStrategy>
+                                <env>
+                                    <COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING>true</COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING>
+                                </env>
+                                <cmd>start-single-node --insecure</cmd>
+                                <ports>
+                                    <port>26257:26257</port>
+                                    <port>8080:8080</port>
+                                </ports>
+                                <log>
+                                    <prefix>cockroachdb</prefix>
+                                    <enabled>true</enabled>
+                                    <color>blue</color>
+                                </log>
+                                <wait>
+                                    <time>60000</time>
+                                    <log>node starting</log>
+                                </wait>
+                            </run>
+                        </image>
+                    </images>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>start</id>
+                        <phase>pre-integration-test</phase>
+                        <goals>
+                            <goal>start</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>stop</id>
+                        <phase>post-integration-test</phase>
+                        <goals>
+                            <goal>stop</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
 
         </plugins>
     </build>
@@ -428,7 +409,6 @@
                 </plugins>
             </build>
         </profile>
-
 
     </profiles>
 

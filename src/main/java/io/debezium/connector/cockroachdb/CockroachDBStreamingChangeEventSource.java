@@ -65,6 +65,20 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                                  EventDispatcher<CockroachDBPartition, TableId> dispatcher,
                                                  CockroachDBSchema schema,
                                                  Clock clock) {
+        // Add null checks for required parameters
+        if (config == null) {
+            throw new IllegalArgumentException("Config cannot be null");
+        }
+        if (dispatcher == null) {
+            throw new IllegalArgumentException("Dispatcher cannot be null");
+        }
+        if (schema == null) {
+            throw new IllegalArgumentException("Schema cannot be null");
+        }
+        if (clock == null) {
+            throw new IllegalArgumentException("Clock cannot be null");
+        }
+
         this.config = config;
         this.dispatcher = dispatcher;
         this.schema = schema;
@@ -73,6 +87,17 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     @Override
     public void execute(ChangeEventSourceContext context, CockroachDBPartition partition, CockroachDBOffsetContext offsetContext) throws InterruptedException {
+        // Add null checks for required parameters
+        if (context == null) {
+            throw new IllegalArgumentException("Context cannot be null");
+        }
+        if (partition == null) {
+            throw new IllegalArgumentException("Partition cannot be null");
+        }
+        if (offsetContext == null) {
+            throw new IllegalArgumentException("Offset context cannot be null");
+        }
+
         LOGGER.info("Starting CockroachDB streaming change event source with sink changefeed approach");
 
         running.set(true);
@@ -255,23 +280,42 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * @param offsetContext The offset context for tracking position
      */
     private void processChangefeedEventFromKafka(String valueJson, TableId table, CockroachDBOffsetContext offsetContext) {
+        // Add null checks for required parameters
+        if (valueJson == null || valueJson.trim().isEmpty()) {
+            LOGGER.warn("Received null or empty value JSON for table {}", table);
+            return;
+        }
+        if (table == null) {
+            LOGGER.warn("Received null table for value JSON: {}", valueJson);
+            return;
+        }
+        if (offsetContext == null) {
+            LOGGER.warn("Received null offset context for table {} and value: {}", table, valueJson);
+            return;
+        }
+
         try {
             // Parse the JSON value
             JsonNode jsonNode = objectMapper.readTree(valueJson);
 
             // Skip resolved timestamp messages
-            if (jsonNode.has("resolved")) {
-                LOGGER.debug("Received resolved timestamp: {}", jsonNode.get("resolved").asText());
+            if (jsonNode != null && jsonNode.has("resolved")) {
+                JsonNode resolvedNode = jsonNode.get("resolved");
+                if (resolvedNode != null) {
+                    LOGGER.debug("Received resolved timestamp: {}", resolvedNode.asText());
+                }
                 return;
             }
 
             // Create a unique identifier for this event to avoid duplicates
             String eventId = createEventId(jsonNode);
-            if (processedEvents.contains(eventId)) {
+            if (eventId != null && processedEvents.contains(eventId)) {
                 LOGGER.debug("Skipping duplicate event: {}", eventId);
                 return;
             }
-            processedEvents.add(eventId);
+            if (eventId != null) {
+                processedEvents.add(eventId);
+            }
 
             // Log the full enriched envelope with source metadata
             LOGGER.info("Received enriched envelope event for table {}: {}", table, valueJson);
@@ -287,6 +331,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             if (change != null) {
                 // Dispatch the change event through Debezium's pipeline
                 dispatchChangeEvent(table, change, offsetContext, jsonNode);
+            }
+            else {
+                LOGGER.warn("Failed to parse changefeed event for table {} with key: {}", table, keyJson);
             }
 
         }

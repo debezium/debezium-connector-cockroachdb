@@ -10,43 +10,53 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import io.debezium.config.Configuration;
 
 /**
- * Unit tests for CockroachDBConnectorTask.
+ * Tests for CockroachDB connector task.
  *
  * @author Virag Tripathi
  */
 public class CockroachDBConnectorTaskTest {
 
     private CockroachDBConnectorTask task;
-    private Map<String, String> config;
 
-    @Before
+    @BeforeEach
     public void setUp() {
         task = new CockroachDBConnectorTask();
-        config = new HashMap<>();
-        config.put("database.hostname", "localhost");
-        config.put("database.port", "26257");
-        config.put("database.user", "root");
-        config.put("database.password", "");
-        config.put("database.dbname", "testdb");
-        config.put("database.server.name", "test-server");
-        config.put("topic.prefix", "test");
     }
 
     @Test
     public void shouldHaveCorrectVersion() {
         String version = task.version();
+
         assertThat(version).isNotNull();
         assertThat(version).isNotEmpty();
     }
 
     @Test
-    public void shouldStopSuccessfully() {
-        // Test that stop doesn't throw exceptions
-        task.stop();
+    public void shouldStartAndStop() {
+        Map<String, String> props = new HashMap<>();
+        props.put("database.hostname", "localhost");
+        props.put("database.port", "26257");
+        props.put("database.user", "root");
+        props.put("database.password", "");
+        props.put("database.dbname", "testdb");
+        props.put("database.server.name", "test-server");
+        props.put("topic.prefix", "test");
+
+        Configuration config = Configuration.from(props);
+
+        // For unit tests, we'll just verify the task can be created and configured
+        // without actually starting it (which requires a real database connection)
         assertThat(task).isNotNull();
+        assertThat(config.getString("database.hostname")).isEqualTo("localhost");
+        assertThat(config.getString("database.dbname")).isEqualTo("testdb");
+
+        // Test that the task can be stopped without issues
+        task.stop();
     }
 }

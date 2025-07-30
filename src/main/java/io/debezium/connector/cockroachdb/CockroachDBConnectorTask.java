@@ -53,6 +53,11 @@ public class CockroachDBConnectorTask extends SourceTask {
 
     @Override
     public void start(Map<String, String> props) {
+        // Add null check for props
+        if (props == null) {
+            throw new IllegalArgumentException("Configuration properties cannot be null");
+        }
+
         final Configuration config = Configuration.from(props);
         final CockroachDBConnectorConfig connectorConfig = new CockroachDBConnectorConfig(config);
 
@@ -114,6 +119,9 @@ public class CockroachDBConnectorTask extends SourceTask {
         Map<String, Object> offset = context.offsetStorageReader().offset(partition.getSourcePartition());
         if (offset != null) {
             this.offsetContext = new CockroachDBOffsetContext.Loader(connectorConfig).load(offset);
+        }
+        else {
+            LOGGER.info("No existing offset found, starting from beginning");
         }
 
         // Start streaming in background thread
@@ -245,7 +253,12 @@ public class CockroachDBConnectorTask extends SourceTask {
         running = false;
 
         if (schema != null) {
-            schema.close();
+            try {
+                schema.close();
+            }
+            catch (Exception e) {
+                LOGGER.warn("Error closing schema", e);
+            }
         }
     }
 }
