@@ -12,7 +12,15 @@ A [Debezium](https://debezium.io/) connector for capturing changes from [Cockroa
 
 ## Overview
 
-The Debezium CockroachDB connector captures row-level changes from CockroachDB databases and streams them to Apache Kafka topics using Debezium's event processing pipeline. The connector leverages CockroachDB's native [changefeed mechanism](https://www.cockroachlabs.com/docs/v25.2/change-data-capture-overview) for reliable change capture.
+The Debezium CockroachDB connector processes row-level changes from CockroachDB databases that have been captured and streamed to Apache Kafka topics by CockroachDB's native [changefeed mechanism](https://www.cockroachlabs.com/docs/v25.2/change-data-capture-overview).
+
+The connector works in a two-stage process:
+
+**CockroachDB Changefeed Stage:** CockroachDB's native changefeed mechanism captures row-level changes from the database and streams them directly to configured sinks (Kafka, webhook, cloud storage, etc.) in real-time.
+
+**Debezium Processing Stage:** The Debezium connector consumes these changefeed events from Kafka topics and processes them through Debezium's event processing pipeline, converting them into standardized Debezium change events with enriched metadata.
+
+This architecture leverages CockroachDB's reliable changefeed delivery mechanism while providing the benefits of Debezium's event processing capabilities, including schema evolution, event transformation, and integration with the broader Debezium ecosystem.
 
 **Status**: This connector is currently in incubation phase and is being developed and tested.
 
