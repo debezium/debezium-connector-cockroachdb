@@ -83,7 +83,7 @@
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-assembly-descriptors</artifactId>
-                <version>${project.version}</version>
+                <version>${version.debezium}</version>
                 <scope>provided</scope>
             </dependency>
             <dependency>
