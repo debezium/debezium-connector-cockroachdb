@@ -92,6 +92,22 @@
                 <version>${version.debezium}</version>
                 <scope>provided</scope>
             </dependency>
+
+            <!-- Testing -->
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-core</artifactId>
+                <version>${version.debezium}</version>
+                <type>test-jar</type>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-embedded</artifactId>
+                <version>${version.debezium}</version>
+                <type>test-jar</type>
+                <scope>test</scope>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
