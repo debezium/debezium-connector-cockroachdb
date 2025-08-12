@@ -1,41 +1,10 @@
 version: 2
 updates:
-  # Enable version updates for Maven
-  - package-ecosystem: "maven"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-    open-pull-requests-limit: 10
-    reviewers:
-      - "debezium/connectors"
-    assignees:
-      - "debezium/connectors"
-    commit-message:
-      prefix: "deps"
-      include: "scope"
-    # Group minor and patch updates together
-    groups:
-      maven-dependencies:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
-
-  # Enable version updates for GitHub Actions
+  # Updates for GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
-      time: "09:00"
-    open-pull-requests-limit: 10
-    reviewers:
-      - "debezium/connectors"
-    assignees:
-      - "debezium/connectors"
     commit-message:
-      prefix: "ci"
-      include: "scope" 
+      prefix: "[ci] "
+
