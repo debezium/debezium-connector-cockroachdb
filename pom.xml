@@ -9,7 +9,7 @@
 
     <modelVersion>4.0.0</modelVersion>
     <artifactId>debezium-connector-cockroachdb</artifactId>
-    <version>3.3.0-SNAPSHOT</version>
+    <version>3.3.0.Alpha2</version>
     <name>Debezium Connector for CockroachDB</name>
     <packaging>jar</packaging>
     <description>A Debezium connector for CockroachDB using native changefeeds</description>
@@ -19,7 +19,7 @@
         <connection>scm:git:git@github.com:debezium/debezium-connector-cockroachdb.git</connection>
         <developerConnection>scm:git:git@github.com:debezium/debezium-connector-cockroachdb.git</developerConnection>
         <url>https://github.com/debezium/debezium-connector-cockroachdb</url>
-        <tag>HEAD</tag>
+        <tag>v3.3.0.Alpha2</tag>
     </scm>
 
     <properties>
