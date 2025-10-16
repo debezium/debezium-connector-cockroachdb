@@ -5,14 +5,11 @@
  */
 package io.debezium.connector.cockroachdb;
 
-import java.util.Collections;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.config.Configuration;
 import io.debezium.connector.common.CdcSourceTaskContext;
-import io.debezium.relational.TableId;
-import io.debezium.spi.topic.TopicNamingStrategy;
 
 /**
  * Context for CockroachDB connector task execution.
@@ -20,33 +17,18 @@ import io.debezium.spi.topic.TopicNamingStrategy;
  *
  * @author Virag Tripathi
  */
-public class CockroachDBTaskContext extends CdcSourceTaskContext {
+public class CockroachDBTaskContext extends CdcSourceTaskContext<CockroachDBConnectorConfig> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBTaskContext.class);
 
     private final CockroachDBConnectorConfig config;
-    private final CockroachDBSchema schema;
-    private final TopicNamingStrategy<TableId> topicNamingStrategy;
 
-    public CockroachDBTaskContext(
-                                  CockroachDBConnectorConfig config,
-                                  CockroachDBSchema schema,
-                                  TopicNamingStrategy<TableId> topicNamingStrategy) {
-        super(config, Collections.emptyMap(), () -> Collections.emptyList());
+    public CockroachDBTaskContext(Configuration rawConfig, CockroachDBConnectorConfig config) {
+        super(rawConfig, config, config.getCustomMetricTags());
         this.config = config;
-        this.schema = schema;
-        this.topicNamingStrategy = topicNamingStrategy;
     }
 
     public CockroachDBConnectorConfig getConfig() {
         return config;
-    }
-
-    public CockroachDBSchema getSchema() {
-        return schema;
-    }
-
-    public TopicNamingStrategy<TableId> getTopicNamingStrategy() {
-        return topicNamingStrategy;
     }
 }
