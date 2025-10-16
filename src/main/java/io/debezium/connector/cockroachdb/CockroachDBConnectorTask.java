@@ -109,7 +109,7 @@ public class CockroachDBConnectorTask extends SourceTask {
         }
 
         // Initialize task context
-        this.taskContext = new CockroachDBTaskContext(connectorConfig, schema, topicNamingStrategy);
+        this.taskContext = new CockroachDBTaskContext(config, connectorConfig);
 
         // Initialize partition and offset context
         this.partition = new CockroachDBPartition();
