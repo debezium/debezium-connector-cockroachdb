@@ -60,6 +60,8 @@ public class CockroachDBConnectorTask extends SourceTask {
 
         final Configuration config = Configuration.from(props);
         final CockroachDBConnectorConfig connectorConfig = new CockroachDBConnectorConfig(config);
+        // Initialize task context
+        this.taskContext = new CockroachDBTaskContext(config, connectorConfig);
 
         // Log configuration with masked passwords like other connectors
         LOGGER.info("Starting CockroachDB connector task with configuration: {}", config.withMaskedPasswords());
@@ -98,7 +100,7 @@ public class CockroachDBConnectorTask extends SourceTask {
         };
 
         // Initialize schema
-        this.schema = new CockroachDBSchema(connectorConfig, topicNamingStrategy);
+        this.schema = new CockroachDBSchema(taskContext, topicNamingStrategy);
 
         try {
             this.schema.initialize(connectorConfig);
@@ -107,9 +109,6 @@ public class CockroachDBConnectorTask extends SourceTask {
             LOGGER.error("Failed to initialize schema - connector will fail to start", e);
             throw new RuntimeException("Failed to initialize schema", e);
         }
-
-        // Initialize task context
-        this.taskContext = new CockroachDBTaskContext(config, connectorConfig);
 
         // Initialize partition and offset context
         this.partition = new CockroachDBPartition();
