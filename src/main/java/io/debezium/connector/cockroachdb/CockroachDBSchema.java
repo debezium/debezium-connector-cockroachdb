@@ -14,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
+import io.debezium.connector.common.CdcSourceTaskContext;
 import io.debezium.relational.CustomConverterRegistry;
 import io.debezium.relational.RelationalDatabaseSchema;
 import io.debezium.relational.TableId;
@@ -34,26 +35,25 @@ public class CockroachDBSchema extends RelationalDatabaseSchema {
 
     private List<TableId> discoveredTables = new ArrayList<>();
 
-    public CockroachDBSchema(
-                             CockroachDBConnectorConfig config,
+    public CockroachDBSchema(CdcSourceTaskContext<CockroachDBConnectorConfig> cdcSourceTaskContext,
                              TopicNamingStrategy<TableId> topicNamingStrategy) {
 
         super(
-                config,
+                cdcSourceTaskContext.getConfig(),
                 topicNamingStrategy,
-                config.getTableFilters().dataCollectionFilter(),
-                config.getColumnFilter(),
+                cdcSourceTaskContext.getConfig().getTableFilters().dataCollectionFilter(),
+                cdcSourceTaskContext.getConfig().getColumnFilter(),
                 new TableSchemaBuilder(
                         new CockroachDBValueConverterProvider(), // custom or stub
-                        config.schemaNameAdjuster(),
+                        cdcSourceTaskContext.getConfig().schemaNameAdjuster(),
                         new CustomConverterRegistry(Collections.emptyList()),
                         new CockroachDBSourceInfoStructMaker().schema(), // source struct schema
                         column -> column.name(),
                         false // multiPartitionMode
                 ),
                 false, // tableIdCaseInsensitive
-                null // KeyMapper: pass null if no custom mapping logic
-        );
+                null, // KeyMapper: pass null if no custom mapping logic,
+                cdcSourceTaskContext);
     }
 
     public void initialize(CockroachDBConnectorConfig config) {
