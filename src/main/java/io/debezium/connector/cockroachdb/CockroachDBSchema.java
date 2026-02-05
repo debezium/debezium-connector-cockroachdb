@@ -45,12 +45,13 @@ public class CockroachDBSchema extends RelationalDatabaseSchema {
                 cdcSourceTaskContext.getConfig().getColumnFilter(),
                 new TableSchemaBuilder(
                         new CockroachDBValueConverterProvider(), // custom or stub
+                        null,
                         cdcSourceTaskContext.getConfig().schemaNameAdjuster(),
                         new CustomConverterRegistry(Collections.emptyList()),
                         new CockroachDBSourceInfoStructMaker().schema(), // source struct schema
                         column -> column.name(),
-                        false // multiPartitionMode
-                ),
+                        false, // multiPartitionMode
+                        cdcSourceTaskContext.getConfig().getEventConvertingFailureHandlingMode()),
                 false, // tableIdCaseInsensitive
                 null, // KeyMapper: pass null if no custom mapping logic,
                 cdcSourceTaskContext);
