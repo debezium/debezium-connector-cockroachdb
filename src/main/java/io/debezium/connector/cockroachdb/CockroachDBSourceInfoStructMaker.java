@@ -5,6 +5,8 @@
  */
 package io.debezium.connector.cockroachdb;
 
+import java.util.Objects;
+
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
 
@@ -51,23 +53,25 @@ public class CockroachDBSourceInfoStructMaker extends AbstractSourceInfoStructMa
         this.schema = commonSchemaBuilder()
                 .name("io.debezium.connector.cockroachdb.Source")
                 // Note: "db" and "ts_ns" fields are already included by commonSchemaBuilder()
-                .field(FIELD_CLUSTER, Schema.STRING_SCHEMA) // CockroachDB cluster name
-                .field(FIELD_RESOLVED_TS, Schema.STRING_SCHEMA) // Resolved timestamp for consistency
+                .field(FIELD_CLUSTER, Schema.OPTIONAL_STRING_SCHEMA) // CockroachDB cluster name
+                .field(FIELD_RESOLVED_TS, Schema.OPTIONAL_STRING_SCHEMA) // Resolved timestamp for consistency
                 .field(FIELD_HLC, Schema.OPTIONAL_STRING_SCHEMA) // Hybrid Logical Clock timestamp
                 .build();
     }
 
     @Override
     public Schema schema() {
+        if (schema == null) {
+            throw new IllegalStateException("SourceInfoStructMaker has not been initialized; call init() first");
+        }
         return schema;
     }
 
     @Override
     public Struct struct(SourceInfo sourceInfo) {
-        // Start with the common struct (includes db, ts_ms, ts_ns, snapshot, etc.)
-        Struct result = super.commonStruct(sourceInfo);
+        Objects.requireNonNull(sourceInfo, "sourceInfo must not be null");
 
-        // Add CockroachDB-specific fields
+        Struct result = super.commonStruct(sourceInfo);
         result.put(FIELD_CLUSTER, sourceInfo.cluster());
         result.put(FIELD_RESOLVED_TS, sourceInfo.resolvedTimestamp());
 

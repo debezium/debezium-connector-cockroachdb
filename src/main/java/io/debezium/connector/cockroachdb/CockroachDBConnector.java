@@ -34,8 +34,11 @@ public class CockroachDBConnector extends SourceConnector {
 
     @Override
     public void start(Map<String, String> props) {
+        if (props == null) {
+            throw new IllegalArgumentException("Configuration properties cannot be null");
+        }
         this.config = props;
-        LOGGER.info("Starting CockroachDBConnector with config: {}", props);
+        LOGGER.info("Starting CockroachDB connector");
     }
 
     @Override
@@ -45,8 +48,11 @@ public class CockroachDBConnector extends SourceConnector {
 
     @Override
     public List<Map<String, String>> taskConfigs(int maxTasks) {
-        LOGGER.info("Generating task configs for {} task(s)", maxTasks);
-        return List.of(config); // Single task for now
+        if (config == null) {
+            throw new IllegalStateException("Connector has not been started");
+        }
+        LOGGER.debug("Generating {} task config(s)", maxTasks);
+        return List.of(config);
     }
 
     @Override

@@ -9,7 +9,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.apache.kafka.connect.data.Struct;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -18,14 +17,6 @@ import org.junit.jupiter.api.Test;
  * @author Virag Tripathi
  */
 public class ChangefeedSchemaParserTest {
-
-    private ChangefeedSchemaParser parser;
-
-    @BeforeEach
-    public void setUp() {
-        // ChangefeedSchemaParser is a utility class with static methods
-        // No instance needed
-    }
 
     @Test
     public void shouldParseInsertEvent() throws Exception {
@@ -164,7 +155,7 @@ public class ChangefeedSchemaParserTest {
         String valueJson = "{\"after\": {\"id\": 1, \"name\": \"John Doe\"}"; // Missing closing brace
 
         assertThatThrownBy(() -> ChangefeedSchemaParser.parse(keyJson, valueJson))
-                .isInstanceOf(Exception.class);
+                .isInstanceOf(com.fasterxml.jackson.core.JsonProcessingException.class);
     }
 
     @Test

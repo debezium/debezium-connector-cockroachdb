@@ -14,7 +14,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.debezium.connector.cockroachdb.CockroachDBConnectorConfig;
-import io.debezium.connector.cockroachdb.CockroachDBErrorHandler;
 
 /**
  * Manages JDBC connections to CockroachDB with retry logic for transient errors.
@@ -26,19 +25,26 @@ public class CockroachDBConnection implements AutoCloseable {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBConnection.class);
 
+    private static final String SERIALIZATION_FAILURE = "40001";
+    private static final String DEADLOCK_DETECTED = "40P01";
+    private static final String CONNECTION_FAILURE = "08000";
+    private static final String CONNECTION_DOES_NOT_EXIST = "08003";
+    private static final String CONNECTION_FAILURE_DURING_EXECUTION = "08006";
+    private static final String COMMUNICATION_LINK_FAILURE = "08S01";
+
     private final CockroachDBConnectorConfig config;
-    private final CockroachDBErrorHandler errorHandler;
     private Connection connection;
 
     public CockroachDBConnection(CockroachDBConnectorConfig config) {
         this.config = config;
-        this.errorHandler = new CockroachDBErrorHandler(config, null);
     }
 
     /**
-     * Establishes a connection to CockroachDB with retry logic.
+     * Establishes a JDBC connection to CockroachDB with linear-backoff retry logic
+     * for transient errors. Validates the connection and checks changefeed permissions
+     * before returning.
      *
-     * @throws SQLException if connection cannot be established after retries
+     * @throws SQLException if the connection cannot be established after all retries
      */
     public void connect() throws SQLException {
         String url = buildConnectionUrl();
@@ -50,32 +56,38 @@ public class CockroachDBConnection implements AutoCloseable {
 
         while (attempts < maxRetries) {
             try {
-                LOGGER.info("Attempting to connect to CockroachDB (attempt {}/{}): {}",
-                        attempts + 1, maxRetries, url);
+                LOGGER.info("Attempting to connect to CockroachDB (attempt {}/{}): {}:{}",
+                        attempts + 1, maxRetries, config.getHostname(), config.getPort());
 
                 connection = DriverManager.getConnection(url, props);
 
-                // Test the connection
                 try (var stmt = connection.createStatement()) {
                     stmt.execute("SELECT 1");
                 }
 
-                // Check permissions for changefeed operations
-                checkChangefeedPermissions();
+                if (!config.isSkipPermissionCheck()) {
+                    checkChangefeedPermissions();
+                }
+                else {
+                    LOGGER.info("Skipping changefeed permission check as configured");
+                }
 
                 LOGGER.info("Successfully connected to CockroachDB with required permissions");
                 return;
-
             }
             catch (SQLException e) {
                 lastException = e;
                 attempts++;
 
+                if (!isTransientError(e) || attempts >= maxRetries) {
+                    break;
+                }
+
                 try {
-                    long retryDelay = config.getConnectionRetryDelayMs() * attempts; // Exponential backoff
-                    if (!errorHandler.handleConnectionError(e, attempts, maxRetries, retryDelay)) {
-                        break; // Don't retry
-                    }
+                    long retryDelay = config.getConnectionRetryDelayMs() * attempts;
+                    LOGGER.warn("Transient connection error (attempt {}/{}): {}. Retrying in {}ms...",
+                            attempts, maxRetries, e.getMessage(), retryDelay);
+                    Thread.sleep(retryDelay);
                 }
                 catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
@@ -89,9 +101,10 @@ public class CockroachDBConnection implements AutoCloseable {
     }
 
     /**
-     * Builds the JDBC connection URL for CockroachDB.
+     * Builds the JDBC connection URL including SSL mode when configured.
+     * CockroachDB uses the PostgreSQL wire protocol, so the URL scheme is {@code jdbc:postgresql://}.
      *
-     * @return the connection URL
+     * @return the fully-qualified JDBC connection URL
      */
     private String buildConnectionUrl() {
         StringBuilder url = new StringBuilder();
@@ -100,9 +113,7 @@ public class CockroachDBConnection implements AutoCloseable {
         url.append(":").append(config.getPort());
         url.append("/").append(config.getDatabaseName());
 
-        // Add SSL configuration if needed
-        CockroachDBConnectorConfig.SecureConnectionMode sslMode = CockroachDBConnectorConfig.SecureConnectionMode.parse(
-                config.getSslMode());
+        CockroachDBConnectorConfig.SecureConnectionMode sslMode = parseSslMode();
         if (sslMode != CockroachDBConnectorConfig.SecureConnectionMode.DISABLED) {
             url.append("?sslmode=").append(sslMode.getValue());
         }
@@ -111,26 +122,35 @@ public class CockroachDBConnection implements AutoCloseable {
     }
 
     /**
-     * Builds connection properties for the JDBC connection.
+     * Parses the SSL mode from config, defaulting to PREFER if the value is unrecognized or null.
+     */
+    private CockroachDBConnectorConfig.SecureConnectionMode parseSslMode() {
+        CockroachDBConnectorConfig.SecureConnectionMode mode = CockroachDBConnectorConfig.SecureConnectionMode.parse(config.getSslMode());
+        return mode != null ? mode : CockroachDBConnectorConfig.SecureConnectionMode.PREFER;
+    }
+
+    /**
+     * Builds JDBC connection properties including credentials, timeouts, SSL certificates,
+     * and TCP keep-alive settings.
      *
-     * @return connection properties
+     * @return the configured connection properties
      */
     private Properties buildConnectionProperties() {
         Properties props = new Properties();
 
-        // Basic connection properties
-        props.setProperty("user", config.getUser());
+        String user = config.getUser();
+        if (user != null) {
+            props.setProperty("user", user);
+        }
         String password = config.getPassword();
         if (password != null) {
             props.setProperty("password", password);
         }
 
-        // Connection timeout
-        props.setProperty("connectTimeout", String.valueOf(config.getConnectionTimeoutMs() / 1000)); // Convert ms to seconds
+        // PostgreSQL JDBC driver expects connectTimeout in seconds
+        props.setProperty("connectTimeout", String.valueOf(config.getConnectionTimeoutMs() / 1000));
 
-        // SSL properties if configured
-        CockroachDBConnectorConfig.SecureConnectionMode sslMode = CockroachDBConnectorConfig.SecureConnectionMode.parse(
-                config.getSslMode());
+        CockroachDBConnectorConfig.SecureConnectionMode sslMode = parseSslMode();
         if (sslMode != CockroachDBConnectorConfig.SecureConnectionMode.DISABLED) {
             if (config.getSslRootCert() != null) {
                 props.setProperty("sslrootcert", config.getSslRootCert());
@@ -146,7 +166,6 @@ public class CockroachDBConnection implements AutoCloseable {
             }
         }
 
-        // TCP keep-alive
         if (config.isTcpKeepAlive()) {
             props.setProperty("tcpKeepAlive", "true");
         }
@@ -155,22 +174,23 @@ public class CockroachDBConnection implements AutoCloseable {
     }
 
     /**
-     * Gets the underlying JDBC connection.
+     * Returns the underlying JDBC connection, or {@code null} if not yet connected.
      *
-     * @return the JDBC connection
+     * @return the active JDBC connection
      */
     public Connection connection() {
         return connection;
     }
 
     /**
-     * Checks if the connection is valid.
+     * Checks whether the connection is open and responsive (with a 5-second timeout).
      *
-     * @return true if the connection is valid
+     * @return {@code true} if the connection is usable
      */
     public boolean isValid() {
         try {
-            return connection != null && !connection.isClosed() && connection.isValid(5);
+            return connection != null && !connection.isClosed()
+                    && connection.isValid(config.getConnectionValidationTimeoutSeconds());
         }
         catch (SQLException e) {
             LOGGER.debug("Error checking connection validity: {}", e.getMessage());
@@ -179,36 +199,40 @@ public class CockroachDBConnection implements AutoCloseable {
     }
 
     /**
-     * Checks if the database user has the required permissions for changefeed operations.
-     * This method performs early validation to fail fast if permissions are insufficient.
+     * Validates that the connected user has the permissions required for changefeed operations.
+     * Checks in order: (1) {@code kv.rangefeed.enabled} cluster setting, (2) CHANGEFEED privilege
+     * on at least one table, (3) existence of accessible tables in the target schema.
      *
-     * @throws SQLException if permission checks fail
+     * <p>If the user lacks VIEWCLUSTERSETTING privilege, the rangefeed check is skipped with a
+     * warning and rangefeed is assumed enabled.</p>
+     *
+     * @throws SQLException if any required permission is missing or unreachable
      */
     private void checkChangefeedPermissions() throws SQLException {
         LOGGER.debug("Checking changefeed permissions for user: {}", config.getUser());
 
         try (var stmt = connection.createStatement()) {
-            // Check if rangefeed is enabled (gracefully handle permission errors)
             boolean rangefeedEnabled = false;
             try {
                 stmt.execute("SHOW CLUSTER SETTING kv.rangefeed.enabled");
                 var rs = stmt.getResultSet();
                 if (rs != null && rs.next()) {
                     String rangefeedSetting = rs.getString(1);
-                    rangefeedEnabled = "true".equalsIgnoreCase(rangefeedSetting);
+                    rangefeedEnabled = "true".equalsIgnoreCase(rangefeedSetting) || "t".equalsIgnoreCase(rangefeedSetting);
                     LOGGER.debug("Rangefeed setting: {}", rangefeedSetting);
                 }
             }
             catch (SQLException e) {
-                if (e.getMessage().contains("VIEWCLUSTERSETTING") || e.getMessage().contains("MODIFYCLUSTERSETTING")) {
+                String msg = e.getMessage();
+                if (msg != null && (msg.contains("VIEWCLUSTERSETTING") || msg.contains("MODIFYCLUSTERSETTING"))) {
                     LOGGER.warn("Cannot check rangefeed cluster setting due to insufficient privileges. " +
                             "Assuming rangefeed is enabled. If changefeeds fail, ensure 'kv.rangefeed.enabled = true' " +
                             "and grant VIEWCLUSTERSETTING to user '{}': GRANT VIEWCLUSTERSETTING TO {}",
                             config.getUser(), config.getUser());
-                    rangefeedEnabled = true; // Assume it's enabled and proceed
+                    rangefeedEnabled = true;
                 }
                 else {
-                    throw e; // Re-throw other SQL exceptions
+                    throw e;
                 }
             }
 
@@ -217,26 +241,26 @@ public class CockroachDBConnection implements AutoCloseable {
                         "in your CockroachDB cluster configuration. This is required for changefeeds to work.");
             }
 
-            // Check if user has CHANGEFEED privilege on at least one table
-            // Use SHOW GRANTS instead of information_schema as it's more reliable in CockroachDB
             String dbName = config.getDatabaseName();
             String schemaName = config.getSchemaName();
-
-            // Ensure schema name is not null
             if (schemaName == null || schemaName.trim().isEmpty()) {
-                schemaName = "public"; // Default to public schema
-                LOGGER.debug("Schema name was null or empty, using default: {}", schemaName);
+                schemaName = "public";
+                LOGGER.debug("Schema name was null or empty, defaulting to: {}", schemaName);
             }
 
-            LOGGER.debug("Checking CHANGEFEED privileges for schema: {}", schemaName);
-            stmt.execute("SHOW GRANTS ON TABLE " + schemaName + ".*");
+            // Sanitize to prevent SQL injection -- identifiers allow only [a-zA-Z0-9_]
+            String safeSchema = sanitizeIdentifier(schemaName);
+
+            // SHOW GRANTS is more reliable than information_schema for CockroachDB privilege checks
+            LOGGER.debug("Checking CHANGEFEED privileges for schema: {}", safeSchema);
+            stmt.execute("SHOW GRANTS ON TABLE " + safeSchema + ".*");
             var rs = stmt.getResultSet();
             boolean hasChangefeedPrivilege = false;
             if (rs != null) {
                 while (rs.next()) {
                     String grantee = rs.getString("grantee");
                     String privilegeType = rs.getString("privilege_type");
-                    if (config.getUser().equals(grantee) && "CHANGEFEED".equals(privilegeType)) {
+                    if (java.util.Objects.equals(config.getUser(), grantee) && "CHANGEFEED".equals(privilegeType)) {
                         hasChangefeedPrivilege = true;
                         break;
                     }
@@ -245,24 +269,61 @@ public class CockroachDBConnection implements AutoCloseable {
 
             if (!hasChangefeedPrivilege) {
                 throw new SQLException(
-                        "User '" + config.getUser() + "' lacks CHANGEFEED privilege on any table in database '" + dbName + "' schema '" + schemaName + "'. " +
-                                "Grant the privilege with: GRANT CHANGEFEED ON TABLE " + schemaName + ".table_name TO " + config.getUser());
+                        "User '" + config.getUser() + "' lacks CHANGEFEED privilege on any table in database '"
+                                + dbName + "' schema '" + safeSchema + "'. "
+                                + "Grant the privilege with: GRANT CHANGEFEED ON TABLE "
+                                + safeSchema + ".table_name TO " + config.getUser());
             }
-            LOGGER.debug("User has CHANGEFEED privilege on at least one table in database: {} schema: {}", dbName, schemaName);
+            LOGGER.debug("User has CHANGEFEED privilege in database: {} schema: {}", dbName, safeSchema);
 
-            // Check if user can create changefeeds (basic test)
-            stmt.execute("SELECT 1 WHERE EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = '" + schemaName + "' LIMIT 1)");
-            rs = stmt.getResultSet();
-            if (rs != null && !rs.next()) {
-                throw new SQLException("No accessible tables found in database '" + dbName + "' schema '" + schemaName + "'. " +
-                        "Ensure the user has SELECT privilege on at least one table.");
+            // Verify at least one table exists in the target schema using a parameterized query
+            try (var ps = connection.prepareStatement(
+                    "SELECT 1 WHERE EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = ? LIMIT 1)")) {
+                ps.setString(1, schemaName);
+                rs = ps.executeQuery();
+                if (!rs.next()) {
+                    throw new SQLException("No accessible tables found in database '" + dbName
+                            + "' schema '" + safeSchema + "'. "
+                            + "Ensure the user has SELECT privilege on at least one table.");
+                }
             }
-
         }
         catch (SQLException e) {
             LOGGER.error("Permission check failed: {}", e.getMessage());
             throw e;
         }
+    }
+
+    /**
+     * Sanitizes a SQL identifier by keeping only alphanumeric characters, underscores, and periods.
+     * Prevents SQL injection when interpolating schema/table names into DDL statements.
+     */
+    private static String sanitizeIdentifier(String identifier) {
+        if (identifier == null) {
+            return "";
+        }
+        return identifier.replaceAll("[^a-zA-Z0-9_.]", "");
+    }
+
+    /**
+     * Determines whether the given SQL exception represents a transient error
+     * that warrants a connection retry. Matches against CockroachDB-specific SQL
+     * states for serialization conflicts, deadlocks, and connection failures.
+     *
+     * @param e the SQL exception to evaluate
+     * @return {@code true} if the error is transient and retriable
+     */
+    private boolean isTransientError(SQLException e) {
+        String sqlState = e.getSQLState();
+        if (sqlState == null) {
+            return false;
+        }
+        return SERIALIZATION_FAILURE.equals(sqlState)
+                || DEADLOCK_DETECTED.equals(sqlState)
+                || CONNECTION_FAILURE.equals(sqlState)
+                || CONNECTION_DOES_NOT_EXIST.equals(sqlState)
+                || CONNECTION_FAILURE_DURING_EXECUTION.equals(sqlState)
+                || COMMUNICATION_LINK_FAILURE.equals(sqlState);
     }
 
     @Override

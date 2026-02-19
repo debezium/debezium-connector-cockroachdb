@@ -5,100 +5,80 @@
  */
 package io.debezium.connector.cockroachdb;
 
+import static io.debezium.config.CommonConnectorConfig.DEFAULT_MAX_QUEUE_SIZE;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.IOException;
 import java.sql.SQLException;
-import java.util.HashMap;
-import java.util.Map;
 
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
+import io.debezium.connector.base.ChangeEventQueue;
+import io.debezium.connector.base.DefaultQueueProvider;
+import io.debezium.pipeline.DataChangeEvent;
 
 /**
- * Tests for CockroachDB error handling.
+ * Unit tests for {@link CockroachDBErrorHandler} verifying that communication
+ * exceptions (SQL and IO) are classified as retriable while non-communication
+ * exceptions are not.
  *
  * @author Virag Tripathi
  */
 public class CockroachDBErrorHandlerTest {
 
-    private CockroachDBErrorHandler errorHandler;
-    private CockroachDBConnectorConfig config;
+    private final CockroachDBErrorHandler errorHandler = new CockroachDBErrorHandler(
+            new CockroachDBConnectorConfig(Configuration.create()
+                    .with(CommonConnectorConfig.TOPIC_PREFIX, "test")
+                    .with("database.hostname", "localhost")
+                    .with("database.user", "root")
+                    .with("database.dbname", "testdb")
+                    .build()),
+            new ChangeEventQueue.Builder<DataChangeEvent>()
+                    .queueProvider(new DefaultQueueProvider<>(DEFAULT_MAX_QUEUE_SIZE))
+                    .build(),
+            null);
 
-    @BeforeEach
-    public void setUp() {
-        Map<String, String> props = new HashMap<>();
-        props.put("database.hostname", "localhost");
-        props.put("database.port", "26257");
-        props.put("database.user", "root");
-        props.put("database.password", "");
-        props.put("database.dbname", "testdb");
-        props.put("database.server.name", "test-server");
-        props.put("topic.prefix", "test");
-
-        config = new CockroachDBConnectorConfig(Configuration.from(props));
-        errorHandler = new CockroachDBErrorHandler(config, null);
+    @Test
+    void sqlExceptionIsRetriable() {
+        SQLException sqlException = new SQLException("connection reset", "08006");
+        assertThat(errorHandler.isRetriable(sqlException)).isTrue();
     }
 
     @Test
-    public void shouldHandleTransientErrors() throws InterruptedException {
-        SQLException transientError = new SQLException("serialization failure", "40001");
-
-        boolean shouldRetry = errorHandler.handleConnectionError(transientError, 1, 3, 1000);
-
-        assertThat(shouldRetry).isTrue();
+    void serializationFailureIsRetriable() {
+        SQLException serializationFailure = new SQLException("restart transaction", "40001");
+        assertThat(errorHandler.isRetriable(serializationFailure)).isTrue();
     }
 
     @Test
-    public void shouldHandlePermanentErrors() throws InterruptedException {
-        SQLException permanentError = new SQLException("permission denied", "42501");
-
-        boolean shouldRetry = errorHandler.handleConnectionError(permanentError, 1, 3, 1000);
-
-        assertThat(shouldRetry).isFalse();
+    void ioExceptionIsRetriable() {
+        IOException ioException = new IOException("connection refused");
+        assertThat(errorHandler.isRetriable(ioException)).isTrue();
     }
 
     @Test
-    public void shouldHandleMaxRetriesExceeded() throws InterruptedException {
-        SQLException transientError = new SQLException("serialization failure", "40001");
-
-        boolean shouldRetry = errorHandler.handleConnectionError(transientError, 3, 3, 1000);
-
-        assertThat(shouldRetry).isFalse();
+    void wrappedSqlExceptionIsRetriable() {
+        SQLException sqlException = new SQLException("connection lost", "08003");
+        RuntimeException wrapper = new RuntimeException("streaming failed", sqlException);
+        assertThat(errorHandler.isRetriable(wrapper)).isTrue();
     }
 
     @Test
-    public void shouldHandleNullError() throws InterruptedException {
-        boolean shouldRetry = errorHandler.handleConnectionError(null, 1, 3, 1000);
-
-        assertThat(shouldRetry).isFalse();
+    void nonCommunicationExceptionNotRetriable() {
+        Exception testException = new NullPointerException();
+        assertThat(errorHandler.isRetriable(testException)).isFalse();
     }
 
     @Test
-    public void shouldHandleUnknownErrorCodes() throws InterruptedException {
-        SQLException unknownError = new SQLException("unknown error", "99999");
-
-        boolean shouldRetry = errorHandler.handleConnectionError(unknownError, 1, 3, 1000);
-
-        assertThat(shouldRetry).isFalse();
+    void nullThrowableNotRetriable() {
+        assertThat(errorHandler.isRetriable(null)).isFalse();
     }
 
     @Test
-    public void shouldHandleConnectionTimeout() throws InterruptedException {
-        SQLException timeoutError = new SQLException("connection timeout", "08006");
-
-        boolean shouldRetry = errorHandler.handleConnectionError(timeoutError, 1, 3, 1000);
-
-        assertThat(shouldRetry).isTrue();
-    }
-
-    @Test
-    public void shouldHandleNetworkErrors() throws InterruptedException {
-        SQLException networkError = new SQLException("network error", "08006");
-
-        boolean shouldRetry = errorHandler.handleConnectionError(networkError, 1, 3, 1000);
-
-        assertThat(shouldRetry).isTrue();
+    void illegalArgumentExceptionNotRetriable() {
+        IllegalArgumentException testException = new IllegalArgumentException("bad config");
+        assertThat(errorHandler.isRetriable(testException)).isFalse();
     }
 }

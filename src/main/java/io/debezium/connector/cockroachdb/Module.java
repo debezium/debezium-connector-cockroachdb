@@ -20,7 +20,7 @@ public final class Module {
     private static final Properties INFO = IoUtil.loadProperties(Module.class, "io/debezium/connector/cockroachdb/build.version");
 
     public static String version() {
-        return INFO.getProperty("version");
+        return INFO.getProperty("version", "unknown");
     }
 
     /**
