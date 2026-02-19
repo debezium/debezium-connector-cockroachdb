@@ -5,9 +5,6 @@
  */
 package io.debezium.connector.cockroachdb;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import io.debezium.config.Configuration;
 import io.debezium.connector.common.CdcSourceTaskContext;
 
@@ -18,8 +15,6 @@ import io.debezium.connector.common.CdcSourceTaskContext;
  * @author Virag Tripathi
  */
 public class CockroachDBTaskContext extends CdcSourceTaskContext<CockroachDBConnectorConfig> {
-
-    private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBTaskContext.class);
 
     private final CockroachDBConnectorConfig config;
 

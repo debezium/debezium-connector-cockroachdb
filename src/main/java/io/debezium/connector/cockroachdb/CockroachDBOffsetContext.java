@@ -6,7 +6,6 @@
 package io.debezium.connector.cockroachdb;
 
 import java.time.Instant;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -15,7 +14,6 @@ import org.apache.kafka.connect.data.Struct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.debezium.config.Field;
 import io.debezium.connector.SnapshotRecord;
 import io.debezium.pipeline.CommonOffsetContext;
 import io.debezium.pipeline.spi.OffsetContext;
@@ -36,14 +34,8 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
     public static final String TIMESTAMP = "offset.timestamp";
     public static final String SNAPSHOT_COMPLETED_KEY = "snapshot_completed";
 
-    public static final Field CURSOR_FIELD = Field.create(CURSOR);
-    public static final Field TIMESTAMP_FIELD = Field.create(TIMESTAMP);
-
-    private final Map<String, String> partition;
-    private final CockroachDBConnectorConfig connectorConfig;
     private final SourceInfo sourceInfo;
 
-    private final String logicalName;
     private String cursor;
     private Instant timestamp;
     private TransactionContext transactionContext;
@@ -51,9 +43,6 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
 
     public CockroachDBOffsetContext(CockroachDBConnectorConfig connectorConfig) {
         super(new SourceInfo(connectorConfig), false);
-        this.connectorConfig = connectorConfig;
-        this.logicalName = connectorConfig.getLogicalName();
-        this.partition = Collections.singletonMap("server", logicalName);
         this.sourceInfo = new SourceInfo(connectorConfig);
         this.cursor = connectorConfig.getChangefeedCursor();
         this.timestamp = Instant.now();
@@ -62,9 +51,6 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
 
     public CockroachDBOffsetContext(CockroachDBConnectorConfig config, String cursor, Instant timestamp, Long kafkaOffset) {
         super(new SourceInfo(config), false);
-        this.connectorConfig = config;
-        this.logicalName = config.getLogicalName();
-        this.partition = Collections.singletonMap("server", logicalName);
         this.sourceInfo = new SourceInfo(config);
         this.cursor = cursor;
         this.timestamp = timestamp;
@@ -72,8 +58,10 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
     }
 
     public void setTimestamp(Instant timestamp) {
-        this.timestamp = timestamp;
-        sourceInfo.setSourceTime(timestamp);
+        Instant previous = this.timestamp;
+        this.timestamp = timestamp != null ? timestamp : Instant.EPOCH;
+        sourceInfo.setSourceTime(this.timestamp);
+        LOGGER.debug("Offset timestamp updated: {} -> {}", previous, this.timestamp);
     }
 
     public void setTransaction(TransactionContext context) {
@@ -88,8 +76,10 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
     public Map<String, ?> getOffset() {
         Map<String, Object> offset = new HashMap<>();
         offset.put(CURSOR, cursor != null ? cursor : "initial");
-        offset.put(TIMESTAMP, timestamp.toEpochMilli());
+        Instant ts = timestamp != null ? timestamp : Instant.EPOCH;
+        offset.put(TIMESTAMP, ts.toEpochMilli());
         offset.put(SNAPSHOT_COMPLETED_KEY, Boolean.toString(snapshotCompleted));
+        LOGGER.trace("Returning offset: cursor='{}', timestamp={}, snapshotCompleted={}", cursor, ts, snapshotCompleted);
         return offset;
     }
 
@@ -147,18 +137,28 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
                 context.setCursor(cursor);
             }
             if (tsStr != null) {
-                context.setTimestamp(Instant.ofEpochMilli(Long.parseLong(tsStr)));
+                try {
+                    context.setTimestamp(Instant.ofEpochMilli(Long.parseLong(tsStr)));
+                }
+                catch (NumberFormatException e) {
+                    LOGGER.warn("Invalid timestamp in stored offset: '{}', using epoch", tsStr);
+                    context.setTimestamp(Instant.EPOCH);
+                }
             }
             if (snapshot != null) {
                 context.snapshotCompleted = Boolean.parseBoolean(snapshot);
             }
 
+            LOGGER.debug("Loaded offset from storage: cursor='{}', timestamp={}, snapshotCompleted={}",
+                    context.getCursor(), context.getTimestamp(), context.snapshotCompleted);
             return context;
         }
     }
 
     public void setCursor(String cursor) {
+        String previous = this.cursor;
         this.cursor = cursor;
+        LOGGER.debug("Offset cursor updated: '{}' -> '{}'", previous, cursor);
     }
 
     public String getCursor() {

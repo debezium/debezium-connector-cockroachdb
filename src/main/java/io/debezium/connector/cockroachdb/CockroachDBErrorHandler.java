@@ -5,142 +5,42 @@
  */
 package io.debezium.connector.cockroachdb;
 
+import java.io.IOException;
 import java.sql.SQLException;
-import java.util.concurrent.atomic.AtomicReference;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.util.Set;
 
 import io.debezium.connector.base.ChangeEventQueue;
-import io.debezium.pipeline.DataChangeEvent;
+import io.debezium.pipeline.ErrorHandler;
+import io.debezium.util.Collect;
 
 /**
- * Error handler for CockroachDB connector with retry logic for transient errors.
- * Handles serialization failures (40001) and other transient SQL errors.
+ * Error handler for the CockroachDB connector.
+ *
+ * <p>Extends Debezium's {@link ErrorHandler} to classify both {@link java.io.IOException}
+ * and {@link java.sql.SQLException} as retriable communication exceptions. This enables
+ * the framework to automatically restart the connector on transient failures such as
+ * connection resets, serialization conflicts (SQL state 40001), and network errors.</p>
  *
  * @author Virag Tripathi
  */
-public class CockroachDBErrorHandler {
+public class CockroachDBErrorHandler extends ErrorHandler {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBErrorHandler.class);
-
-    // CockroachDB specific error codes
-    private static final String SERIALIZATION_FAILURE = "40001";
-    private static final String DEADLOCK_DETECTED = "40P01";
-    private static final String CONNECTION_FAILURE = "08000";
-    private static final String CONNECTION_DOES_NOT_EXIST = "08003";
-    private static final String CONNECTION_FAILURE_DURING_EXECUTION = "08006";
-    private static final String COMMUNICATION_LINK_FAILURE = "08S01";
-
-    private final CockroachDBConnectorConfig config;
-    private final ChangeEventQueue<DataChangeEvent> queue;
-    private final AtomicReference<Throwable> producerThrowable = new AtomicReference<>();
-
-    public CockroachDBErrorHandler(CockroachDBConnectorConfig config, ChangeEventQueue<DataChangeEvent> queue) {
-        this.config = config;
-        this.queue = queue;
+    public CockroachDBErrorHandler(CockroachDBConnectorConfig connectorConfig,
+                                   ChangeEventQueue<?> queue,
+                                   ErrorHandler replacedErrorHandler) {
+        super(CockroachDBConnector.class, connectorConfig, queue, replacedErrorHandler);
     }
 
-    public void setProducerThrowable(Throwable producerThrowable) {
-        this.producerThrowable.set(producerThrowable);
-    }
-
-    public Throwable getProducerThrowable() {
-        return producerThrowable.get();
-    }
-
-    public void handle(Throwable throwable) {
-        if (throwable instanceof SQLException) {
-            SQLException sqlException = (SQLException) throwable;
-            String sqlState = sqlException.getSQLState();
-
-            if (isTransientError(sqlState)) {
-                LOGGER.warn("Transient SQL error occurred: {} - {}. Will retry.", sqlState, sqlException.getMessage());
-                // For transient errors, we don't set the producer throwable, allowing retry
-                return;
-            }
-        }
-
-        LOGGER.error("Error in CockroachDB connector: ", throwable);
-        setProducerThrowable(throwable);
+    @Override
+    protected Set<Class<? extends Exception>> communicationExceptions() {
+        return Collect.unmodifiableSet(IOException.class, SQLException.class);
     }
 
     /**
-     * Determines if a SQL error is transient and should be retried.
-     *
-     * @param sqlState the SQL state code
-     * @return true if the error is transient and should be retried
+     * Overridden with package-private visibility to allow unit testing of retriability classification.
      */
-    private boolean isTransientError(String sqlState) {
-        if (sqlState == null) {
-            return false;
-        }
-
-        return SERIALIZATION_FAILURE.equals(sqlState) ||
-                DEADLOCK_DETECTED.equals(sqlState) ||
-                CONNECTION_FAILURE.equals(sqlState) ||
-                CONNECTION_DOES_NOT_EXIST.equals(sqlState) ||
-                CONNECTION_FAILURE_DURING_EXECUTION.equals(sqlState) ||
-                COMMUNICATION_LINK_FAILURE.equals(sqlState);
-    }
-
-    /**
-     * Determines if an exception is a transient error that should be retried.
-     *
-     * @param throwable the exception to check
-     * @return true if the exception is transient and should be retried
-     */
-    public boolean isTransientError(Throwable throwable) {
-        if (throwable == null) {
-            return false;
-        }
-        if (throwable instanceof SQLException) {
-            return isTransientError(((SQLException) throwable).getSQLState());
-        }
-
-        // Check for common transient network errors
-        String message = throwable.getMessage();
-        if (message != null) {
-            message = message.toLowerCase();
-            return message.contains("connection") ||
-                    message.contains("timeout") ||
-                    message.contains("network") ||
-                    message.contains("retry") ||
-                    message.contains("temporary");
-        }
-
-        return false;
-    }
-
-    /**
-     * Handles a connection error with retry logic.
-     * This method centralizes connection retry logic and can be used by connection classes.
-     *
-     * @param throwable the exception that occurred
-     * @param attempt the current attempt number (1-based)
-     * @param maxRetries the maximum number of retry attempts
-     * @param retryDelayMs the delay between retries in milliseconds
-     * @return true if the error should be retried, false otherwise
-     * @throws InterruptedException if the retry delay is interrupted
-     */
-    public boolean handleConnectionError(Throwable throwable, int attempt, int maxRetries, long retryDelayMs)
-            throws InterruptedException {
-
-        if (throwable == null) {
-            LOGGER.warn("Null throwable provided to handleConnectionError");
-            return false; // Should not retry
-        }
-
-        if (isTransientError(throwable) && attempt < maxRetries) {
-            LOGGER.warn("Transient connection error (attempt {}/{}): {}. Retrying in {}ms...",
-                    attempt, maxRetries, throwable.getMessage(), retryDelayMs);
-
-            Thread.sleep(retryDelayMs);
-            return true; // Should retry
-        }
-
-        LOGGER.error("Non-transient connection error or max retries exceeded (attempt {}/{}): {}",
-                attempt, maxRetries, throwable.getMessage());
-        return false; // Should not retry
+    @Override
+    protected boolean isRetriable(Throwable throwable) {
+        return super.isRetriable(throwable);
     }
 }

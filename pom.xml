@@ -34,7 +34,7 @@
         <!-- Debezium parent -->
         <version.debezium>${project.version}</version.debezium>
 
-        <cockroachdb.version>v25.2.3</cockroachdb.version>
+        <cockroachdb.version>v26.1.0</cockroachdb.version>
     </properties>
 
     <dependencyManagement>
@@ -289,6 +289,15 @@
         </testResources>
 
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <cockroachdb.version>${cockroachdb.version}</cockroachdb.version>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
             <!-- Failsafe for integration test lifecycle -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -297,6 +306,7 @@
                     <skipTests>${skipITs}</skipTests>
                     <argLine>${argLine}</argLine>
                     <systemPropertyVariables>
+                        <cockroachdb.version>${cockroachdb.version}</cockroachdb.version>
                         <cockroachdb.host>localhost</cockroachdb.host>
                         <cockroachdb.port>26257</cockroachdb.port>
                         <kafka.bootstrap.servers>localhost:9092</kafka.bootstrap.servers>

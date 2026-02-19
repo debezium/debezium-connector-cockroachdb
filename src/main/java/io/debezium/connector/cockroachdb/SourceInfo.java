@@ -19,9 +19,6 @@ import io.debezium.connector.common.BaseSourceInfo;
 @NotThreadSafe
 public class SourceInfo extends BaseSourceInfo {
 
-    public static final String SNAPSHOT_KEY = "snapshot";
-    public static final String DATABASE_NAME_KEY = "db";
-
     private final String databaseName;
     private final String clusterName;
 

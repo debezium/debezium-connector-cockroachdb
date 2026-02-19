@@ -224,7 +224,7 @@ cat > cockroachdb-source.json << EOF
     "database.dbname": "testdb",
     "database.server.name": "cockroachdb",
     "topic.prefix": "cockroachdb",
-    "table.include.list": "testdb.public.products",
+    "table.include.list": "public.products",
     "cockroachdb.changefeed.envelope": "enriched",
     "cockroachdb.changefeed.enriched.properties": "source,schema",
     "cockroachdb.changefeed.include.updated": true,

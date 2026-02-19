@@ -40,11 +40,11 @@ public class CockroachDBConnectorIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBConnectorIT.class);
 
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v26.1.0");
     private static final String DATABASE_NAME = "testdb";
     private static final String TABLE_NAME = "users";
     private static final String TOPIC_PREFIX = "test-cockroachdb";
 
-    // Create a shared network for all containers
     private static final Network NETWORK = Network.newNetwork();
 
     @Container
@@ -54,7 +54,8 @@ public class CockroachDBConnectorIT {
             .withNetworkAliases("kafka");
 
     @Container
-    private static final CockroachContainer cockroachdb = new CockroachContainer(DockerImageName.parse("cockroachdb/cockroach:v25.2.3"))
+    private static final CockroachContainer cockroachdb = new CockroachContainer(
+            DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 

@@ -47,6 +47,7 @@ public class CockroachDBStreamingIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBStreamingIT.class);
 
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v26.1.0");
     private static final String DATABASE_NAME = "streaming_testdb";
     private static final String TABLE_NAME = "orders";
     private static final String TOPIC_PREFIX = "streaming-test";
@@ -61,7 +62,7 @@ public class CockroachDBStreamingIT {
 
     @Container
     private static final CockroachContainer cockroachdb = new CockroachContainer(
-            DockerImageName.parse("cockroachdb/cockroach:v25.2.3"))
+            DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 
@@ -591,6 +592,95 @@ public class CockroachDBStreamingIT {
         else {
             LOGGER.info("Received data events (resolved events may not be sent in test environment)");
         }
+    }
+
+    @Test
+    public void shouldStreamVectorInsertAndUpdate() throws Exception {
+        // Create a table with a VECTOR column (CockroachDB 24.2+)
+        String vectorTable = "items_with_embeddings";
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS " + vectorTable + " (" +
+                    "id INT PRIMARY KEY, " +
+                    "label STRING NOT NULL, " +
+                    "embedding VECTOR(3)" +
+                    ")");
+        }
+
+        // Create changefeed for the vector table
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE CHANGEFEED FOR TABLE " + vectorTable + " INTO 'kafka://kafka:9092' " +
+                    "WITH envelope = 'enriched', " +
+                    "enriched_properties = 'source,schema', " +
+                    "diff, " +
+                    "updated, " +
+                    "resolved = '10s'");
+        }
+
+        consumer.subscribe(java.util.Arrays.asList(vectorTable));
+        Thread.sleep(3000);
+
+        // Insert rows with vector embeddings
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO " + vectorTable + " (id, label, embedding) VALUES " +
+                    "(1, 'electronics', '[1.0, 0.0, 0.0]'), " +
+                    "(2, 'furniture',   '[0.0, 1.0, 0.0]'), " +
+                    "(3, 'clothing',    '[0.0, 0.0, 1.0]')");
+        }
+
+        Thread.sleep(3000);
+
+        ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(15));
+        assertThat(records).isNotEmpty();
+
+        int vectorEventsFound = 0;
+        for (ConsumerRecord<String, String> record : records) {
+            String value = record.value();
+            LOGGER.info("Received vector event: {}", value);
+            JsonNode jsonNode = objectMapper.readTree(value);
+
+            JsonNode payloadNode = jsonNode.has("payload") ? jsonNode.get("payload") : jsonNode;
+            JsonNode afterNode = payloadNode.get("after");
+            if (afterNode != null && afterNode.has("embedding")) {
+                String embeddingStr = afterNode.get("embedding").asText();
+                assertThat(embeddingStr).isNotEmpty();
+                // CockroachDB formats vectors as "[x,y,z]"
+                assertThat(embeddingStr).startsWith("[");
+                assertThat(embeddingStr).endsWith("]");
+                vectorEventsFound++;
+            }
+        }
+
+        assertThat(vectorEventsFound).isGreaterThanOrEqualTo(3);
+        LOGGER.info("Successfully streamed {} VECTOR insert events", vectorEventsFound);
+
+        // Update a vector value and verify changefeed captures it
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("UPDATE " + vectorTable + " SET embedding = '[0.9, 0.1, 0.0]' WHERE id = 1");
+        }
+
+        Thread.sleep(3000);
+
+        ConsumerRecords<String, String> updateRecords = consumer.poll(Duration.ofSeconds(15));
+        assertThat(updateRecords).isNotEmpty();
+
+        boolean foundVectorUpdate = false;
+        for (ConsumerRecord<String, String> record : updateRecords) {
+            String value = record.value();
+            JsonNode jsonNode = objectMapper.readTree(value);
+            JsonNode payloadNode = jsonNode.has("payload") ? jsonNode.get("payload") : jsonNode;
+            JsonNode afterNode = payloadNode.get("after");
+            if (afterNode != null && afterNode.has("embedding") && afterNode.has("id")) {
+                if (afterNode.get("id").asInt() == 1) {
+                    String embedding = afterNode.get("embedding").asText();
+                    assertThat(embedding).contains("0.9");
+                    foundVectorUpdate = true;
+                    break;
+                }
+            }
+        }
+
+        assertThat(foundVectorUpdate).isTrue();
+        LOGGER.info("Successfully streamed VECTOR update event");
     }
 
     private void createTestTable() throws Exception {

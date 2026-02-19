@@ -28,6 +28,7 @@ cockroach sql --insecure --host=localhost:26257 --execute="
 CREATE DATABASE IF NOT EXISTS testdb;
 CREATE USER IF NOT EXISTS debezium;
 GRANT CONNECT ON DATABASE testdb TO debezium;
+GRANT SYSTEM VIEWCLUSTERSETTING TO debezium;
 "
 
 # Create a realistic test table with UUID primary key and comprehensive schema

@@ -40,17 +40,6 @@ public class ChangefeedSchemaParser {
     private static final Logger LOGGER = LoggerFactory.getLogger(ChangefeedSchemaParser.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    // Schema for the enriched envelope structure
-    // This represents the top-level structure of CockroachDB's enriched envelope
-    private static final Schema ENRICHED_ENVELOPE_SCHEMA = SchemaBuilder.struct()
-            .name("io.debezium.connector.cockroachdb.EnrichedEnvelope")
-            .field("key", Schema.OPTIONAL_STRING_SCHEMA) // The primary key of the changed row
-            .field("value", Schema.OPTIONAL_STRING_SCHEMA) // The actual data (enriched envelope)
-            .field("updated", Schema.OPTIONAL_STRING_SCHEMA) // Updated column values
-            .field("diff", Schema.OPTIONAL_STRING_SCHEMA) // Diff information showing what changed
-            .field("resolved", Schema.OPTIONAL_STRING_SCHEMA) // Resolved timestamp for consistency
-            .build();
-
     /**
      * Parses a CockroachDB changefeed message into a Debezium-compatible record.
      *
@@ -134,7 +123,8 @@ public class ChangefeedSchemaParser {
             return new ParsedChange(keySchema, key, valueSchema, value);
         }
         catch (Exception e) {
-            LOGGER.error("Failed to parse changefeed message: key={}, value={}", keyJson, valueJson, e);
+            LOGGER.error("Failed to parse changefeed message: {}", e.getMessage());
+            LOGGER.debug("Changefeed parse failure detail: key={}, value={}", keyJson, valueJson, e);
             throw e;
         }
     }
@@ -196,42 +186,6 @@ public class ChangefeedSchemaParser {
             // Fallback to String schema for unknown types
             return Schema.STRING_SCHEMA;
         }
-    }
-
-    /**
-     * Creates an enriched value schema that includes the original data plus metadata.
-     *
-     * This method creates a schema that combines:
-     * - The original value data (what the row looks like)
-     * - Updated column values (what changed)
-     * - Diff information (detailed change information)
-     *
-     * This provides a comprehensive view of the change event.
-     *
-     * @param valueNode The original value data
-     * @param updatedNode The updated column values
-     * @param diffNode The diff information
-     * @return A combined schema representing the enriched value
-     */
-    private static Schema createEnrichedValueSchema(JsonNode valueNode, JsonNode updatedNode, JsonNode diffNode) {
-        SchemaBuilder builder = SchemaBuilder.struct()
-                .name("io.debezium.connector.cockroachdb.EnrichedValue");
-
-        // Add the original value schema (the actual row data)
-        if (valueNode != null) {
-            Schema valueSchema = createSchemaFromJson(valueNode);
-            builder.field("value", valueSchema);
-        }
-
-        // Add metadata fields from the enriched envelope
-        if (updatedNode != null) {
-            builder.field("updated", Schema.OPTIONAL_STRING_SCHEMA);
-        }
-        if (diffNode != null) {
-            builder.field("diff", Schema.OPTIONAL_STRING_SCHEMA);
-        }
-
-        return builder.build();
     }
 
     /**

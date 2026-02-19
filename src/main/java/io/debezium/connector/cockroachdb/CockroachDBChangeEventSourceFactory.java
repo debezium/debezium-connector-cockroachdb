@@ -7,7 +7,9 @@ package io.debezium.connector.cockroachdb;
 
 import java.util.Optional;
 
-import io.debezium.connector.SourceInfoStructMaker;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import io.debezium.pipeline.EventDispatcher;
 import io.debezium.pipeline.notification.NotificationService;
 import io.debezium.pipeline.source.snapshot.incremental.IncrementalSnapshotChangeEventSource;
@@ -16,7 +18,6 @@ import io.debezium.pipeline.source.spi.DataChangeEventListener;
 import io.debezium.pipeline.source.spi.SnapshotChangeEventSource;
 import io.debezium.pipeline.source.spi.SnapshotProgressListener;
 import io.debezium.pipeline.source.spi.StreamingChangeEventSource;
-import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.relational.TableId;
 import io.debezium.spi.schema.DataCollectionId;
 import io.debezium.util.Clock;
@@ -29,9 +30,10 @@ import io.debezium.util.Clock;
  */
 public class CockroachDBChangeEventSourceFactory implements ChangeEventSourceFactory<CockroachDBPartition, CockroachDBOffsetContext> {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBChangeEventSourceFactory.class);
+
     private final CockroachDBConnectorConfig config;
     private final EventDispatcher<CockroachDBPartition, TableId> dispatcher;
-
     private final CockroachDBSchema schema;
     private final Clock clock;
 
@@ -50,12 +52,12 @@ public class CockroachDBChangeEventSourceFactory implements ChangeEventSourceFac
     public SnapshotChangeEventSource<CockroachDBPartition, CockroachDBOffsetContext> getSnapshotChangeEventSource(
                                                                                                                   SnapshotProgressListener<CockroachDBPartition> snapshotProgressListener,
                                                                                                                   NotificationService<CockroachDBPartition, CockroachDBOffsetContext> notificationService) {
-        // TODO: Implement snapshot logic using CockroachDB's AS OF SYSTEM TIME
-        return null;
+        return new CockroachDBSnapshotChangeEventSource(config);
     }
 
     @Override
     public StreamingChangeEventSource<CockroachDBPartition, CockroachDBOffsetContext> getStreamingChangeEventSource() {
+        LOGGER.debug("Creating CockroachDBStreamingChangeEventSource");
         return new CockroachDBStreamingChangeEventSource(config, dispatcher, schema, clock);
     }
 
@@ -69,11 +71,4 @@ public class CockroachDBChangeEventSourceFactory implements ChangeEventSourceFac
         return Optional.empty();
     }
 
-    public OffsetContext.Loader<CockroachDBOffsetContext> getOffsetContextLoader() {
-        return new CockroachDBOffsetContext.Loader(config);
-    }
-
-    public Optional<? extends SourceInfoStructMaker<?>> getSourceInfoStructMaker() {
-        return Optional.of(new CockroachDBSourceInfoStructMaker());
-    }
 }

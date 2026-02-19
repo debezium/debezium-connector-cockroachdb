@@ -114,7 +114,7 @@ Processes configuration templates with environment variables.
 # Process template with default values
 ./scripts/process-config-template.sh \
   scripts/configs/cockroachdb-source-template.json \
-  scripts/configs/cockroachdb-production.json
+  scripts/configs/cockroachdb-output.json
 
 # Process with custom environment variables
 SCHEMA_NAME=my_schema TABLE_NAME=orders \
@@ -136,7 +136,7 @@ python3 scripts/kafka_consumer.py \
 ## ⚙️ **Configuration Files**
 
 ### **`configs/cockroachdb-source.json`**
-- **Purpose:** Production-ready connector configuration
+- **Purpose:** Connector configuration
 - **Features:** Complete changefeed setup with enriched envelope
 - **Usage:** Direct deployment to Kafka Connect
 
@@ -264,7 +264,7 @@ CockroachDB → Changefeed → Kafka Topic → Debezium Connector → Final Topi
 - **Simplified Architecture:** Single topic per table
 - **Standard Debezium Pattern:** Compatible with existing Debezium ecosystem
 - **Operational Clarity:** Clear data flow and monitoring
-- **Production Ready:** Proven pattern used by other Debezium connectors
+- **Debezium Pattern:** Follows the pattern used by other Debezium connectors
 
 ## 🔄 **Data Flow**
 

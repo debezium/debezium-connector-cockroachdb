@@ -6,6 +6,7 @@
 package io.debezium.connector.cockroachdb;
 
 import java.time.Instant;
+import java.util.Collections;
 import java.util.Map;
 
 import org.apache.kafka.connect.data.Struct;
@@ -34,9 +35,10 @@ public class CockroachDBEventMetadataProvider implements EventMetadataProvider {
     @Override
     public Map<String, String> getEventSourcePosition(DataCollectionId source, OffsetContext offset, Object key, Struct value) {
         if (offset instanceof CockroachDBOffsetContext ctx) {
-            return Map.of("cursor", ctx.getCursor());
+            String cursor = ctx.getCursor();
+            return Collections.singletonMap("cursor", cursor != null ? cursor : "");
         }
-        return Map.of();
+        return Collections.emptyMap();
     }
 
     @Override

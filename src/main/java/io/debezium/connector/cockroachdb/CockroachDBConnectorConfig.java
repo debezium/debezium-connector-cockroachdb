@@ -5,7 +5,6 @@
  */
 package io.debezium.connector.cockroachdb;
 
-import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -71,8 +70,8 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withEnum(SecureConnectionMode.class, SecureConnectionMode.PREFER)
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
-            .withDescription("Whether to use an encrypted connection to Postgres. Options include: "
-                    + "'disable' (the default) to use an unencrypted connection; "
+            .withDescription("Whether to use an encrypted connection to CockroachDB. Options include: "
+                    + "'disable' to use an unencrypted connection; "
                     + "'allow' to try and use an unencrypted connection first and, failing that, a secure (encrypted) connection; "
                     + "'prefer' (the default) to try and use a secure (encrypted) connection first and, failing that, an unencrypted connection; "
                     + "'require' to use a secure (encrypted) connection, and fail if one cannot be established; "
@@ -111,15 +110,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withDescription("File containing the root certificate(s) against which the server is validated. See the Postgres JDBC SSL docs for further information");
-
-    public static final Field SSL_SOCKET_FACTORY = Field.create(DATABASE_CONFIG_PREFIX + "sslfactory")
-            .withDisplayName("SSL Root Certificate")
-            .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL, 5))
-            .withWidth(Width.LONG)
-            .withImportance(Importance.MEDIUM)
-            .withDescription(
-                    "A name of class to that creates SSL Sockets. Use org.postgresql.ssl.NonValidatingFactory to disable SSL validation in development environments");
 
     public static final Field TCP_KEEPALIVE = Field.create(DATABASE_CONFIG_PREFIX + "tcpKeepAlive")
             .withDisplayName("TCP keep-alive probe")
@@ -201,6 +191,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDefault("enriched")
             .withWidth(Width.SHORT)
             .withImportance(Importance.HIGH)
+            .withValidation(CockroachDBConnectorConfig::validateChangefeedEnvelope)
             .withDescription("The envelope type for changefeed events. Options: 'enriched', 'wrapped', 'bare'.");
 
     public static final Field CHANGEFEED_RESOLVED_INTERVAL = Field.create("cockroachdb.changefeed.resolved.interval")
@@ -255,6 +246,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDefault(1000)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
+            .withValidation(Field::isPositiveInteger)
             .withDescription("The batch size for changefeed processing.");
 
     public static final Field CHANGEFEED_POLL_INTERVAL = Field.create("cockroachdb.changefeed.poll.interval.ms")
@@ -264,9 +256,9 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDefault(100L)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
+            .withValidation(Field::isNonNegativeLong)
             .withDescription("The poll interval in milliseconds for changefeed processing.");
 
-    // Sink configuration fields
     public static final Field CHANGEFEED_SINK_TYPE = Field.create("cockroachdb.changefeed.sink.type")
             .withDisplayName("Changefeed sink type")
             .withType(Type.STRING)
@@ -274,16 +266,16 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDefault("kafka")
             .withWidth(Width.SHORT)
             .withImportance(Importance.HIGH)
-            .withDescription("The type of sink for changefeed events. Options: 'kafka', 'pubsub', 'webhook', 'cloudstorage'.");
+            .withValidation(CockroachDBConnectorConfig::validateChangefeedSinkType)
+            .withDescription("The type of sink for changefeed events. Currently supported: 'kafka'. Planned: 'webhook', 'pubsub', 'cloudstorage'.");
 
     public static final Field CHANGEFEED_SINK_URI = Field.create("cockroachdb.changefeed.sink.uri")
             .withDisplayName("Changefeed sink URI")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 8))
-            .withDefault("kafka://kafka-test:9092")
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
-            .withDescription("The URI for the changefeed sink. Format depends on sink type: "
+            .withDescription("The URI for the changefeed sink (required). Format depends on sink type: "
                     + "'kafka://host:port' for Kafka, "
                     + "'pubsub://project:topic' for Pub/Sub, "
                     + "'webhook://url' for Webhook, "
@@ -299,6 +291,35 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDescription("Prefix for changefeed topic names. Used to create topics in format: prefix.database.schema.table. " +
                     "For multi-tenant deployments, consider using a unique prefix per tenant. " +
                     "If not specified, defaults to 'cockroachdb'.");
+
+    public static final Field CHANGEFEED_KAFKA_CONSUMER_GROUP_PREFIX = Field.create("cockroachdb.changefeed.kafka.consumer.group.prefix")
+            .withDisplayName("Kafka consumer group ID prefix")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 11))
+            .withDefault("cockroachdb-connector")
+            .withWidth(Width.MEDIUM)
+            .withImportance(Importance.LOW)
+            .withDescription("Prefix for the Kafka consumer group ID used when consuming changefeed events. "
+                    + "The full group ID is: {prefix}-{table_name}.");
+
+    public static final Field CHANGEFEED_KAFKA_POLL_TIMEOUT_MS = Field.create("cockroachdb.changefeed.kafka.poll.timeout.ms")
+            .withDisplayName("Kafka consumer poll timeout (ms)")
+            .withType(Type.LONG)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 12))
+            .withDefault(100L)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDescription("Maximum time in milliseconds to block in each Kafka consumer poll() call.");
+
+    public static final Field CHANGEFEED_KAFKA_AUTO_OFFSET_RESET = Field.create("cockroachdb.changefeed.kafka.auto.offset.reset")
+            .withDisplayName("Kafka consumer auto offset reset")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 13))
+            .withDefault("earliest")
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDescription("What to do when there is no initial offset in Kafka. "
+                    + "Options: 'earliest' (start from beginning), 'latest' (start from end).");
 
     public static final Field CHANGEFEED_SINK_OPTIONS = Field.create("cockroachdb.changefeed.sink.options")
             .withDisplayName("Changefeed sink options")
@@ -317,16 +338,18 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDefault(30000L)
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
+            .withValidation(Field::isNonNegativeLong)
             .withDescription("How long to wait for a connection to be established in milliseconds.");
 
     public static final Field CONNECTION_RETRY_DELAY_MS = Field.create("connection.retry.delay.ms")
             .withDisplayName("Connection retry delay (ms)")
             .withType(Type.LONG)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 11))
-            .withDefault(100L)
+            .withDefault(1000L)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
-            .withDescription("Delay between connection retry attempts in milliseconds.");
+            .withDescription("Base delay in milliseconds between connection retry attempts. "
+                    + "The actual delay is multiplied by the attempt number (linear backoff).");
 
     public static final Field CONNECTION_MAX_RETRIES = Field.create("connection.max.retries")
             .withDisplayName("Connection max retries")
@@ -335,7 +358,27 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDefault(3)
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
+            .withValidation(Field::isPositiveInteger)
             .withDescription("Maximum number of connection retry attempts before giving up.");
+
+    public static final Field CONNECTION_VALIDATION_TIMEOUT_S = Field.create("connection.validation.timeout.seconds")
+            .withDisplayName("Connection validation timeout (seconds)")
+            .withType(Type.INT)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 13))
+            .withDefault(5)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDescription("Timeout in seconds for validating that an existing JDBC connection is still usable.");
+
+    public static final Field SKIP_PERMISSION_CHECK = Field.create("cockroachdb.skip.permission.check")
+            .withDisplayName("Skip changefeed permission check")
+            .withType(Type.BOOLEAN)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 14))
+            .withDefault(false)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDescription("Whether to skip the changefeed permission validation during connection. "
+                    + "Set to true when the user is a superadmin or permissions are managed externally.");
 
     public static final Field SCHEMA_NAME = Field.create("cockroachdb.schema.name")
             .withDisplayName("Schema name")
@@ -365,7 +408,9 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     STATUS_UPDATE_INTERVAL_MS,
                     CONNECTION_TIMEOUT_MS,
                     CONNECTION_RETRY_DELAY_MS,
-                    CONNECTION_MAX_RETRIES)
+                    CONNECTION_MAX_RETRIES,
+                    CONNECTION_VALIDATION_TIMEOUT_S,
+                    SKIP_PERMISSION_CHECK)
             .events(
                     SOURCE_INFO_STRUCT_MAKER)
             .connector(
@@ -386,6 +431,9 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     CHANGEFEED_SINK_TYPE,
                     CHANGEFEED_SINK_URI,
                     CHANGEFEED_SINK_TOPIC_PREFIX,
+                    CHANGEFEED_KAFKA_CONSUMER_GROUP_PREFIX,
+                    CHANGEFEED_KAFKA_POLL_TIMEOUT_MS,
+                    CHANGEFEED_KAFKA_AUTO_OFFSET_RESET,
                     CHANGEFEED_SINK_OPTIONS)
             .create();
 
@@ -728,22 +776,25 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                 false);
         this.config = config;
         this.databaseName = config.getString(DATABASE_NAME);
-        this.snapshotMode = SnapshotMode.parse(config.getString(SNAPSHOT_MODE));
-        this.snapshotIsolationMode = SnapshotIsolationMode.parse(config.getString(SNAPSHOT_ISOLATION_MODE));
-        this.snapshotLockingMode = SnapshotLockingMode.parse(config.getString(SNAPSHOT_LOCKING_MODE));
+
+        SnapshotMode parsedSnapshotMode = SnapshotMode.parse(config.getString(SNAPSHOT_MODE));
+        this.snapshotMode = parsedSnapshotMode != null ? parsedSnapshotMode : SnapshotMode.INITIAL;
+
+        SnapshotIsolationMode parsedIsolation = SnapshotIsolationMode.parse(config.getString(SNAPSHOT_ISOLATION_MODE));
+        this.snapshotIsolationMode = parsedIsolation != null ? parsedIsolation : SnapshotIsolationMode.SERIALIZABLE;
+
+        SnapshotLockingMode parsedLocking = SnapshotLockingMode.parse(config.getString(SNAPSHOT_LOCKING_MODE));
+        this.snapshotLockingMode = parsedLocking != null ? parsedLocking : SnapshotLockingMode.NONE;
+
         this.readOnlyConnection = config.getBoolean(READ_ONLY_CONNECTION);
+
+        LOGGER.debug("CockroachDB config: database={}, snapshotMode={}, snapshotIsolation={}, readOnly={}, sinkType={}, envelope={}",
+                databaseName, this.snapshotMode.getValue(), this.snapshotIsolationMode.getValue(),
+                readOnlyConnection, config.getString(CHANGEFEED_SINK_TYPE), config.getString(CHANGEFEED_ENVELOPE));
     }
 
     public String getDatabaseName() {
         return databaseName;
-    }
-
-    protected int port() {
-        return config.getInteger(PORT);
-    }
-
-    public String databaseName() {
-        return config.getString(DATABASE_NAME);
     }
 
     @Override
@@ -760,13 +811,12 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
         return Optional.ofNullable(snapshotLockingMode);
     }
 
-    public Duration statusUpdateInterval() {
-        return Duration.ofMillis(config.getLong(STATUS_UPDATE_INTERVAL_MS));
-    }
-
     @Override
     public byte[] getUnavailableValuePlaceholder() {
         String placeholder = config.getString(UNAVAILABLE_VALUE_PLACEHOLDER);
+        if (placeholder == null) {
+            return new byte[0];
+        }
         if (placeholder.startsWith("hex:")) {
             return Strings.hexStringToByteArray(placeholder.substring(4));
         }
@@ -790,6 +840,24 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public static ConfigDef configDef() {
         return CONFIG_DEFINITION.configDef();
+    }
+
+    private static int validateChangefeedEnvelope(Configuration config, Field field, Field.ValidationOutput problems) {
+        String value = config.getString(field);
+        if (value != null && !value.equals("enriched") && !value.equals("wrapped") && !value.equals("bare")) {
+            problems.accept(field, value, "Must be one of 'enriched', 'wrapped', or 'bare'");
+            return 1;
+        }
+        return 0;
+    }
+
+    private static int validateChangefeedSinkType(Configuration config, Field field, Field.ValidationOutput problems) {
+        String value = config.getString(field);
+        if (value != null && !value.equals("kafka")) {
+            problems.accept(field, value, "Currently only 'kafka' is supported. Planned: webhook, pubsub, cloudstorage");
+            return 1;
+        }
+        return 0;
     }
 
     private static class SystemTablesPredicate implements TableFilter {
@@ -920,5 +988,25 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public String getSchemaName() {
         return config.getString(SCHEMA_NAME);
+    }
+
+    public int getConnectionValidationTimeoutSeconds() {
+        return config.getInteger(CONNECTION_VALIDATION_TIMEOUT_S);
+    }
+
+    public boolean isSkipPermissionCheck() {
+        return config.getBoolean(SKIP_PERMISSION_CHECK);
+    }
+
+    public String getChangefeedKafkaConsumerGroupPrefix() {
+        return config.getString(CHANGEFEED_KAFKA_CONSUMER_GROUP_PREFIX);
+    }
+
+    public long getChangefeedKafkaPollTimeoutMs() {
+        return config.getLong(CHANGEFEED_KAFKA_POLL_TIMEOUT_MS);
+    }
+
+    public String getChangefeedKafkaAutoOffsetReset() {
+        return config.getString(CHANGEFEED_KAFKA_AUTO_OFFSET_RESET);
     }
 }
