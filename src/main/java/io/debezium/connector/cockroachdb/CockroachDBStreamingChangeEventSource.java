@@ -71,6 +71,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 }
             });
 
+    /**
+     * Tracks whether the changefeed is still performing an initial scan.
+     * Set to true when a changefeed is created with {@code initial_scan='yes'}
+     * and cleared when the first resolved timestamp is received, which signals
+     * that the initial scan phase has completed.
+     */
+    private volatile boolean initialScanInProgress = false;
+
     public CockroachDBStreamingChangeEventSource(
                                                  CockroachDBConnectorConfig config,
                                                  EventDispatcher<CockroachDBPartition, TableId> dispatcher,
@@ -107,6 +115,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
             LOGGER.info("Monitoring {} table(s): {}", tables.size(), tables);
 
+            String cursor = offsetContext.getCursor();
+            boolean hasPriorOffset = cursor != null && !cursor.isEmpty()
+                    && !"initial".equals(cursor) && !"now".equals(cursor);
+            LOGGER.info("Snapshot mode: {}, hasPriorOffset: {}, cursor: '{}'",
+                    config.getSnapshotMode().getValue(), hasPriorOffset, cursor);
+
             for (int i = 0; i < tables.size(); i++) {
                 TableId table = tables.get(i);
                 if (!context.isRunning()) {
@@ -114,7 +128,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     break;
                 }
                 LOGGER.debug("Processing table {}/{}: {}", i + 1, tables.size(), table);
-                processTableWithSinkChangefeed(connection, table, offsetContext, context);
+                processTableWithSinkChangefeed(connection, table, offsetContext, context, hasPriorOffset);
             }
 
             Duration pollInterval = Duration.ofMillis(config.getChangefeedPollIntervalMs());
@@ -141,7 +155,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                                 CockroachDBConnection connection,
                                                 TableId table,
                                                 CockroachDBOffsetContext offsetContext,
-                                                ChangeEventSourceContext context)
+                                                ChangeEventSourceContext context,
+                                                boolean hasPriorOffset)
             throws SQLException, InterruptedException {
 
         LOGGER.debug("Checking for existing changefeed job for table {}", table);
@@ -149,12 +164,19 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             LOGGER.info("Changefeed already running for table {}, skipping creation", table);
         }
         else {
-            String changefeedQuery = buildSinkChangefeedQuery(table, offsetContext.getCursor());
+            String changefeedQuery = buildSinkChangefeedQuery(table, offsetContext.getCursor(), hasPriorOffset);
             LOGGER.debug("Built changefeed query for table {}: {}", table, changefeedQuery);
 
             try (Statement stmt = connection.connection().createStatement()) {
                 stmt.execute(changefeedQuery);
                 LOGGER.info("Created changefeed for table {}", table);
+            }
+
+            String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
+            initialScanInProgress = "yes".equals(initialScan);
+            if (initialScanInProgress) {
+                LOGGER.info("Initial scan in progress for table {} (snapshot.mode={})",
+                        table, config.getSnapshotMode().getValue());
             }
         }
 
@@ -264,6 +286,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     }
                 }
 
+                if (config.getSnapshotMode() == CockroachDBConnectorConfig.SnapshotMode.INITIAL_ONLY
+                        && !initialScanInProgress) {
+                    LOGGER.info("Initial scan completed and snapshot.mode=initial_only, stopping connector");
+                    running.set(false);
+                    break;
+                }
+
                 metronome.pause();
             }
 
@@ -289,8 +318,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             JsonNode jsonNode = objectMapper.readTree(valueJson);
 
             if (jsonNode != null && jsonNode.has("resolved")) {
-                LOGGER.debug("Received resolved timestamp: {}",
-                        jsonNode.get("resolved").asText());
+                String resolvedTs = jsonNode.get("resolved").asText();
+                if (initialScanInProgress) {
+                    initialScanInProgress = false;
+                    LOGGER.info("Initial scan completed (first resolved timestamp received: {})", resolvedTs);
+                }
+                LOGGER.debug("Received resolved timestamp: {}", resolvedTs);
                 return;
             }
 
@@ -355,9 +388,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     /**
      * Extracts the Debezium {@link Envelope.Operation} from the changefeed payload.
-     * Uses the {@code op} field first, falling back to before/after presence detection.
+     * During initial scan, all events are treated as READ operations.
+     * Otherwise uses the {@code op} field first, falling back to before/after presence detection.
      */
     private Envelope.Operation extractOperation(JsonNode payloadNode) {
+        if (initialScanInProgress) {
+            return Envelope.Operation.READ;
+        }
         if (payloadNode.has("op")) {
             String op = payloadNode.get("op").asText();
             switch (op) {
@@ -393,9 +430,10 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     /**
      * Builds the CockroachDB {@code CREATE CHANGEFEED} SQL statement for the given table.
+     * Includes the {@code initial_scan} option based on the configured snapshot mode.
      * All user-configurable values are sanitized before interpolation.
      */
-    private String buildSinkChangefeedQuery(TableId table, String cursor) {
+    private String buildSinkChangefeedQuery(TableId table, String cursor, boolean hasPriorOffset) {
         StringBuilder query = new StringBuilder();
         query.append("CREATE CHANGEFEED FOR TABLE ");
         query.append(sanitizeIdentifier(table.toString()));
@@ -430,7 +468,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         String resolvedInterval = config.getChangefeedResolvedInterval();
         query.append(", resolved = '").append(sanitizeLiteral(resolvedInterval)).append("'");
 
-        if (cursor != null && !cursor.trim().isEmpty()) {
+        String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
+        if (initialScan != null) {
+            query.append(", initial_scan = '").append(sanitizeLiteral(initialScan)).append("'");
+        }
+
+        if (cursor != null && !cursor.trim().isEmpty()
+                && !"initial".equals(cursor) && !"now".equals(cursor)) {
             query.append(", cursor = '").append(sanitizeLiteral(cursor)).append("'");
         }
 

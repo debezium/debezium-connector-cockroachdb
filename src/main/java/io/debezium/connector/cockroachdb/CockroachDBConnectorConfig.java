@@ -134,13 +134,15 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
             .withDescription("The criteria for running a snapshot upon startup of the connector. "
+                    + "CockroachDB uses native changefeed 'initial_scan' to backfill existing rows. "
                     + "Select one of the following snapshot options: "
-                    + "'always': The connector runs a snapshot every time that it starts. After the snapshot completes, the connector begins to stream changes from the transaction log.; "
-                    + "'initial' (default): If the connector does not detect any offsets for the logical server name, it runs a snapshot that captures the current full state of the configured tables. After the snapshot completes, the connector begins to stream changes from the transaction log. "
-                    + "'initial_only': The connector performs a snapshot as it does for the 'initial' option, but after the connector completes the snapshot, it stops, and does not stream changes from the transaction log.; "
-                    + "'never': The connector does not run a snapshot. Upon first startup, the connector immediately begins reading from the beginning of the transaction log. "
-                    + "'exported': This option is deprecated; use 'initial' instead.; "
-                    + "'custom': The connector loads a custom class  to specify how the connector performs snapshots. For more information, see Custom snapshotter SPI in the PostgreSQL connector documentation.");
+                    + "'always': The connector creates a changefeed with initial_scan='yes' every time it starts, backfilling all existing rows before streaming.; "
+                    + "'initial' (default): On first start (no prior offset), the changefeed is created with initial_scan='yes'. On restart with an existing offset, it resumes streaming with cursor=<offset>.; "
+                    + "'initial_only': The changefeed is created with initial_scan='only'. All existing rows are backfilled, then the connector stops.; "
+                    + "'no_data'/'never': The changefeed is created with initial_scan='no'. Only ongoing changes are streamed.; "
+                    + "'when_needed': Like 'initial', but also re-snapshots if the stored offset is no longer valid.; "
+                    + "'configuration_based': Delegates to snapshot.mode.configuration.based.* properties.; "
+                    + "'custom': Loads a custom snapshotter class.");
 
     public static final Field SNAPSHOT_ISOLATION_MODE = Field.create("snapshot.isolation.mode")
             .withDisplayName("Snapshot isolation mode")
@@ -1008,5 +1010,33 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public String getChangefeedKafkaAutoOffsetReset() {
         return config.getString(CHANGEFEED_KAFKA_AUTO_OFFSET_RESET);
+    }
+
+    /**
+     * Returns the CockroachDB changefeed {@code initial_scan} option value
+     * based on the configured snapshot mode and whether a prior offset exists.
+     *
+     * @param hasPriorOffset true if a stored offset exists from a previous run
+     * @return the initial_scan value ("yes", "no", "only"), or null if no
+     *         initial_scan option should be set (let CockroachDB use its default)
+     */
+    public String getInitialScanForSnapshotMode(boolean hasPriorOffset) {
+        switch (snapshotMode) {
+            case ALWAYS:
+                return "yes";
+            case INITIAL:
+            case WHEN_NEEDED:
+                return hasPriorOffset ? "no" : "yes";
+            case NO_DATA:
+            case NEVER:
+                return "no";
+            case INITIAL_ONLY:
+                return "only";
+            case CONFIGURATION_BASED:
+            case CUSTOM:
+                return null;
+            default:
+                return hasPriorOffset ? "no" : "yes";
+        }
     }
 }

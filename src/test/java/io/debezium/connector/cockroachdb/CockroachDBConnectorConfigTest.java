@@ -256,4 +256,75 @@ public class CockroachDBConnectorConfigTest {
 
         assertThat(connectorConfig.getPort()).isEqualTo(65535);
     }
+
+    @Test
+    public void shouldReturnInitialScanYesForAlwaysMode() {
+        CockroachDBConnectorConfig config = createConfigWithSnapshotMode("always");
+        assertThat(config.getInitialScanForSnapshotMode(false)).isEqualTo("yes");
+        assertThat(config.getInitialScanForSnapshotMode(true)).isEqualTo("yes");
+    }
+
+    @Test
+    public void shouldReturnInitialScanYesForInitialModeWithoutOffset() {
+        CockroachDBConnectorConfig config = createConfigWithSnapshotMode("initial");
+        assertThat(config.getInitialScanForSnapshotMode(false)).isEqualTo("yes");
+    }
+
+    @Test
+    public void shouldReturnInitialScanNoForInitialModeWithOffset() {
+        CockroachDBConnectorConfig config = createConfigWithSnapshotMode("initial");
+        assertThat(config.getInitialScanForSnapshotMode(true)).isEqualTo("no");
+    }
+
+    @Test
+    public void shouldReturnInitialScanNoForNoDataMode() {
+        CockroachDBConnectorConfig config = createConfigWithSnapshotMode("no_data");
+        assertThat(config.getInitialScanForSnapshotMode(false)).isEqualTo("no");
+        assertThat(config.getInitialScanForSnapshotMode(true)).isEqualTo("no");
+    }
+
+    @Test
+    public void shouldReturnInitialScanNoForNeverMode() {
+        CockroachDBConnectorConfig config = createConfigWithSnapshotMode("never");
+        assertThat(config.getInitialScanForSnapshotMode(false)).isEqualTo("no");
+        assertThat(config.getInitialScanForSnapshotMode(true)).isEqualTo("no");
+    }
+
+    @Test
+    public void shouldReturnInitialScanOnlyForInitialOnlyMode() {
+        CockroachDBConnectorConfig config = createConfigWithSnapshotMode("initial_only");
+        assertThat(config.getInitialScanForSnapshotMode(false)).isEqualTo("only");
+        assertThat(config.getInitialScanForSnapshotMode(true)).isEqualTo("only");
+    }
+
+    @Test
+    public void shouldReturnInitialScanForWhenNeededMode() {
+        CockroachDBConnectorConfig config = createConfigWithSnapshotMode("when_needed");
+        assertThat(config.getInitialScanForSnapshotMode(false)).isEqualTo("yes");
+        assertThat(config.getInitialScanForSnapshotMode(true)).isEqualTo("no");
+    }
+
+    @Test
+    public void shouldReturnNullForCustomMode() {
+        CockroachDBConnectorConfig config = createConfigWithSnapshotMode("custom");
+        assertThat(config.getInitialScanForSnapshotMode(false)).isNull();
+        assertThat(config.getInitialScanForSnapshotMode(true)).isNull();
+    }
+
+    @Test
+    public void shouldReturnNullForConfigurationBasedMode() {
+        CockroachDBConnectorConfig config = createConfigWithSnapshotMode("configuration_based");
+        assertThat(config.getInitialScanForSnapshotMode(false)).isNull();
+        assertThat(config.getInitialScanForSnapshotMode(true)).isNull();
+    }
+
+    private CockroachDBConnectorConfig createConfigWithSnapshotMode(String snapshotMode) {
+        Map<String, String> props = new HashMap<>();
+        props.put("database.hostname", "localhost");
+        props.put("database.user", "root");
+        props.put("database.dbname", "defaultdb");
+        props.put("topic.prefix", "test");
+        props.put("snapshot.mode", snapshotMode);
+        return new CockroachDBConnectorConfig(Configuration.from(props));
+    }
 }

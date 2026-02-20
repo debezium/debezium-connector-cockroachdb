@@ -1,5 +1,5 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Maven Central](https://maven-badges.herokuapp.com/maven-central/io.debezium/debezium-connector-cockroachdb/badge.svg)](https://maven-badges.herokuapp.com/maven-central/io.debezium/debezium-connector-cockroachdb)
+[![Maven Central](https://img.shields.io/maven-central/v/io.debezium/debezium-connector-cockroachdb.svg?label=Maven%20Central)](https://search.maven.org/search?q=g:io.debezium%20AND%20a:debezium-connector-cockroachdb)
 [![Build Status](https://github.com/debezium/debezium-connector-cockroachdb/workflows/CI/badge.svg)](https://github.com/debezium/debezium-connector-cockroachdb/actions)
 [![Community](https://img.shields.io/badge/Community-Zulip-blue.svg)](https://debezium.zulipchat.com/#narrow/channel/510960-community-cockroachdb)
 
@@ -231,7 +231,6 @@ COCKROACHDB_VERSION=v25.2.3 docker-compose -f src/test/scripts/docker-compose.ym
 
 ## Known Limitations
 
-- **No snapshot support**: The connector skips the snapshot phase and starts from the current changefeed position. Initial table load (`AS OF SYSTEM TIME`) is planned.
 - **Sequential table processing**: Tables are processed one at a time during changefeed creation. Changefeed event consumption is topic-based.
 - **No schema change detection**: DDL changes (ALTER TABLE) are not automatically detected. Restart the connector after schema changes.
 - **No incremental snapshots**: Signal-based incremental snapshots are not yet supported.
