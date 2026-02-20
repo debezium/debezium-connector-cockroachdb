@@ -14,13 +14,13 @@ A [Debezium](https://debezium.io/) connector for capturing changes from [Cockroa
 
 The Debezium CockroachDB connector processes row-level changes from CockroachDB databases that have been captured and streamed to Apache Kafka topics by CockroachDB's native [changefeed mechanism](https://www.cockroachlabs.com/docs/stable/change-data-capture-overview).
 
-The connector works in a two-stage process:
+The connector uses a two-stage Kafka architecture:
 
-**CockroachDB Changefeed Stage:** CockroachDB's native changefeed mechanism captures row-level changes from the database and streams them directly to configured sinks (Kafka, webhook, cloud storage, etc.) in real-time.
+1. **CockroachDB changefeed -> Intermediate Kafka**: The connector creates a single CockroachDB changefeed covering all configured tables (`CREATE CHANGEFEED FOR table1, table2, ...`) with the `enriched` envelope format. CockroachDB automatically routes events to per-table Kafka topics in the intermediate cluster. The enriched format includes both schema metadata and the full before/after row state.
 
-**Debezium Processing Stage:** The Debezium connector consumes these changefeed events from Kafka topics and processes them through Debezium's event processing pipeline, converting them into standardized Debezium change events with enriched metadata.
+2. **Intermediate Kafka -> Debezium -> Output Kafka**: The connector subscribes to all per-table Kafka topics in a single KafkaConsumer, routes each event to the correct table based on the topic name, transforms the enriched changefeed events into the standard Debezium envelope format (with `before`, `after`, `source`, and `op` fields), and produces them to the final output Kafka topics.
 
-This architecture leverages CockroachDB's reliable changefeed delivery mechanism while providing the benefits of Debezium's event processing capabilities, including schema evolution, event transformation, and integration with the broader Debezium ecosystem.
+Using a single multi-table changefeed is the [recommended approach](https://www.cockroachlabs.com/docs/stable/create-and-configure-changefeeds#recommendations) to stay within CockroachDB's limit of approximately 80 changefeed jobs per cluster.
 
 **Status**: This connector is currently in incubation phase and is being developed and tested.
 
@@ -53,7 +53,7 @@ Example connector configuration:
     "database.password": "",
     "database.dbname": "testdb",
     "database.server.name": "cockroachdb",
-    "table.include.list": "public.products",
+    "table.include.list": "public.orders,public.customers",
     "cockroachdb.changefeed.envelope": "enriched",
     "cockroachdb.changefeed.enriched.properties": "source,schema",
     "cockroachdb.changefeed.sink.type": "kafka",
@@ -63,6 +63,7 @@ Example connector configuration:
     "cockroachdb.changefeed.resolved.interval": "10s",
     "cockroachdb.changefeed.include.updated": true,
     "cockroachdb.changefeed.include.diff": true,
+    "snapshot.mode": "initial",
     "cockroachdb.changefeed.cursor": "now",
     "cockroachdb.changefeed.batch.size": 1000,
     "cockroachdb.changefeed.poll.interval.ms": 100,
@@ -109,13 +110,32 @@ Example connector configuration:
 | `cockroachdb.changefeed.batch.size`          | 1000     | Batch size for changefeed processing          |
 | `cockroachdb.changefeed.poll.interval.ms`    | 100      | Poll interval in milliseconds                 |
 
+#### Snapshot Configuration
+
+The connector uses CockroachDB's native changefeed [`initial_scan`](https://www.cockroachlabs.com/docs/stable/create-changefeed#initial-scan) option to backfill existing rows instead of a separate JDBC-based snapshot phase. During the initial scan, events are marked with `op=r` (read). Once the scan completes and streaming begins, events use the standard `op=c/u/d` operation types.
+
+| Option          | Default   | Description                                                                                                      |
+|-----------------|-----------|------------------------------------------------------------------------------------------------------------------|
+| `snapshot.mode` | `initial` | Controls whether existing rows are backfilled on startup. See the mapping table below for all supported modes.   |
+
+**Snapshot mode to CockroachDB `initial_scan` mapping:**
+
+| Snapshot Mode       | initial_scan | Behavior                                                                                             |
+|---------------------|--------------|------------------------------------------------------------------------------------------------------|
+| `initial` (default) | `yes` / `no` | On first start (no prior offset), backfills all rows. On restart, resumes from stored cursor.        |
+| `always`            | `yes`        | Always backfills all existing rows, even on restart.                                                 |
+| `initial_only`      | `only`       | Backfills all existing rows, then stops the connector. Useful for one-time data migration.           |
+| `no_data` / `never` | `no`         | Skips the initial scan. Only ongoing changes are captured.                                           |
+| `when_needed`       | `yes` / `no` | Like `initial`, but also re-snapshots if the stored offset is no longer valid (e.g. GC TTL expired). |
+
 #### Kafka Consumer Configuration (Advanced)
 
-| Option                                                 | Default      | Description                                      |
-|--------------------------------------------------------|--------------|--------------------------------------------------|
-| `cockroachdb.changefeed.kafka.consumer.group.prefix`   | cockroachdb  | Prefix for Kafka consumer group ID               |
-| `cockroachdb.changefeed.kafka.poll.timeout.ms`         | 1000         | Kafka consumer poll timeout in milliseconds      |
-| `cockroachdb.changefeed.kafka.auto.offset.reset`       | earliest     | Kafka consumer auto offset reset policy          |
+| Option                                               | Default     | Description                                                                                                                                                                    |
+|------------------------------------------------------|-------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `cockroachdb.changefeed.kafka.bootstrap.servers`     | -           | Consumer bootstrap servers. When not set, derived from `sink.uri`. Use when CockroachDB connects to Kafka via internal DNS but the connector JVM requires an external address. |
+| `cockroachdb.changefeed.kafka.consumer.group.prefix` | cockroachdb | Prefix for Kafka consumer group ID                                                                                                                                             |
+| `cockroachdb.changefeed.kafka.poll.timeout.ms`       | 1000        | Kafka consumer poll timeout in milliseconds                                                                                                                                    |
+| `cockroachdb.changefeed.kafka.auto.offset.reset`     | earliest    | Kafka consumer auto offset reset policy                                                                                                                                        |
 
 #### Connection Settings
 
@@ -231,9 +251,9 @@ COCKROACHDB_VERSION=v25.2.3 docker-compose -f src/test/scripts/docker-compose.ym
 
 ## Known Limitations
 
-- **Sequential table processing**: Tables are processed one at a time during changefeed creation. Changefeed event consumption is topic-based.
+- **Single changefeed job**: The connector creates a single multi-table changefeed (`CREATE CHANGEFEED FOR table1, table2, ...`) and consumes all per-table Kafka topics concurrently in a single KafkaConsumer. This is the [recommended approach](https://www.cockroachlabs.com/docs/stable/create-and-configure-changefeeds#recommendations) to stay within CockroachDB's ~80 changefeed job limit per cluster.
 - **No schema change detection**: DDL changes (ALTER TABLE) are not automatically detected. Restart the connector after schema changes.
-- **No incremental snapshots**: Signal-based incremental snapshots are not yet supported.
+- **No incremental snapshots**: Signal-based incremental snapshots are not yet supported. Initial snapshots are supported via CockroachDB's native `initial_scan` changefeed option (see Snapshot Configuration above).
 - **No heartbeat support**: Heartbeat events are not emitted.
 - **Kafka-only sink**: Only Kafka sinks are supported. Webhook, Pub/Sub, and cloud storage sinks are planned.
 

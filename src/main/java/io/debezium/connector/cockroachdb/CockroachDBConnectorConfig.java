@@ -294,6 +294,17 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     "For multi-tenant deployments, consider using a unique prefix per tenant. " +
                     "If not specified, defaults to 'cockroachdb'.");
 
+    public static final Field CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS = Field.create("cockroachdb.changefeed.kafka.bootstrap.servers")
+            .withDisplayName("Kafka consumer bootstrap servers")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 14))
+            .withWidth(Width.LONG)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("Bootstrap servers for the Kafka consumer that reads changefeed events. "
+                    + "When not set, derived from the changefeed sink URI. "
+                    + "Use this when CockroachDB connects to Kafka via internal DNS (e.g. kafka:9092) "
+                    + "but the connector JVM requires an external address (e.g. localhost:29092).");
+
     public static final Field CHANGEFEED_KAFKA_CONSUMER_GROUP_PREFIX = Field.create("cockroachdb.changefeed.kafka.consumer.group.prefix")
             .withDisplayName("Kafka consumer group ID prefix")
             .withType(Type.STRING)
@@ -433,6 +444,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     CHANGEFEED_SINK_TYPE,
                     CHANGEFEED_SINK_URI,
                     CHANGEFEED_SINK_TOPIC_PREFIX,
+                    CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS,
                     CHANGEFEED_KAFKA_CONSUMER_GROUP_PREFIX,
                     CHANGEFEED_KAFKA_POLL_TIMEOUT_MS,
                     CHANGEFEED_KAFKA_AUTO_OFFSET_RESET,
@@ -998,6 +1010,10 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public boolean isSkipPermissionCheck() {
         return config.getBoolean(SKIP_PERMISSION_CHECK);
+    }
+
+    public String getChangefeedKafkaBootstrapServers() {
+        return config.getString(CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS);
     }
 
     public String getChangefeedKafkaConsumerGroupPrefix() {
