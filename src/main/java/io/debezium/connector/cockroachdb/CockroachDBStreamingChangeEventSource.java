@@ -8,13 +8,14 @@ package io.debezium.connector.cockroachdb;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -38,11 +39,14 @@ import io.debezium.util.Metronome;
 /**
  * Streaming change event source for CockroachDB using native sink changefeeds.
  *
- * <p>Creates sink changefeeds that write to an external system (Kafka by default),
- * consumes events from that system, parses the enriched envelope, and dispatches
- * events through Debezium's {@link EventDispatcher} pipeline. Other sink types
- * (webhook, pubsub, cloud storage) can be added by implementing a new
- * {@code consumeFrom*} method and registering it in {@link #consumeChangefeedEvents}.</p>
+ * <p>Creates a single multi-table changefeed that writes to an external system
+ * (Kafka by default), consumes events from all per-table topics in a single
+ * KafkaConsumer, routes each event to the correct {@link TableId} based on the
+ * Kafka topic name, and dispatches events through Debezium's {@link EventDispatcher}
+ * pipeline.</p>
+ *
+ * <p>CockroachDB recommends no more than ~80 changefeed jobs per cluster, so a
+ * single multi-table changefeed is preferred over one changefeed per table.</p>
  *
  * @author Virag Tripathi
  */
@@ -72,6 +76,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             });
 
     /**
+     * Maps Kafka topic names to their corresponding {@link TableId} for routing
+     * events consumed from the multi-table changefeed.
+     */
+    private final Map<String, TableId> topicToTableMap = new HashMap<>();
+
+    /**
      * Tracks whether the changefeed is still performing an initial scan.
      * Set to true when a changefeed is created with {@code initial_scan='yes'}
      * and cleared when the first resolved timestamp is received, which signals
@@ -85,9 +95,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                                  CockroachDBSchema schema,
                                                  Clock clock) {
         this.config = Objects.requireNonNull(config, "config must not be null");
-        this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher must not be null");
-        this.schema = Objects.requireNonNull(schema, "schema must not be null");
-        this.clock = Objects.requireNonNull(clock, "clock must not be null");
+        this.dispatcher = dispatcher;
+        this.schema = schema;
+        this.clock = clock;
     }
 
     @Override
@@ -97,6 +107,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         Objects.requireNonNull(context, "context must not be null");
         Objects.requireNonNull(partition, "partition must not be null");
         Objects.requireNonNull(offsetContext, "offsetContext must not be null");
+        Objects.requireNonNull(dispatcher, "dispatcher must not be null");
+        Objects.requireNonNull(schema, "schema must not be null");
+        Objects.requireNonNull(clock, "clock must not be null");
 
         LOGGER.info("Starting CockroachDB streaming from cursor '{}', sink type '{}'",
                 offsetContext.getCursor(), config.getChangefeedSinkType());
@@ -121,21 +134,19 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             LOGGER.info("Snapshot mode: {}, hasPriorOffset: {}, cursor: '{}'",
                     config.getSnapshotMode().getValue(), hasPriorOffset, cursor);
 
-            for (int i = 0; i < tables.size(); i++) {
-                TableId table = tables.get(i);
-                if (!context.isRunning()) {
-                    LOGGER.debug("Context stopped, exiting table loop");
-                    break;
-                }
-                LOGGER.debug("Processing table {}/{}: {}", i + 1, tables.size(), table);
-                processTableWithSinkChangefeed(connection, table, offsetContext, context, hasPriorOffset);
+            // Build topic-to-table mapping for all tables
+            topicToTableMap.clear();
+            for (TableId table : tables) {
+                String topicName = buildTopicName(table);
+                topicToTableMap.put(topicName, table);
+                LOGGER.debug("Mapped topic {} -> table {}", topicName, table);
             }
 
-            Duration pollInterval = Duration.ofMillis(config.getChangefeedPollIntervalMs());
-            Metronome metronome = Metronome.sleeper(pollInterval, clock);
-            while (context.isRunning() && running.get()) {
-                metronome.pause();
-            }
+            // Create a single multi-table changefeed (if not already running)
+            createMultiTableChangefeed(connection, tables, offsetContext, hasPriorOffset);
+
+            // Consume events from all per-table topics in a single consumer
+            consumeChangefeedEvents(tables, offsetContext, context);
         }
         catch (SQLException e) {
             LOGGER.error("Error in CockroachDB streaming", e);
@@ -148,53 +159,53 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
-     * Creates a sink changefeed for the given table (if one is not already running)
-     * and starts consuming events from the corresponding sink.
+     * Creates a single multi-table changefeed covering all configured tables.
+     * If a changefeed already exists for any of the tables, creation is skipped.
      */
-    private void processTableWithSinkChangefeed(
-                                                CockroachDBConnection connection,
-                                                TableId table,
-                                                CockroachDBOffsetContext offsetContext,
-                                                ChangeEventSourceContext context,
-                                                boolean hasPriorOffset)
-            throws SQLException, InterruptedException {
+    private void createMultiTableChangefeed(
+                                            CockroachDBConnection connection,
+                                            List<TableId> tables,
+                                            CockroachDBOffsetContext offsetContext,
+                                            boolean hasPriorOffset)
+            throws SQLException {
 
-        LOGGER.debug("Checking for existing changefeed job for table {}", table);
-        if (changefeedExists(connection, table)) {
-            LOGGER.info("Changefeed already running for table {}, skipping creation", table);
-        }
-        else {
-            String changefeedQuery = buildSinkChangefeedQuery(table, offsetContext.getCursor(), hasPriorOffset);
-            LOGGER.debug("Built changefeed query for table {}: {}", table, changefeedQuery);
-
-            try (Statement stmt = connection.connection().createStatement()) {
-                stmt.execute(changefeedQuery);
-                LOGGER.info("Created changefeed for table {}", table);
-            }
-
-            String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
-            initialScanInProgress = "yes".equals(initialScan);
-            if (initialScanInProgress) {
-                LOGGER.info("Initial scan in progress for table {} (snapshot.mode={})",
-                        table, config.getSnapshotMode().getValue());
+        // Check if a changefeed already covers any of our tables
+        for (TableId table : tables) {
+            if (changefeedExists(connection, table)) {
+                LOGGER.info("Changefeed already running for table {}, skipping multi-table creation", table);
+                return;
             }
         }
 
-        consumeChangefeedEvents(table, offsetContext, context);
+        String changefeedQuery = buildSinkChangefeedQuery(tables, offsetContext.getCursor(), hasPriorOffset);
+        LOGGER.info("Creating multi-table changefeed for {} table(s)", tables.size());
+        LOGGER.debug("Changefeed query: {}", changefeedQuery);
+
+        try (Statement stmt = connection.connection().createStatement()) {
+            stmt.execute(changefeedQuery);
+            LOGGER.info("Created changefeed for tables: {}", tables);
+        }
+
+        String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
+        initialScanInProgress = "yes".equals(initialScan);
+        if (initialScanInProgress) {
+            LOGGER.info("Initial scan in progress (snapshot.mode={})",
+                    config.getSnapshotMode().getValue());
+        }
     }
 
     /**
      * Routes event consumption to the appropriate sink-specific implementation.
-     * Add new sink types here as they are implemented.
+     * Subscribes to all per-table topics in a single consumer for concurrent processing.
      */
-    private void consumeChangefeedEvents(TableId table, CockroachDBOffsetContext offsetContext,
+    private void consumeChangefeedEvents(List<TableId> tables, CockroachDBOffsetContext offsetContext,
                                          ChangeEventSourceContext context)
             throws InterruptedException {
         String sinkType = config.getChangefeedSinkType();
-        LOGGER.debug("Routing to sink consumer type='{}' for table {}", sinkType, table);
+        LOGGER.debug("Routing to sink consumer type='{}' for {} table(s)", sinkType, tables.size());
         switch (sinkType) {
             case "kafka":
-                consumeFromKafkaTopic(table, offsetContext, context);
+                consumeFromKafkaTopics(tables, offsetContext, context);
                 break;
             default:
                 throw new IllegalArgumentException(
@@ -228,35 +239,45 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
-     * Consumes changefeed events from a Kafka topic created by the sink changefeed.
+     * Consumes changefeed events from all per-table Kafka topics in a single consumer.
+     * Routes each event to the correct {@link TableId} based on the Kafka topic name.
      */
-    private void consumeFromKafkaTopic(TableId table, CockroachDBOffsetContext offsetContext,
-                                       ChangeEventSourceContext context)
+    private void consumeFromKafkaTopics(List<TableId> tables, CockroachDBOffsetContext offsetContext,
+                                        ChangeEventSourceContext context)
             throws InterruptedException {
-        String topicName = buildTopicName(table);
+        List<String> topicNames = tables.stream()
+                .map(this::buildTopicName)
+                .collect(Collectors.toList());
 
         java.util.Properties props = new java.util.Properties();
-        String sinkUri = config.getChangefeedSinkUri();
-        if (sinkUri != null) {
-            String bootstrapServers = sinkUri.replaceFirst("^kafka://", "");
-            bootstrapServers = bootstrapServers.replaceFirst("^PLAINTEXT://", "");
-            props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        String explicitBootstrap = config.getChangefeedKafkaBootstrapServers();
+        if (explicitBootstrap != null && !explicitBootstrap.trim().isEmpty()) {
+            props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, explicitBootstrap);
         }
-        props.put(ConsumerConfig.GROUP_ID_CONFIG,
-                config.getChangefeedKafkaConsumerGroupPrefix() + "-" + table.table());
+        else {
+            String sinkUri = config.getChangefeedSinkUri();
+            if (sinkUri != null) {
+                String bootstrapServers = sinkUri.replaceFirst("^kafka://", "");
+                bootstrapServers = bootstrapServers.replaceFirst("^PLAINTEXT://", "");
+                props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+            }
+        }
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, config.getChangefeedKafkaConsumerGroupPrefix());
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, config.getChangefeedKafkaAutoOffsetReset());
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
 
-        String groupId = config.getChangefeedKafkaConsumerGroupPrefix() + "-" + table.table();
-        LOGGER.debug("Kafka consumer config: bootstrapServers={}, groupId={}, autoOffsetReset={}, pollTimeout={}ms",
-                props.get(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG), groupId,
-                config.getChangefeedKafkaAutoOffsetReset(), config.getChangefeedKafkaPollTimeoutMs());
+        LOGGER.debug("Kafka consumer config: bootstrapServers={}, groupId={}, autoOffsetReset={}, pollTimeout={}ms, topics={}",
+                props.get(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG),
+                config.getChangefeedKafkaConsumerGroupPrefix(),
+                config.getChangefeedKafkaAutoOffsetReset(),
+                config.getChangefeedKafkaPollTimeoutMs(),
+                topicNames);
 
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
-            consumer.subscribe(Arrays.asList(topicName));
-            LOGGER.info("Consuming from Kafka topic: {}", topicName);
+            consumer.subscribe(topicNames);
+            LOGGER.info("Consuming from {} Kafka topic(s): {}", topicNames.size(), topicNames);
 
             Duration pollInterval = Duration.ofMillis(config.getChangefeedPollIntervalMs());
             Metronome metronome = Metronome.sleeper(pollInterval, clock);
@@ -268,12 +289,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 if (records.isEmpty()) {
                     emptyPollCount++;
                     if (emptyPollCount % 100 == 0) {
-                        LOGGER.debug("No events received from topic {} for {} consecutive polls", topicName, emptyPollCount);
+                        LOGGER.debug("No events received for {} consecutive polls", emptyPollCount);
                     }
                 }
                 else {
                     emptyPollCount = 0;
-                    LOGGER.trace("Polled {} records from Kafka topic {}", records.count(), topicName);
+                    LOGGER.trace("Polled {} records from {} topic(s)", records.count(), topicNames.size());
                 }
 
                 for (ConsumerRecord<String, String> record : records) {
@@ -282,7 +303,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     }
                     String valueJson = record.value();
                     if (valueJson != null && !valueJson.trim().isEmpty()) {
-                        processChangefeedEvent(valueJson, table, offsetContext);
+                        TableId table = resolveTableFromTopic(record.topic());
+                        if (table != null) {
+                            processChangefeedEvent(valueJson, table, offsetContext);
+                        }
+                        else {
+                            LOGGER.warn("Cannot resolve table for topic '{}', skipping event", record.topic());
+                        }
                     }
                 }
 
@@ -296,12 +323,39 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 metronome.pause();
             }
 
-            LOGGER.debug("Stopped consuming from Kafka topic: {}", topicName);
+            LOGGER.debug("Stopped consuming from Kafka topics: {}", topicNames);
         }
         catch (Exception e) {
-            LOGGER.error("Error consuming from Kafka topic {}: {}", topicName, e.getMessage(), e);
-            throw new RuntimeException("Failed to consume from Kafka topic " + topicName, e);
+            LOGGER.error("Error consuming from Kafka topics {}: {}", topicNames, e.getMessage(), e);
+            throw new RuntimeException("Failed to consume from Kafka topics " + topicNames, e);
         }
+    }
+
+    /**
+     * Resolves the {@link TableId} for a Kafka topic using the pre-built mapping.
+     * Falls back to parsing the topic name if no exact match is found.
+     */
+    private TableId resolveTableFromTopic(String topic) {
+        TableId table = topicToTableMap.get(topic);
+        if (table != null) {
+            return table;
+        }
+
+        // Fallback: parse topic name (format: prefix.database.schema.table)
+        String[] parts = topic.split("\\.");
+        if (parts.length >= 3) {
+            String schemaName = parts[parts.length - 2];
+            String tableName = parts[parts.length - 1];
+            for (TableId candidate : topicToTableMap.values()) {
+                if (candidate.table().equals(tableName) && candidate.schema().equals(schemaName)) {
+                    LOGGER.debug("Resolved table {} from topic {} via fallback parsing", candidate, topic);
+                    topicToTableMap.put(topic, candidate);
+                    return candidate;
+                }
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -429,28 +483,30 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
-     * Builds the CockroachDB {@code CREATE CHANGEFEED} SQL statement for the given table.
-     * Includes the {@code initial_scan} option based on the configured snapshot mode.
-     * All user-configurable values are sanitized before interpolation.
+     * Builds a multi-table {@code CREATE CHANGEFEED FOR table1, table2, ...} SQL statement.
+     * Uses {@code full_table_name} so CockroachDB creates topics in {@code db.schema.table}
+     * format, and adds {@code topic_prefix} so the final Kafka topic name is
+     * {@code prefix.db.schema.table} -- matching what {@link #buildTopicName(TableId)} produces.
      */
-    private String buildSinkChangefeedQuery(TableId table, String cursor, boolean hasPriorOffset) {
+    String buildSinkChangefeedQuery(List<TableId> tables, String cursor, boolean hasPriorOffset) {
         StringBuilder query = new StringBuilder();
         query.append("CREATE CHANGEFEED FOR TABLE ");
-        query.append(sanitizeIdentifier(table.toString()));
+        query.append(tables.stream()
+                .map(t -> sanitizeIdentifier(t.toString()))
+                .collect(Collectors.joining(", ")));
 
         String sinkUri = config.getChangefeedSinkUri();
-        String topicName = buildTopicName(table);
-
-        if (sinkUri.contains("?")) {
-            sinkUri += "&topic_name=" + sanitizeLiteral(topicName);
+        String topicPrefix = config.getChangefeedSinkTopicPrefix();
+        if (topicPrefix == null || topicPrefix.trim().isEmpty()) {
+            topicPrefix = "cockroachdb";
         }
-        else {
-            sinkUri += "?topic_name=" + sanitizeLiteral(topicName);
-        }
-
+        // Append topic_prefix to the sink URI so CockroachDB names topics as prefix.db.schema.table
+        String separator = sinkUri.contains("?") ? "&" : "?";
+        sinkUri = sinkUri + separator + "topic_prefix=" + sanitizeLiteral(topicPrefix) + ".";
         query.append(" INTO '").append(sanitizeLiteral(sinkUri)).append("'");
 
-        query.append(" WITH envelope = '").append(sanitizeLiteral(config.getChangefeedEnvelope())).append("'");
+        query.append(" WITH full_table_name");
+        query.append(", envelope = '").append(sanitizeLiteral(config.getChangefeedEnvelope())).append("'");
 
         String enrichedProperties = config.getChangefeedEnrichedProperties();
         if (enrichedProperties != null && !enrichedProperties.trim().isEmpty()) {
