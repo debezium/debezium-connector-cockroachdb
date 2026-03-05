@@ -214,6 +214,20 @@ For CockroachDB Cloud (Serverless or Dedicated), use `verify-full` SSL mode:
 
 CockroachDB Cloud clusters use publicly trusted certificates, so no `sslrootcert` is needed.
 
+## Heartbeat Support
+
+CockroachDB changefeed [resolved timestamps](https://www.cockroachlabs.com/docs/stable/changefeed-messages#resolved-messages) serve as natural heartbeats. When the connector receives a resolved timestamp it updates the stored offset cursor and dispatches a Debezium heartbeat event, ensuring offsets advance even during idle periods with no data changes.
+
+To emit heartbeat records to the `__debezium-heartbeat.<topic.prefix>` Kafka topic, set:
+
+```json
+{
+  "heartbeat.interval.ms": "10000"
+}
+```
+
+The `cockroachdb.changefeed.resolved.interval` property (default `10s`) controls how frequently CockroachDB emits resolved timestamps.
+
 ## Testing
 
 Run all unit tests:
@@ -254,7 +268,6 @@ COCKROACHDB_VERSION=v25.2.3 docker-compose -f src/test/scripts/docker-compose.ym
 - **Single changefeed job**: The connector creates a single multi-table changefeed (`CREATE CHANGEFEED FOR table1, table2, ...`) and consumes all per-table Kafka topics concurrently in a single KafkaConsumer. This is the [recommended approach](https://www.cockroachlabs.com/docs/stable/create-and-configure-changefeeds#recommendations) to stay within CockroachDB's ~80 changefeed job limit per cluster.
 - **No schema change detection**: DDL changes (ALTER TABLE) are not automatically detected. Restart the connector after schema changes.
 - **No incremental snapshots**: Signal-based incremental snapshots are not yet supported. Initial snapshots are supported via CockroachDB's native `initial_scan` changefeed option (see Snapshot Configuration above).
-- **No heartbeat support**: Heartbeat events are not emitted.
 - **Kafka-only sink**: Only Kafka sinks are supported. Webhook, Pub/Sub, and cloud storage sinks are planned.
 
 ## Troubleshooting
