@@ -8,6 +8,7 @@ package io.debezium.connector.cockroachdb;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -89,6 +90,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     private volatile boolean initialScanInProgress = false;
 
+    /**
+     * Partition instance from {@link #execute}, stored for heartbeat dispatch
+     * in the consumer loop and resolved-timestamp handler.
+     */
+    private CockroachDBPartition currentPartition;
+
     public CockroachDBStreamingChangeEventSource(
                                                  CockroachDBConnectorConfig config,
                                                  EventDispatcher<CockroachDBPartition, TableId> dispatcher,
@@ -111,9 +118,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         Objects.requireNonNull(schema, "schema must not be null");
         Objects.requireNonNull(clock, "clock must not be null");
 
-        LOGGER.info("Starting CockroachDB streaming from cursor '{}', sink type '{}'",
-                offsetContext.getCursor(), config.getChangefeedSinkType());
+        LOGGER.info("Starting CockroachDB streaming from cursor '{}', sink type '{}', heartbeat={}ms",
+                offsetContext.getCursor(), config.getChangefeedSinkType(),
+                config.getHeartbeatInterval().toMillis());
         running.set(true);
+        this.currentPartition = partition;
 
         try (CockroachDBConnection connection = new CockroachDBConnection(config)) {
             connection.connect();
@@ -291,6 +300,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     if (emptyPollCount % 100 == 0) {
                         LOGGER.debug("No events received for {} consecutive polls", emptyPollCount);
                     }
+                    // Emit heartbeat during idle periods to advance offsets
+                    dispatcher.dispatchHeartbeatEvent(currentPartition, offsetContext);
                 }
                 else {
                     emptyPollCount = 0;
@@ -377,7 +388,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     initialScanInProgress = false;
                     LOGGER.info("Initial scan completed (first resolved timestamp received: {})", resolvedTs);
                 }
-                LOGGER.debug("Received resolved timestamp: {}", resolvedTs);
+
+                // Update offset with the resolved timestamp so offsets advance
+                offsetContext.setCursor(resolvedTs);
+                offsetContext.setTimestamp(parseResolvedTimestamp(resolvedTs));
+                LOGGER.debug("Received resolved timestamp: {}, offset advanced", resolvedTs);
+
+                // Dispatch heartbeat to commit the advanced offset
+                dispatcher.dispatchHeartbeatEvent(currentPartition, offsetContext);
                 return;
             }
 
@@ -574,6 +592,31 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             return "";
         }
         return identifier.replaceAll("[^a-zA-Z0-9_.\\-]", "");
+    }
+
+    /**
+     * Parses a CockroachDB resolved timestamp string into an {@link Instant}.
+     *
+     * <p>CockroachDB uses HLC (Hybrid Logical Clock) timestamps in the format
+     * {@code <wall_time_nanos>.<logical_counter>}, e.g. {@code "1772695406971781718.0000000000"}.
+     * The integer part is wall-clock time in <b>nanoseconds</b> since Unix epoch;
+     * the fractional part is a logical counter (not sub-nanoseconds).</p>
+     */
+    static Instant parseResolvedTimestamp(String resolvedTs) {
+        if (resolvedTs == null || resolvedTs.isEmpty()) {
+            return Instant.EPOCH;
+        }
+        try {
+            String[] parts = resolvedTs.split("\\.");
+            long wallTimeNanos = Long.parseLong(parts[0]);
+            long seconds = wallTimeNanos / 1_000_000_000L;
+            long nanos = wallTimeNanos % 1_000_000_000L;
+            return Instant.ofEpochSecond(seconds, nanos);
+        }
+        catch (NumberFormatException | ArithmeticException e) {
+            LOGGER.warn("Unable to parse resolved timestamp '{}', using epoch", resolvedTs);
+            return Instant.EPOCH;
+        }
     }
 
     public void stop() {
