@@ -26,7 +26,7 @@ Using a single multi-table changefeed is the [recommended approach](https://www.
 
 ## Prerequisites
 
-* CockroachDB v25.2+ with [rangefeed enabled](https://www.cockroachlabs.com/docs/stable/create-and-configure-changefeeds.html#enable-rangefeeds) (enriched envelope support introduced in v25.2; tested with v26.1.0)
+* CockroachDB v25.2+ with [rangefeed enabled](https://www.cockroachlabs.com/docs/stable/create-and-configure-changefeeds.html#enable-rangefeeds) (enriched envelope support introduced in v25.2)
 * CockroachDB v24.2+ for [pgvector-compatible VECTOR type](https://www.cockroachlabs.com/docs/stable/vector) support
 * Kafka Connect
 * JDK 21+
@@ -228,6 +228,16 @@ To emit heartbeat records to the `__debezium-heartbeat.<topic.prefix>` Kafka top
 
 The `cockroachdb.changefeed.resolved.interval` property (default `10s`) controls how frequently CockroachDB emits resolved timestamps.
 
+## Schema Evolution Detection
+
+The connector automatically detects DDL changes (`ALTER TABLE ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`) without requiring a restart. When an incoming changefeed event contains fields that don't match the registered table schema, the connector:
+
+1. Detects the mismatch by comparing event field names against registered column names
+2. Re-queries `information_schema` to get the updated table definition
+3. Refreshes the internal schema and continues processing with the new schema
+
+CockroachDB changefeeds handle schema changes natively by performing a backfill (re-emitting all rows with the new schema), so no events are lost during the transition.
+
 ## Testing
 
 Run all unit tests:
@@ -242,7 +252,7 @@ Run integration tests (requires Docker for Testcontainers):
 ./mvnw clean test -Dtest="*IT"
 ```
 
-Run against a specific CockroachDB version (default is v26.1.0):
+Run against a specific CockroachDB version (default is v25.4.6):
 
 ```bash
 ./mvnw clean test -Dtest="*IT" -Dcockroachdb.version=v25.2.3
@@ -266,7 +276,7 @@ COCKROACHDB_VERSION=v25.2.3 docker-compose -f src/test/scripts/docker-compose.ym
 ## Known Limitations
 
 - **Single changefeed job**: The connector creates a single multi-table changefeed (`CREATE CHANGEFEED FOR table1, table2, ...`) and consumes all per-table Kafka topics concurrently in a single KafkaConsumer. This is the [recommended approach](https://www.cockroachlabs.com/docs/stable/create-and-configure-changefeeds#recommendations) to stay within CockroachDB's ~80 changefeed job limit per cluster.
-- **No schema change detection**: DDL changes (ALTER TABLE) are not automatically detected. Restart the connector after schema changes.
+
 - **No incremental snapshots**: Signal-based incremental snapshots are not yet supported. Initial snapshots are supported via CockroachDB's native `initial_scan` changefeed option (see Snapshot Configuration above).
 - **Kafka-only sink**: Only Kafka sinks are supported. Webhook, Pub/Sub, and cloud storage sinks are planned.
 

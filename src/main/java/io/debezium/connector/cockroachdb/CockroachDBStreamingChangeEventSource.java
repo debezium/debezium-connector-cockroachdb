@@ -96,6 +96,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     private CockroachDBPartition currentPartition;
 
+    /**
+     * Connection to CockroachDB, kept alive during streaming for schema
+     * refresh queries when DDL changes are detected.
+     */
+    private CockroachDBConnection schemaRefreshConnection;
+
     public CockroachDBStreamingChangeEventSource(
                                                  CockroachDBConnectorConfig config,
                                                  EventDispatcher<CockroachDBPartition, TableId> dispatcher,
@@ -126,6 +132,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
         try (CockroachDBConnection connection = new CockroachDBConnection(config)) {
             connection.connect();
+            this.schemaRefreshConnection = connection;
             LOGGER.debug("Connected to CockroachDB at {}:{}, database={}",
                     config.getHostname(), config.getPort(), config.getDatabaseName());
 
@@ -162,6 +169,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             throw new RuntimeException("Failed to stream changes from CockroachDB", e);
         }
         finally {
+            this.schemaRefreshConnection = null;
             running.set(false);
             LOGGER.info("Stopped CockroachDB streaming change event source");
         }
@@ -418,6 +426,16 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 return;
             }
 
+            // Detect schema changes by comparing event fields against registered columns
+            JsonNode dataNode = !afterNode.isMissingNode() ? afterNode : beforeNode;
+            if (dataNode != null && !dataNode.isMissingNode() && hasSchemaChanged(dataNode, tableObj)) {
+                tableObj = refreshTableSchema(table);
+                if (tableObj == null) {
+                    LOGGER.error("Schema refresh failed for table {}, skipping event", table);
+                    return;
+                }
+            }
+
             CockroachDBPartition partition = new CockroachDBPartition();
             CockroachDBChangeRecordEmitter emitter = new CockroachDBChangeRecordEmitter(
                     partition, offsetContext, clock, config, tableObj, operation,
@@ -616,6 +634,55 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         catch (NumberFormatException | ArithmeticException e) {
             LOGGER.warn("Unable to parse resolved timestamp '{}', using epoch", resolvedTs);
             return Instant.EPOCH;
+        }
+    }
+
+    /**
+     * Detects whether the incoming event's fields differ from the registered table schema.
+     * Compares JSON field names in the event data against the table's column names.
+     * Returns {@code true} if a new field is present or a registered column is absent.
+     */
+    static boolean hasSchemaChanged(JsonNode dataNode, io.debezium.relational.Table table) {
+        // Check for new columns: event field not in registered schema
+        java.util.Iterator<String> fieldNames = dataNode.fieldNames();
+        int eventFieldCount = 0;
+        while (fieldNames.hasNext()) {
+            String field = fieldNames.next();
+            eventFieldCount++;
+            if (table.columnWithName(field) == null) {
+                LOGGER.info("Schema change detected for table {}: new field '{}' in event",
+                        table.id(), field);
+                return true;
+            }
+        }
+
+        // Check for dropped non-nullable columns: registered column absent from event
+        for (io.debezium.relational.Column col : table.columns()) {
+            if (!col.isOptional() && !dataNode.has(col.name())) {
+                LOGGER.info("Schema change detected for table {}: registered non-nullable column '{}' absent from event",
+                        table.id(), col.name());
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Refreshes the schema for a table by re-querying {@code information_schema}
+     * through the persistent connection kept alive during streaming.
+     */
+    private io.debezium.relational.Table refreshTableSchema(TableId tableId) {
+        if (schemaRefreshConnection == null) {
+            LOGGER.error("No connection available for schema refresh of table {}", tableId);
+            return null;
+        }
+        try {
+            return schema.refreshTable(schemaRefreshConnection, tableId);
+        }
+        catch (Exception e) {
+            LOGGER.error("Failed to refresh schema for table {}: {}", tableId, e.getMessage(), e);
+            return null;
         }
     }
 

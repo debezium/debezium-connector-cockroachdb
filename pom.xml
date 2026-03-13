@@ -34,7 +34,7 @@
         <!-- Debezium parent -->
         <version.debezium>${project.version}</version.debezium>
 
-        <cockroachdb.version>v26.1.0</cockroachdb.version>
+        <cockroachdb.version>v25.4.6</cockroachdb.version>
     </properties>
 
     <dependencyManagement>
@@ -272,8 +272,10 @@
     <build>
         <resources>
             <resource>
+                <filtering>true</filtering>
                 <directory>src/main/resources</directory>
                 <includes>
+                    <include>*</include>
                     <include>**/*</include>
                 </includes>
             </resource>
@@ -281,8 +283,10 @@
 
         <testResources>
             <testResource>
+                <filtering>true</filtering>
                 <directory>src/test/resources</directory>
                 <includes>
+                    <include>*</include>
                     <include>**/*</include>
                 </includes>
             </testResource>
