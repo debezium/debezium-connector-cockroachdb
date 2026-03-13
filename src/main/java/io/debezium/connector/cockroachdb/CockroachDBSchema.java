@@ -111,6 +111,26 @@ public class CockroachDBSchema extends RelationalDatabaseSchema {
     }
 
     /**
+     * Refreshes the schema for a single table by re-querying {@code information_schema}.
+     * Called when a schema change is detected during changefeed event processing.
+     *
+     * @return the refreshed {@link Table}, or {@code null} if the table no longer exists
+     */
+    public Table refreshTable(CockroachDBConnection connection, TableId tableId) throws Exception {
+        LOGGER.info("Refreshing schema for table {}", tableId);
+        Table table = buildTable(connection, tableId);
+        if (table != null) {
+            tables().overwriteTable(table);
+            refreshSchema(tableId);
+            LOGGER.info("Schema refreshed for table {} ({} columns)", tableId, table.columns().size());
+        }
+        else {
+            LOGGER.warn("Table {} no longer exists after schema refresh", tableId);
+        }
+        return table;
+    }
+
+    /**
      * Queries {@code information_schema.columns} and {@code information_schema.key_column_usage}
      * to build a complete {@link Table} with column definitions and primary key metadata.
      */

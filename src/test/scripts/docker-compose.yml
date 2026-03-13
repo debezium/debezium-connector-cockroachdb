@@ -1,7 +1,6 @@
-version: '3.8'
 services:
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.4.0
+    image: confluentinc/cp-zookeeper:${CONFLUENT_VERSION:-7.4.0}
     hostname: zookeeper
     container_name: zookeeper
     ports:
@@ -11,7 +10,7 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
 
   kafka:
-    image: confluentinc/cp-kafka:7.4.0
+    image: confluentinc/cp-kafka:${CONFLUENT_VERSION:-7.4.0}
     hostname: kafka-test
     container_name: kafka-test
     depends_on:
@@ -29,7 +28,7 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
   cockroachdb:
-    image: cockroachdb/cockroach:${COCKROACHDB_VERSION:-v26.1.0}
+    image: cockroachdb/cockroach:${COCKROACHDB_VERSION:-v25.4.6}
     hostname: cockroachdb
     container_name: cockroachdb
     command: start-single-node --insecure
@@ -43,7 +42,7 @@ services:
       retries: 5
 
   connect:
-    image: debezium/connect:3.2.0.Final
+    image: quay.io/debezium/connect:${DEBEZIUM_VERSION:-3.4.2.Final}
     hostname: connect
     container_name: connect
     depends_on:
@@ -63,7 +62,7 @@ services:
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
       PLUGIN_PATH: "/kafka/connect"
     volumes:
-      - ${PLUGIN_PATH:-../../target/plugin}:/kafka/connect
+      - ${PLUGIN_PATH:-../../../target/plugin}:/kafka/connect
 
 networks:
   default:
