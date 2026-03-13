@@ -10,6 +10,7 @@ import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
 import io.debezium.pipeline.EventDispatcher;
 import io.debezium.pipeline.notification.NotificationService;
 import io.debezium.pipeline.source.snapshot.incremental.IncrementalSnapshotChangeEventSource;
@@ -67,8 +68,21 @@ public class CockroachDBChangeEventSourceFactory implements ChangeEventSourceFac
                                                                                                                                                     SnapshotProgressListener<CockroachDBPartition> snapshotProgressListener,
                                                                                                                                                     DataChangeEventListener<CockroachDBPartition> dataChangeEventListener,
                                                                                                                                                     NotificationService<CockroachDBPartition, CockroachDBOffsetContext> notificationService) {
-        // TODO: Support signal-based incremental snapshots later
-        return Optional.empty();
+        if (config.getSignalingDataCollectionIds().isEmpty()) {
+            LOGGER.debug("No signal data collection configured, incremental snapshots disabled");
+            return Optional.empty();
+        }
+
+        final CockroachDBConnection connection = new CockroachDBConnection(config);
+        return Optional.of(new CockroachDBSignalBasedIncrementalSnapshotChangeEventSource(
+                config,
+                connection,
+                dispatcher,
+                schema,
+                clock,
+                snapshotProgressListener,
+                dataChangeEventListener,
+                notificationService));
     }
 
 }

@@ -102,6 +102,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     private CockroachDBConnection schemaRefreshConnection;
 
+    private volatile CockroachDBOffsetContext currentOffsetContext;
+
     public CockroachDBStreamingChangeEventSource(
                                                  CockroachDBConnectorConfig config,
                                                  EventDispatcher<CockroachDBPartition, TableId> dispatcher,
@@ -111,6 +113,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         this.dispatcher = dispatcher;
         this.schema = schema;
         this.clock = clock;
+    }
+
+    @Override
+    public void init(CockroachDBOffsetContext offsetContext) throws InterruptedException {
+        this.currentOffsetContext = offsetContext;
     }
 
     @Override
@@ -124,6 +131,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         Objects.requireNonNull(schema, "schema must not be null");
         Objects.requireNonNull(clock, "clock must not be null");
 
+        this.currentOffsetContext = offsetContext;
+
         LOGGER.info("Starting CockroachDB streaming from cursor '{}', sink type '{}', heartbeat={}ms",
                 offsetContext.getCursor(), config.getChangefeedSinkType(),
                 config.getHeartbeatInterval().toMillis());
@@ -132,6 +141,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
         try (CockroachDBConnection connection = new CockroachDBConnection(config)) {
             connection.connect();
+            connection.checkChangefeedPermissions();
             this.schemaRefreshConnection = connection;
             LOGGER.debug("Connected to CockroachDB at {}:{}, database={}",
                     config.getHostname(), config.getPort(), config.getDatabaseName());
@@ -309,7 +319,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                         LOGGER.debug("No events received for {} consecutive polls", emptyPollCount);
                     }
                     // Emit heartbeat during idle periods to advance offsets
-                    dispatcher.dispatchHeartbeatEvent(currentPartition, offsetContext);
+                    dispatcher.dispatchHeartbeatEventAlsoToIncrementalSnapshot(currentPartition, offsetContext);
                 }
                 else {
                     emptyPollCount = 0;
@@ -403,7 +413,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 LOGGER.debug("Received resolved timestamp: {}, offset advanced", resolvedTs);
 
                 // Dispatch heartbeat to commit the advanced offset
-                dispatcher.dispatchHeartbeatEvent(currentPartition, offsetContext);
+                dispatcher.dispatchHeartbeatEventAlsoToIncrementalSnapshot(currentPartition, offsetContext);
                 return;
             }
 
@@ -684,6 +694,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             LOGGER.error("Failed to refresh schema for table {}: {}", tableId, e.getMessage(), e);
             return null;
         }
+    }
+
+    @Override
+    public CockroachDBOffsetContext getOffsetContext() {
+        return currentOffsetContext;
     }
 
     public void stop() {

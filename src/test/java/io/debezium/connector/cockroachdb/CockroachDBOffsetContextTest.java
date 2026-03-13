@@ -104,7 +104,8 @@ public class CockroachDBOffsetContextTest {
         Instant testTimestamp = Instant.now();
         Long testKafkaOffset = 67890L;
 
-        CockroachDBOffsetContext context = new CockroachDBOffsetContext(config, testCursor, testTimestamp, testKafkaOffset);
+        CockroachDBOffsetContext context = new CockroachDBOffsetContext(config, testCursor, testTimestamp, testKafkaOffset,
+                new io.debezium.pipeline.source.snapshot.incremental.SignalBasedIncrementalSnapshotContext<>(false));
         assertThat(context).isNotNull();
         assertThat(context.getCursor()).isEqualTo(testCursor);
         assertThat(context.getTimestamp()).isEqualTo(testTimestamp);

@@ -6,6 +6,7 @@
 package io.debezium.connector.cockroachdb;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
@@ -21,12 +22,14 @@ import io.debezium.connector.base.DefaultQueueProvider;
 import io.debezium.connector.common.BaseSourceTask;
 import io.debezium.connector.common.CdcSourceTaskContext;
 import io.debezium.connector.common.DebeziumHeaderProducer;
+import io.debezium.document.DocumentReader;
 import io.debezium.pipeline.ChangeEventSourceCoordinator;
 import io.debezium.pipeline.DataChangeEvent;
 import io.debezium.pipeline.ErrorHandler;
 import io.debezium.pipeline.EventDispatcher;
 import io.debezium.pipeline.metrics.DefaultChangeEventSourceMetricsFactory;
 import io.debezium.pipeline.notification.NotificationService;
+import io.debezium.pipeline.signal.SignalProcessor;
 import io.debezium.pipeline.spi.Offsets;
 import io.debezium.relational.TableId;
 import io.debezium.schema.SchemaFactory;
@@ -109,6 +112,12 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
 
         final CockroachDBEventMetadataProvider metadataProvider = new CockroachDBEventMetadataProvider();
 
+        final SignalProcessor<CockroachDBPartition, CockroachDBOffsetContext> signalProcessor = new SignalProcessor<>(
+                CockroachDBConnector.class, connectorConfig, Map.of(),
+                getAvailableSignalChannels(),
+                DocumentReader.defaultReader(),
+                previousOffsets);
+
         final EventDispatcher<CockroachDBPartition, TableId> dispatcher = new EventDispatcher<>(
                 connectorConfig,
                 topicNamingStrategy,
@@ -118,7 +127,7 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
                 new CockroachDBChangeEventCreator(),
                 metadataProvider,
                 schemaNameAdjuster,
-                null,
+                signalProcessor,
                 new DebeziumHeaderProducer(taskContext));
 
         final CockroachDBChangeEventSourceFactory changeEventSourceFactory = new CockroachDBChangeEventSourceFactory(
@@ -142,7 +151,7 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
                     new DefaultChangeEventSourceMetricsFactory<>(),
                     dispatcher,
                     schema,
-                    null,
+                    signalProcessor,
                     notificationService,
                     null);
 

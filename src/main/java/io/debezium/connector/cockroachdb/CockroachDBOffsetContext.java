@@ -16,8 +16,11 @@ import org.slf4j.LoggerFactory;
 
 import io.debezium.connector.SnapshotRecord;
 import io.debezium.pipeline.CommonOffsetContext;
+import io.debezium.pipeline.source.snapshot.incremental.IncrementalSnapshotContext;
+import io.debezium.pipeline.source.snapshot.incremental.SignalBasedIncrementalSnapshotContext;
 import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.pipeline.txmetadata.TransactionContext;
+import io.debezium.relational.TableId;
 import io.debezium.spi.schema.DataCollectionId;
 
 /**
@@ -39,7 +42,8 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
     private String cursor;
     private Instant timestamp;
     private TransactionContext transactionContext;
-    private Long kafkaOffset; // Track Kafka offset for hybrid approach
+    private final IncrementalSnapshotContext<TableId> incrementalSnapshotContext;
+    private Long kafkaOffset;
 
     public CockroachDBOffsetContext(CockroachDBConnectorConfig connectorConfig) {
         super(new SourceInfo(connectorConfig), false);
@@ -47,14 +51,19 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
         this.cursor = connectorConfig.getChangefeedCursor();
         this.timestamp = Instant.now();
         this.kafkaOffset = null;
+        this.incrementalSnapshotContext = new SignalBasedIncrementalSnapshotContext<>(false);
     }
 
-    public CockroachDBOffsetContext(CockroachDBConnectorConfig config, String cursor, Instant timestamp, Long kafkaOffset) {
+    public CockroachDBOffsetContext(CockroachDBConnectorConfig config, String cursor, Instant timestamp, Long kafkaOffset,
+                                    IncrementalSnapshotContext<TableId> incrementalSnapshotContext) {
         super(new SourceInfo(config), false);
         this.sourceInfo = new SourceInfo(config);
         this.cursor = cursor;
         this.timestamp = timestamp;
         this.kafkaOffset = kafkaOffset;
+        this.incrementalSnapshotContext = incrementalSnapshotContext != null
+                ? incrementalSnapshotContext
+                : new SignalBasedIncrementalSnapshotContext<>(false);
     }
 
     public void setTimestamp(Instant timestamp) {
@@ -117,6 +126,11 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
         sourceInfo.setSnapshot(record);
     }
 
+    @Override
+    public IncrementalSnapshotContext<?> getIncrementalSnapshotContext() {
+        return incrementalSnapshotContext;
+    }
+
     public static class Loader implements OffsetContext.Loader<CockroachDBOffsetContext> {
 
         private final CockroachDBConnectorConfig connectorConfig;
@@ -127,24 +141,27 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
 
         @Override
         public CockroachDBOffsetContext load(Map<String, ?> offset) {
-            CockroachDBOffsetContext context = new CockroachDBOffsetContext(connectorConfig);
-
             String cursor = (String) offset.get(CURSOR);
+            if (cursor == null) {
+                cursor = connectorConfig.getChangefeedCursor();
+            }
             String tsStr = offset.get(TIMESTAMP) != null ? offset.get(TIMESTAMP).toString() : null;
             String snapshot = (String) offset.get(SNAPSHOT_COMPLETED_KEY);
 
-            if (cursor != null) {
-                context.setCursor(cursor);
-            }
+            Instant ts = Instant.EPOCH;
             if (tsStr != null) {
                 try {
-                    context.setTimestamp(Instant.ofEpochMilli(Long.parseLong(tsStr)));
+                    ts = Instant.ofEpochMilli(Long.parseLong(tsStr));
                 }
                 catch (NumberFormatException e) {
                     LOGGER.warn("Invalid timestamp in stored offset: '{}', using epoch", tsStr);
-                    context.setTimestamp(Instant.EPOCH);
                 }
             }
+
+            CockroachDBOffsetContext context = new CockroachDBOffsetContext(
+                    connectorConfig, cursor, ts, null,
+                    SignalBasedIncrementalSnapshotContext.load(offset, false));
+
             if (snapshot != null) {
                 context.snapshotCompleted = Boolean.parseBoolean(snapshot);
             }

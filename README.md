@@ -128,6 +128,50 @@ The connector uses CockroachDB's native changefeed [`initial_scan`](https://www.
 | `no_data` / `never` | `no`         | Skips the initial scan. Only ongoing changes are captured.                                           |
 | `when_needed`       | `yes` / `no` | Like `initial`, but also re-snapshots if the stored offset is no longer valid (e.g. GC TTL expired). |
 
+#### Incremental Snapshots
+
+The connector supports Debezium's [signal-based incremental snapshots](https://debezium.io/documentation/reference/stable/configuration/signalling.html). This allows you to re-snapshot existing table data on demand -- without stopping the connector or missing any in-flight changes.
+
+**Setup:**
+
+1. Create a signaling table in CockroachDB:
+
+```sql
+CREATE TABLE debezium_signal (
+    id STRING PRIMARY KEY,
+    type STRING NOT NULL,
+    data STRING
+);
+```
+
+2. Configure the connector to monitor the signaling table:
+
+```json
+{
+  "signal.data.collection": "mydb.public.debezium_signal",
+  "table.include.list": "public.my_table,public.debezium_signal"
+}
+```
+
+The signaling table **must** be included in `table.include.list` so the changefeed delivers signal events to the connector.
+
+**Triggering a snapshot:**
+
+Insert a row into the signaling table to trigger an incremental snapshot of one or more tables:
+
+```sql
+INSERT INTO debezium_signal (id, type, data) VALUES
+    ('snap-1', 'execute-snapshot',
+     '{"data-collections": ["mydb.public.my_table"]}');
+```
+
+The connector will re-read all rows from the specified table(s) and emit them as `op=r` (read) events, while continuing to capture any concurrent DML changes without interruption.
+
+**Use cases:**
+- Re-populate a downstream consumer that lost data
+- Backfill a newly added sink or topic
+- Verify source-target consistency by re-snapshotting and comparing
+
 #### Kafka Consumer Configuration (Advanced)
 
 | Option                                               | Default     | Description                                                                                                                                                                    |
@@ -277,7 +321,6 @@ COCKROACHDB_VERSION=v25.2.3 docker-compose -f src/test/scripts/docker-compose.ym
 
 - **Single changefeed job**: The connector creates a single multi-table changefeed (`CREATE CHANGEFEED FOR table1, table2, ...`) and consumes all per-table Kafka topics concurrently in a single KafkaConsumer. This is the [recommended approach](https://www.cockroachlabs.com/docs/stable/create-and-configure-changefeeds#recommendations) to stay within CockroachDB's ~80 changefeed job limit per cluster.
 
-- **No incremental snapshots**: Signal-based incremental snapshots are not yet supported. Initial snapshots are supported via CockroachDB's native `initial_scan` changefeed option (see Snapshot Configuration above).
 - **Kafka-only sink**: Only Kafka sinks are supported. Webhook, Pub/Sub, and cloud storage sinks are planned.
 
 ## Troubleshooting
