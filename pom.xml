@@ -41,7 +41,17 @@
         <dependencies>
             <dependency>
                 <groupId>io.debezium</groupId>
-                <artifactId>debezium-core</artifactId>
+                <artifactId>debezium-connector-common</artifactId>
+                <version>${version.debezium}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-config</artifactId>
+                <version>${version.debezium}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-util</artifactId>
                 <version>${version.debezium}</version>
             </dependency>
             <dependency>
@@ -94,7 +104,7 @@
             <!-- Testing -->
             <dependency>
                 <groupId>io.debezium</groupId>
-                <artifactId>debezium-core</artifactId>
+                <artifactId>debezium-connector-common</artifactId>
                 <version>${version.debezium}</version>
                 <type>test-jar</type>
                 <scope>test</scope>
@@ -113,7 +123,15 @@
         <!-- Core Debezium APIs -->
         <dependency>
             <groupId>io.debezium</groupId>
-            <artifactId>debezium-core</artifactId>
+            <artifactId>debezium-connector-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-config</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-util</artifactId>
         </dependency>
         <dependency>
             <groupId>io.debezium</groupId>
@@ -213,7 +231,7 @@
         <!-- Debezium test dependencies -->
         <dependency>
             <groupId>io.debezium</groupId>
-            <artifactId>debezium-core</artifactId>
+            <artifactId>debezium-connector-common</artifactId>
             <type>test-jar</type>
             <scope>test</scope>
         </dependency>
