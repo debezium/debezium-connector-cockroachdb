@@ -13,28 +13,38 @@ import io.debezium.pipeline.spi.Partition;
 
 /**
  * Represents a logical partition of a CockroachDB changefeed stream.
- * For now, this is a stub that always returns a static key.
- * <p>
- * Future versions may support partitioning by tenant, table, etc.
+ * Uses {@code topic.prefix} as the partition key so that multiple connector
+ * instances targeting different databases maintain independent offset tracking.
  *
  * @author Virag Tripathi
  */
 public class CockroachDBPartition implements Partition {
 
-    private static final String PARTITION_KEY = "cockroachdb";
+    private final String serverName;
+
+    public CockroachDBPartition(String serverName) {
+        this.serverName = Objects.requireNonNull(serverName, "serverName must not be null");
+    }
 
     @Override
     public Map<String, String> getSourcePartition() {
-        return Map.of("server", PARTITION_KEY);
+        return Map.of("server", serverName);
     }
 
     @Override
     public boolean equals(Object o) {
-        return o instanceof CockroachDBPartition;
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof CockroachDBPartition)) {
+            return false;
+        }
+        CockroachDBPartition that = (CockroachDBPartition) o;
+        return Objects.equals(serverName, that.serverName);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(PARTITION_KEY);
+        return Objects.hash(serverName);
     }
 }

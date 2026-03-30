@@ -141,7 +141,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
         try (CockroachDBConnection connection = new CockroachDBConnection(config)) {
             connection.connect();
-            connection.checkChangefeedPermissions();
+            connection.checkRangefeedEnabled();
             this.schemaRefreshConnection = connection;
             LOGGER.debug("Connected to CockroachDB at {}:{}, database={}",
                     config.getHostname(), config.getPort(), config.getDatabaseName());
@@ -156,7 +156,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
             String cursor = offsetContext.getCursor();
             boolean hasPriorOffset = cursor != null && !cursor.isEmpty()
-                    && !"initial".equals(cursor) && !"now".equals(cursor);
+                    && !CockroachDBOffsetContext.CURSOR_INITIAL.equals(cursor)
+                    && !CockroachDBOffsetContext.CURSOR_NOW.equals(cursor);
             LOGGER.info("Snapshot mode: {}, hasPriorOffset: {}, cursor: '{}'",
                     config.getSnapshotMode().getValue(), hasPriorOffset, cursor);
 
@@ -242,17 +243,26 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
-     * Checks whether a running changefeed job already exists for the given table.
-     * Uses column index rather than column name for compatibility across CockroachDB versions.
+     * Checks whether a running changefeed job already exists for the given table
+     * using the same topic prefix as this connector instance.
+     * Matches the fully-qualified table name and a {@code topic_prefix=} marker in the
+     * changefeed job description to avoid false positives from changefeeds created by
+     * other connector instances targeting the same tables with different topic prefixes.
      */
     private boolean changefeedExists(CockroachDBConnection connection, TableId table) throws SQLException {
-        String tableName = sanitizeIdentifier(table.table());
+        String fqTableName = sanitizeIdentifier(table.toString());
+        String topicPrefix = config.getChangefeedSinkTopicPrefix();
+        if (topicPrefix == null || topicPrefix.trim().isEmpty()) {
+            topicPrefix = config.getLogicalName();
+        }
+        String sinkMarker = "topic_prefix=" + topicPrefix + ".";
+
         try (Statement stmt = connection.connection().createStatement()) {
             String query = "SELECT description FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running'";
             try (var rs = stmt.executeQuery(query)) {
                 while (rs.next()) {
                     String description = rs.getString(1);
-                    if (description != null && description.contains(tableName)) {
+                    if (description != null && description.contains(fqTableName) && description.contains(sinkMarker)) {
                         return true;
                     }
                 }
@@ -284,8 +294,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         else {
             String sinkUri = config.getChangefeedSinkUri();
             if (sinkUri != null) {
-                String bootstrapServers = sinkUri.replaceFirst("^kafka://", "");
-                bootstrapServers = bootstrapServers.replaceFirst("^PLAINTEXT://", "");
+                String bootstrapServers = sinkUri.replaceFirst("^(?i)(kafka|PLAINTEXT|SSL|SASL_PLAINTEXT|SASL_SSL)://", "");
                 props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
             }
         }
@@ -446,7 +455,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 }
             }
 
-            CockroachDBPartition partition = new CockroachDBPartition();
+            CockroachDBPartition partition = new CockroachDBPartition(config.getLogicalName());
             CockroachDBChangeRecordEmitter emitter = new CockroachDBChangeRecordEmitter(
                     partition, offsetContext, clock, config, tableObj, operation,
                     afterNode.isMissingNode() ? null : afterNode,
@@ -533,6 +542,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * Uses {@code full_table_name} so CockroachDB creates topics in {@code db.schema.table}
      * format, and adds {@code topic_prefix} so the final Kafka topic name is
      * {@code prefix.db.schema.table} -- matching what {@link #buildTopicName(TableId)} produces.
+     * When no explicit sink topic prefix is configured, falls back to {@code topic.prefix}.
      */
     String buildSinkChangefeedQuery(List<TableId> tables, String cursor, boolean hasPriorOffset) {
         StringBuilder query = new StringBuilder();
@@ -544,7 +554,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         String sinkUri = config.getChangefeedSinkUri();
         String topicPrefix = config.getChangefeedSinkTopicPrefix();
         if (topicPrefix == null || topicPrefix.trim().isEmpty()) {
-            topicPrefix = "cockroachdb";
+            topicPrefix = config.getLogicalName();
         }
         // Append topic_prefix to the sink URI so CockroachDB names topics as prefix.db.schema.table
         String separator = sinkUri.contains("?") ? "&" : "?";
@@ -576,7 +586,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
 
         if (cursor != null && !cursor.trim().isEmpty()
-                && !"initial".equals(cursor) && !"now".equals(cursor)) {
+                && !CockroachDBOffsetContext.CURSOR_INITIAL.equals(cursor)
+                && !CockroachDBOffsetContext.CURSOR_NOW.equals(cursor)) {
             query.append(", cursor = '").append(sanitizeLiteral(cursor)).append("'");
         }
 
@@ -590,12 +601,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     /**
      * Builds the topic name for a table using the configured prefix and database name.
-     * Format: {@code {prefix}.{database}.{schema}.{table}}
+     * Format: {@code {prefix}.{database}.{schema}.{table}}.
+     * Falls back to {@code topic.prefix} when no explicit sink topic prefix is configured.
      */
     private String buildTopicName(TableId table) {
         String topicPrefix = config.getChangefeedSinkTopicPrefix();
         if (topicPrefix == null || topicPrefix.trim().isEmpty()) {
-            topicPrefix = "cockroachdb";
+            topicPrefix = config.getLogicalName();
         }
         return topicPrefix + "." + config.getDatabaseName() + "." + table.schema() + "." + table.table();
     }

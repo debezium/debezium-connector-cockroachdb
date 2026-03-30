@@ -34,7 +34,7 @@ public class CockroachDBMultiTableTest {
                 .with("database.port", "26257")
                 .with("database.user", "root")
                 .with("database.dbname", "testdb")
-                .with("topic.prefix", "crdb")
+                .with("topic.prefix", "cockroachdb")
                 .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
                 .with("cockroachdb.changefeed.envelope", "enriched")
                 .with("cockroachdb.changefeed.enriched.properties", "source,schema")
@@ -116,7 +116,7 @@ public class CockroachDBMultiTableTest {
                 .with("database.port", "26257")
                 .with("database.user", "root")
                 .with("database.dbname", "testdb")
-                .with("topic.prefix", "crdb")
+                .with("topic.prefix", "cockroachdb")
                 .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
                 .with("cockroachdb.changefeed.envelope", "enriched")
                 .with("cockroachdb.changefeed.enriched.properties", "source,schema")
@@ -143,7 +143,7 @@ public class CockroachDBMultiTableTest {
                 .with("database.port", "26257")
                 .with("database.user", "root")
                 .with("database.dbname", "testdb")
-                .with("topic.prefix", "crdb")
+                .with("topic.prefix", "cockroachdb")
                 .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
                 .with("cockroachdb.changefeed.envelope", "enriched")
                 .with("cockroachdb.changefeed.resolved.interval", "10s")
@@ -168,7 +168,7 @@ public class CockroachDBMultiTableTest {
                 .with("database.port", "26257")
                 .with("database.user", "root")
                 .with("database.dbname", "testdb")
-                .with("topic.prefix", "crdb")
+                .with("topic.prefix", "cockroachdb")
                 .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
                 .with("cockroachdb.changefeed.envelope", "enriched")
                 .with("cockroachdb.changefeed.resolved.interval", "10s")
@@ -199,5 +199,76 @@ public class CockroachDBMultiTableTest {
         assertThat(query).contains("full_table_name");
         // Should NOT have topic_name= (that's for single-topic override)
         assertThat(query).doesNotContain("topic_name=");
+    }
+
+    @Test
+    public void shouldUseTopicPrefixAsFallbackWhenSinkTopicPrefixEmpty() {
+        Configuration config = Configuration.create()
+                .with("database.hostname", "localhost")
+                .with("database.port", "26257")
+                .with("database.user", "root")
+                .with("database.dbname", "testdb")
+                .with("topic.prefix", "myapp")
+                .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
+                .with("cockroachdb.changefeed.envelope", "enriched")
+                .with("cockroachdb.changefeed.resolved.interval", "10s")
+                .build();
+
+        CockroachDBStreamingChangeEventSource source = createSource(config);
+        List<TableId> tables = Collections.singletonList(
+                new TableId("testdb", "public", "orders"));
+
+        String query = source.buildSinkChangefeedQuery(tables, null, false);
+
+        assertThat(query).contains("topic_prefix=myapp.");
+        assertThat(query).doesNotContain("topic_prefix=cockroachdb.");
+    }
+
+    @Test
+    public void shouldUseExplicitSinkTopicPrefixOverTopicPrefix() {
+        Configuration config = Configuration.create()
+                .with("database.hostname", "localhost")
+                .with("database.port", "26257")
+                .with("database.user", "root")
+                .with("database.dbname", "testdb")
+                .with("topic.prefix", "myapp")
+                .with("cockroachdb.changefeed.sink.topic.prefix", "custom")
+                .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
+                .with("cockroachdb.changefeed.envelope", "enriched")
+                .with("cockroachdb.changefeed.resolved.interval", "10s")
+                .build();
+
+        CockroachDBStreamingChangeEventSource source = createSource(config);
+        List<TableId> tables = Collections.singletonList(
+                new TableId("testdb", "public", "orders"));
+
+        String query = source.buildSinkChangefeedQuery(tables, null, false);
+
+        assertThat(query).contains("topic_prefix=custom.");
+        assertThat(query).doesNotContain("topic_prefix=myapp.");
+    }
+
+    @Test
+    public void shouldOmitCursorClauseForSentinelValues() {
+        CockroachDBStreamingChangeEventSource source = createSource(baseConfig());
+        List<TableId> tables = Collections.singletonList(
+                new TableId("testdb", "public", "orders"));
+
+        String queryInitial = source.buildSinkChangefeedQuery(tables, CockroachDBOffsetContext.CURSOR_INITIAL, false);
+        assertThat(queryInitial).doesNotContain("cursor =");
+
+        String queryNow = source.buildSinkChangefeedQuery(tables, CockroachDBOffsetContext.CURSOR_NOW, false);
+        assertThat(queryNow).doesNotContain("cursor =");
+    }
+
+    @Test
+    public void shouldIncludeCursorClauseForRealTimestamp() {
+        CockroachDBStreamingChangeEventSource source = createSource(baseConfig());
+        List<TableId> tables = Collections.singletonList(
+                new TableId("testdb", "public", "orders"));
+
+        String query = source.buildSinkChangefeedQuery(tables, "1234567890.0000000000", true);
+
+        assertThat(query).contains("cursor = '1234567890.0000000000'");
     }
 }

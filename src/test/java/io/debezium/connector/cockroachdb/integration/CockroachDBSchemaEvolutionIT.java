@@ -132,7 +132,7 @@ public class CockroachDBSchemaEvolutionIT {
         config.put("database.server.name", "evo-test");
         config.put("topic.prefix", "evo-test");
         config.put("table.include.list", "public." + TABLE_NAME);
-        config.put("cockroachdb.skip.permission.check", "true");
+
         config.put("cockroachdb.schema.name", "public");
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");

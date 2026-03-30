@@ -154,7 +154,7 @@ public class CockroachDBMultiTableIT {
         config.put("database.server.name", "mt-test");
         config.put("topic.prefix", "mt-test");
         config.put("table.include.list", "public." + ORDERS_TABLE + ",public." + CUSTOMERS_TABLE);
-        config.put("cockroachdb.skip.permission.check", "true");
+
         config.put("cockroachdb.schema.name", "public");
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
@@ -261,7 +261,7 @@ public class CockroachDBMultiTableIT {
         config.put("database.server.name", "mt-insert-test");
         config.put("topic.prefix", "mt-insert-test");
         config.put("table.include.list", "public." + ORDERS_TABLE + ",public." + CUSTOMERS_TABLE);
-        config.put("cockroachdb.skip.permission.check", "true");
+
         config.put("cockroachdb.schema.name", "public");
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");

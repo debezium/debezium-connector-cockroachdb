@@ -37,6 +37,9 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
     public static final String TIMESTAMP = "offset.timestamp";
     public static final String SNAPSHOT_COMPLETED_KEY = "snapshot_completed";
 
+    public static final String CURSOR_INITIAL = "initial";
+    public static final String CURSOR_NOW = "now";
+
     private final SourceInfo sourceInfo;
 
     private String cursor;
@@ -84,7 +87,7 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
     @Override
     public Map<String, ?> getOffset() {
         Map<String, Object> offset = new HashMap<>();
-        offset.put(CURSOR, cursor != null ? cursor : "initial");
+        offset.put(CURSOR, cursor != null ? cursor : CURSOR_INITIAL);
         Instant ts = timestamp != null ? timestamp : Instant.EPOCH;
         offset.put(TIMESTAMP, ts.toEpochMilli());
         offset.put(SNAPSHOT_COMPLETED_KEY, Boolean.toString(snapshotCompleted));

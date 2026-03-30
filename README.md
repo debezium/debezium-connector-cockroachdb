@@ -32,6 +32,23 @@ Using a single multi-table changefeed is the [recommended approach](https://www.
 * JDK 21+
 * Maven 3.9.8 or later
 
+### Required CockroachDB Privileges
+
+The database user must have one of the following to create changefeeds:
+
+* `CHANGEFEED` privilege on monitored tables, **or**
+* `ALL` privilege on monitored tables, **or**
+* Membership in the `admin` role
+
+Additionally, the `kv.rangefeed.enabled` cluster setting must be `true` (the connector checks this at startup).
+Grant `VIEWCLUSTERSETTING` if the user is not `admin` so the connector can verify the setting:
+
+```sql
+GRANT CHANGEFEED ON TABLE mydb.public.* TO myuser;
+GRANT VIEWCLUSTERSETTING TO myuser;
+SET CLUSTER SETTING kv.rangefeed.enabled = true;
+```
+
 ## Building
 
 ```bash
@@ -53,12 +70,12 @@ Example connector configuration:
     "database.password": "",
     "database.dbname": "testdb",
     "database.server.name": "cockroachdb",
+    "topic.prefix": "cockroachdb",
     "table.include.list": "public.orders,public.customers",
     "cockroachdb.changefeed.envelope": "enriched",
     "cockroachdb.changefeed.enriched.properties": "source,schema",
     "cockroachdb.changefeed.sink.type": "kafka",
     "cockroachdb.changefeed.sink.uri": "kafka://kafka-test:9092",
-    "cockroachdb.changefeed.sink.topic.prefix": "",
     "cockroachdb.changefeed.sink.options": "",
     "cockroachdb.changefeed.resolved.interval": "10s",
     "cockroachdb.changefeed.include.updated": true,
@@ -101,7 +118,7 @@ Example connector configuration:
 | `cockroachdb.changefeed.enriched.properties` | source   | Comma-separated enriched properties           |
 | `cockroachdb.changefeed.sink.type`           | kafka    | Sink type (kafka, webhook, pubsub, etc.)      |
 | `cockroachdb.changefeed.sink.uri`            | -        | Sink URI (required). e.g. `kafka://host:port` |
-| `cockroachdb.changefeed.sink.topic.prefix`   | ""       | Optional prefix for sink topic names          |
+| `cockroachdb.changefeed.sink.topic.prefix`   | ""       | Prefix for intermediate changefeed Kafka topic names. If empty, defaults to `topic.prefix` |
 | `cockroachdb.changefeed.sink.options`        | ""       | Additional sink options in key=value format   |
 | `cockroachdb.changefeed.resolved.interval`   | 10s      | Resolved timestamp interval                   |
 | `cockroachdb.changefeed.include.updated`     | false    | Include updated column information            |
@@ -177,8 +194,8 @@ The connector will re-read all rows from the specified table(s) and emit them as
 | Option                                               | Default     | Description                                                                                                                                                                    |
 |------------------------------------------------------|-------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `cockroachdb.changefeed.kafka.bootstrap.servers`     | -           | Consumer bootstrap servers. When not set, derived from `sink.uri`. Use when CockroachDB connects to Kafka via internal DNS but the connector JVM requires an external address. |
-| `cockroachdb.changefeed.kafka.consumer.group.prefix` | cockroachdb | Prefix for Kafka consumer group ID                                                                                                                                             |
-| `cockroachdb.changefeed.kafka.poll.timeout.ms`       | 1000        | Kafka consumer poll timeout in milliseconds                                                                                                                                    |
+| `cockroachdb.changefeed.kafka.consumer.group.prefix` | cockroachdb-connector | Kafka consumer group ID                                                                                                                                               |
+| `cockroachdb.changefeed.kafka.poll.timeout.ms`       | 100         | Kafka consumer poll timeout in milliseconds                                                                                                                                    |
 | `cockroachdb.changefeed.kafka.auto.offset.reset`     | earliest    | Kafka consumer auto offset reset policy                                                                                                                                        |
 
 #### Connection Settings
@@ -189,7 +206,7 @@ The connector will re-read all rows from the specified table(s) and emit them as
 | `connection.retry.delay.ms`             | 1000    | Delay between connection retries in ms      |
 | `connection.max.retries`                | 3       | Maximum number of connection retry attempts |
 | `connection.validation.timeout.seconds` | 5       | Timeout for validating JDBC connections     |
-| `cockroachdb.skip.permission.check`     | false   | Skip changefeed permission check at startup |
+
 
 ## Supported Data Types
 

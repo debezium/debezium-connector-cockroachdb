@@ -155,7 +155,7 @@ public class CockroachDBEndToEndIT {
         config.put("database.sslmode", "disable");
         config.put("database.server.name", "e2e-test");
         config.put("topic.prefix", "e2e-test");
-        config.put("cockroachdb.skip.permission.check", "true");
+
         config.put("cockroachdb.schema.name", "public");
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         String bootstrapServers = kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", "");

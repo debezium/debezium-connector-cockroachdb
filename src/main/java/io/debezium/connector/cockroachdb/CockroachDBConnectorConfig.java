@@ -292,7 +292,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withImportance(Importance.MEDIUM)
             .withDescription("Prefix for changefeed topic names. Used to create topics in format: prefix.database.schema.table. " +
                     "For multi-tenant deployments, consider using a unique prefix per tenant. " +
-                    "If not specified, defaults to 'cockroachdb'.");
+                    "If not specified, defaults to the value of 'topic.prefix'.");
 
     public static final Field CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS = Field.create("cockroachdb.changefeed.kafka.bootstrap.servers")
             .withDisplayName("Kafka consumer bootstrap servers")
@@ -306,14 +306,15 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     + "but the connector JVM requires an external address (e.g. localhost:29092).");
 
     public static final Field CHANGEFEED_KAFKA_CONSUMER_GROUP_PREFIX = Field.create("cockroachdb.changefeed.kafka.consumer.group.prefix")
-            .withDisplayName("Kafka consumer group ID prefix")
+            .withDisplayName("Kafka consumer group ID")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 11))
             .withDefault("cockroachdb-connector")
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.LOW)
-            .withDescription("Prefix for the Kafka consumer group ID used when consuming changefeed events. "
-                    + "The full group ID is: {prefix}-{table_name}.");
+            .withDescription("Kafka consumer group ID used when consuming changefeed events. "
+                    + "Defaults to 'cockroachdb-connector'. Should be unique per connector instance "
+                    + "when multiple connectors share the same intermediate Kafka cluster.");
 
     public static final Field CHANGEFEED_KAFKA_POLL_TIMEOUT_MS = Field.create("cockroachdb.changefeed.kafka.poll.timeout.ms")
             .withDisplayName("Kafka consumer poll timeout (ms)")
@@ -383,16 +384,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withImportance(Importance.LOW)
             .withDescription("Timeout in seconds for validating that an existing JDBC connection is still usable.");
 
-    public static final Field SKIP_PERMISSION_CHECK = Field.create("cockroachdb.skip.permission.check")
-            .withDisplayName("Skip changefeed permission check")
-            .withType(Type.BOOLEAN)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 14))
-            .withDefault(false)
-            .withWidth(Width.SHORT)
-            .withImportance(Importance.LOW)
-            .withDescription("Whether to skip the changefeed permission validation during connection. "
-                    + "Set to true when the user is a superadmin or permissions are managed externally.");
-
     public static final Field SCHEMA_NAME = Field.create("cockroachdb.schema.name")
             .withDisplayName("Schema name")
             .withType(Type.STRING)
@@ -422,8 +413,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     CONNECTION_TIMEOUT_MS,
                     CONNECTION_RETRY_DELAY_MS,
                     CONNECTION_MAX_RETRIES,
-                    CONNECTION_VALIDATION_TIMEOUT_S,
-                    SKIP_PERMISSION_CHECK)
+                    CONNECTION_VALIDATION_TIMEOUT_S)
             .events(
                     SOURCE_INFO_STRUCT_MAKER)
             .connector(
@@ -1006,10 +996,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public int getConnectionValidationTimeoutSeconds() {
         return config.getInteger(CONNECTION_VALIDATION_TIMEOUT_S);
-    }
-
-    public boolean isSkipPermissionCheck() {
-        return config.getBoolean(SKIP_PERMISSION_CHECK);
     }
 
     public String getChangefeedKafkaBootstrapServers() {
