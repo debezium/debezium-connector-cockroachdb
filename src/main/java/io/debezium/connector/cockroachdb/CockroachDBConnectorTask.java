@@ -85,7 +85,7 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
             throw new RuntimeException("Failed to initialize CockroachDB schema", e);
         }
 
-        final CockroachDBPartitionProvider partitionProvider = new CockroachDBPartitionProvider();
+        final CockroachDBPartitionProvider partitionProvider = new CockroachDBPartitionProvider(connectorConfig.getLogicalName());
         final CockroachDBOffsetContext.Loader offsetLoader = new CockroachDBOffsetContext.Loader(connectorConfig);
         final Offsets<CockroachDBPartition, CockroachDBOffsetContext> previousOffsets = getPreviousOffsets(
                 partitionProvider, offsetLoader);

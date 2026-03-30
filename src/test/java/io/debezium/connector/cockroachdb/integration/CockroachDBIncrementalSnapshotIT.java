@@ -150,7 +150,7 @@ public class CockroachDBIncrementalSnapshotIT {
         config.put("database.server.name", "inc-snap-test");
         config.put("topic.prefix", "inc-snap");
         config.put("table.include.list", "public." + TABLE_NAME + ",public." + SIGNAL_TABLE);
-        config.put("cockroachdb.skip.permission.check", "true");
+
         config.put("cockroachdb.schema.name", "public");
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");

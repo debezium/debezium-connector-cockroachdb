@@ -8,7 +8,6 @@ package io.debezium.connector.cockroachdb.connection;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
 
@@ -96,17 +95,14 @@ public class CockroachDBConnection extends JdbcConnection {
     }
 
     /**
-     * Validates that the connected user has the permissions required for changefeed operations.
+     * Validates that the rangefeed cluster setting is enabled, which is a prerequisite
+     * for changefeed operations. Table-level privileges (CHANGEFEED, ALL, admin role)
+     * are intentionally not checked here -- CockroachDB validates them when
+     * CREATE CHANGEFEED runs and returns accurate, version-specific error messages.
      *
-     * @throws SQLException if any required permission is missing
+     * @throws SQLException if rangefeed is disabled
      */
-    public void checkChangefeedPermissions() throws SQLException {
-        if (connectorConfig.isSkipPermissionCheck()) {
-            LOGGER.info("Skipping changefeed permission check as configured");
-            return;
-        }
-
-        LOGGER.debug("Checking changefeed permissions for user: {}", connectorConfig.getUser());
+    public void checkRangefeedEnabled() throws SQLException {
         Connection conn = connection();
 
         try (var stmt = conn.createStatement()) {
@@ -135,43 +131,6 @@ public class CockroachDBConnection extends JdbcConnection {
 
             if (!rangefeedEnabled) {
                 throw new SQLException("Rangefeed is disabled. Enable with: SET CLUSTER SETTING kv.rangefeed.enabled = true;");
-            }
-
-            String schemaName = connectorConfig.getSchemaName();
-            if (schemaName == null || schemaName.trim().isEmpty()) {
-                schemaName = "public";
-            }
-            String safeSchema = validateIdentifier(schemaName);
-
-            stmt.execute("SHOW GRANTS ON TABLE " + safeSchema + ".*");
-            var rs = stmt.getResultSet();
-            boolean hasChangefeedPrivilege = false;
-            if (rs != null) {
-                while (rs.next()) {
-                    String grantee = rs.getString("grantee");
-                    String privilegeType = rs.getString("privilege_type");
-                    if (Objects.equals(connectorConfig.getUser(), grantee) && "CHANGEFEED".equals(privilegeType)) {
-                        hasChangefeedPrivilege = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!hasChangefeedPrivilege) {
-                throw new SQLException(
-                        "User '" + connectorConfig.getUser() + "' lacks CHANGEFEED privilege on any table in schema '"
-                                + safeSchema + "'. Grant with: GRANT CHANGEFEED ON TABLE " + safeSchema
-                                + ".<table_name> TO " + connectorConfig.getUser() + ";");
-            }
-
-            try (var ps = conn.prepareStatement(
-                    "SELECT 1 WHERE EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = ? LIMIT 1)")) {
-                ps.setString(1, schemaName);
-                rs = ps.executeQuery();
-                if (!rs.next()) {
-                    throw new SQLException("No accessible tables found in schema '" + safeSchema
-                            + "'. Ensure tables exist and user '" + connectorConfig.getUser() + "' has SELECT privilege.");
-                }
             }
         }
     }

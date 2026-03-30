@@ -318,6 +318,42 @@ public class CockroachDBConnectorConfigTest {
         assertThat(config.getInitialScanForSnapshotMode(true)).isNull();
     }
 
+    @Test
+    public void shouldNotExposeSkipPermissionCheckConfig() {
+        CockroachDBConnector connector = new CockroachDBConnector();
+        ConfigDef configDef = connector.config();
+
+        assertThat(configDef.names()).doesNotContain("cockroachdb.skip.permission.check");
+    }
+
+    @Test
+    public void shouldHandleStaleSkipPermissionCheckProperty() {
+        Map<String, String> props = new HashMap<>();
+        props.put("database.hostname", "localhost");
+        props.put("database.user", "root");
+        props.put("database.dbname", "defaultdb");
+        props.put("topic.prefix", "test");
+        props.put("cockroachdb.skip.permission.check", "true");
+
+        CockroachDBConnectorConfig config = new CockroachDBConnectorConfig(Configuration.from(props));
+        assertThat(config).isNotNull();
+        assertThat(config.getLogicalName()).isEqualTo("test");
+    }
+
+    @Test
+    public void shouldDefaultSinkTopicPrefixToEmpty() {
+        Map<String, String> props = new HashMap<>();
+        props.put("database.hostname", "localhost");
+        props.put("database.user", "root");
+        props.put("database.dbname", "defaultdb");
+        props.put("topic.prefix", "test");
+
+        CockroachDBConnectorConfig config = new CockroachDBConnectorConfig(Configuration.from(props));
+        String sinkPrefix = config.getChangefeedSinkTopicPrefix();
+
+        assertThat(sinkPrefix).isEmpty();
+    }
+
     private CockroachDBConnectorConfig createConfigWithSnapshotMode(String snapshotMode) {
         Map<String, String> props = new HashMap<>();
         props.put("database.hostname", "localhost");

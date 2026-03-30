@@ -54,3 +54,4 @@ ARCHITECTURE_SUMMARY.md
 
 # Built plugin directory (contains JARs)
 /plugin/
+benchmark-results.json

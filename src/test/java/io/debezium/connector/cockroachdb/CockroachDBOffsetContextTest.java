@@ -119,8 +119,24 @@ public class CockroachDBOffsetContextTest {
         assertThat(offset).containsKey("offset.timestamp");
         assertThat(offset).containsKey("snapshot_completed");
 
-        // Default cursor should be "now" if not set
-        assertThat(offset.get("offset.cursor")).isEqualTo("now");
+        // Default cursor should match the CURSOR_NOW constant
+        assertThat(offset.get("offset.cursor")).isEqualTo(CockroachDBOffsetContext.CURSOR_NOW);
         assertThat(offset.get("snapshot_completed")).isEqualTo("false");
+    }
+
+    @Test
+    public void shouldDefineCursorSentinelConstants() {
+        assertThat(CockroachDBOffsetContext.CURSOR_INITIAL).isEqualTo("initial");
+        assertThat(CockroachDBOffsetContext.CURSOR_NOW).isEqualTo("now");
+    }
+
+    @Test
+    public void shouldUseCursorInitialAsFallbackWhenCursorNull() {
+        CockroachDBOffsetContext ctx = new CockroachDBOffsetContext(config);
+        ctx.setCursor(null);
+
+        Map<String, ?> offset = ctx.getOffset();
+        assertThat(offset.get(CockroachDBOffsetContext.CURSOR))
+                .isEqualTo(CockroachDBOffsetContext.CURSOR_INITIAL);
     }
 }
