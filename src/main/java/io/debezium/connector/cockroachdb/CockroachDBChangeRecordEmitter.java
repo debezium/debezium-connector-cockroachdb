@@ -76,12 +76,19 @@ public class CockroachDBChangeRecordEmitter extends RelationalChangeRecordEmitte
         return extractColumnValues(afterNode);
     }
 
-    /**
-     * Extracts values from a JSON node in the same order as the table's columns.
-     * Each value is converted to a Java type appropriate for the column's JDBC type.
-     */
     private Object[] extractColumnValues(JsonNode dataNode) {
-        List<Column> columns = table.columns();
+        return extractColumnValues(dataNode, table.columns());
+    }
+
+    /**
+     * Extracts values from a JSON node in the order of the supplied columns.
+     * Each value is converted to a Java type appropriate for the column's JDBC type.
+     *
+     * @param dataNode the JSON object containing field values; must not be null
+     * @param columns  the ordered list of columns to extract; must not be null
+     * @return an array of converted values in column order
+     */
+    public static Object[] extractColumnValues(JsonNode dataNode, List<Column> columns) {
         Object[] values = new Object[columns.size()];
 
         for (int i = 0; i < columns.size(); i++) {

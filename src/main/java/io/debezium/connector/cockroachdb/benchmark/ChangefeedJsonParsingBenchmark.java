@@ -5,6 +5,7 @@
  */
 package io.debezium.connector.cockroachdb.benchmark;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import org.openjdk.jmh.annotations.Benchmark;
@@ -22,13 +23,19 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import io.debezium.connector.cockroachdb.CockroachDBChangeRecordEmitter;
 import io.debezium.connector.cockroachdb.serialization.ChangefeedSchemaParser;
+import io.debezium.relational.Column;
+import io.debezium.relational.Table;
+import io.debezium.relational.TableId;
 
 /**
  * JMH benchmark for CockroachDB enriched changefeed JSON parsing.
- * Measures the throughput of the hot path: JSON deserialization + schema creation + Struct conversion.
+ * Measures both the legacy ChangefeedSchemaParser path and the real production hot path
+ * (JSON deserialization + column value extraction via CockroachDBChangeRecordEmitter).
  *
  * @author Virag Tripathi
  */
@@ -48,17 +55,46 @@ public class ChangefeedJsonParsingBenchmark {
     private ObjectMapper mapper;
     private String[] keyJsons;
     private String[] valueJsons;
+    private JsonNode[] parsedAfterNodes;
+    private Table smallTable;
+    private Table mediumTable;
+    private List<Column> columns;
 
     @Setup(Level.Trial)
-    public void setup() {
+    public void setup() throws Exception {
         mapper = new ObjectMapper();
         keyJsons = new String[BATCH_SIZE];
         valueJsons = new String[BATCH_SIZE];
+        parsedAfterNodes = new JsonNode[BATCH_SIZE];
 
         for (int i = 0; i < BATCH_SIZE; i++) {
             keyJsons[i] = generateKeyJson(i);
             valueJsons[i] = generateValueJson(i, payloadSize);
+            JsonNode root = mapper.readTree(valueJsons[i]);
+            parsedAfterNodes[i] = root.path("after");
         }
+
+        smallTable = Table.editor().tableId(new TableId("testdb", "public", "items"))
+                .addColumn(Column.editor().name("id").type("INT8").jdbcType(java.sql.Types.BIGINT).create())
+                .addColumn(Column.editor().name("name").type("STRING").jdbcType(java.sql.Types.VARCHAR).create())
+                .addColumn(Column.editor().name("price").type("DECIMAL").jdbcType(java.sql.Types.NUMERIC).create())
+                .setPrimaryKeyNames("id")
+                .create();
+
+        mediumTable = Table.editor().tableId(new TableId("testdb", "public", "products"))
+                .addColumn(Column.editor().name("id").type("INT8").jdbcType(java.sql.Types.BIGINT).create())
+                .addColumn(Column.editor().name("name").type("STRING").jdbcType(java.sql.Types.VARCHAR).create())
+                .addColumn(Column.editor().name("price").type("DECIMAL").jdbcType(java.sql.Types.NUMERIC).create())
+                .addColumn(Column.editor().name("description").type("STRING").jdbcType(java.sql.Types.VARCHAR).create())
+                .addColumn(Column.editor().name("category").type("STRING").jdbcType(java.sql.Types.VARCHAR).create())
+                .addColumn(Column.editor().name("stock").type("INT8").jdbcType(java.sql.Types.BIGINT).create())
+                .addColumn(Column.editor().name("active").type("BOOL").jdbcType(java.sql.Types.BOOLEAN).create())
+                .addColumn(Column.editor().name("rating").type("FLOAT8").jdbcType(java.sql.Types.DOUBLE).create())
+                .setPrimaryKeyNames("id")
+                .create();
+
+        Table tableForBenchmark = "medium".equals(payloadSize) || "large".equals(payloadSize) ? mediumTable : smallTable;
+        columns = tableForBenchmark.columns();
     }
 
     @Benchmark
@@ -83,6 +119,33 @@ public class ChangefeedJsonParsingBenchmark {
         String resolved = "{\"resolved\":\"1709312345678901234.0000000000\"}";
         for (int i = 0; i < BATCH_SIZE; i++) {
             bh.consume(ChangefeedSchemaParser.parse(null, resolved));
+        }
+    }
+
+    /**
+     * Measures the real production hot path: JSON parse + column value extraction.
+     * This reflects the per-event cost in processChangefeedEvent(): Jackson readTree
+     * followed by column extraction via the static utility method.
+     */
+    @Benchmark
+    @OperationsPerInvocation(BATCH_SIZE)
+    public void jsonParseAndColumnExtraction(Blackhole bh) throws Exception {
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            JsonNode root = mapper.readTree(valueJsons[i]);
+            JsonNode afterNode = root.path("after");
+            bh.consume(CockroachDBChangeRecordEmitter.extractColumnValues(afterNode, columns));
+        }
+    }
+
+    /**
+     * Measures only the column value extraction cost (JSON already parsed).
+     * Isolates the extractColumnValues() overhead from JSON deserialization.
+     */
+    @Benchmark
+    @OperationsPerInvocation(BATCH_SIZE)
+    public void columnExtractionOnly(Blackhole bh) {
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            bh.consume(CockroachDBChangeRecordEmitter.extractColumnValues(parsedAfterNodes[i], columns));
         }
     }
 
