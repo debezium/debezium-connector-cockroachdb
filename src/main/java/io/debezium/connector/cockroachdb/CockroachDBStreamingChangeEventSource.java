@@ -455,14 +455,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 }
             }
 
-            CockroachDBPartition partition = new CockroachDBPartition(config.getLogicalName());
             CockroachDBChangeRecordEmitter emitter = new CockroachDBChangeRecordEmitter(
-                    partition, offsetContext, clock, config, tableObj, operation,
+                    currentPartition, offsetContext, clock, config, tableObj, operation,
                     afterNode.isMissingNode() ? null : afterNode,
                     beforeNode.isMissingNode() ? null : beforeNode);
 
             LOGGER.debug("Dispatching {} event for table {}", operation, table);
-            dispatcher.dispatchDataChangeEvent(partition, table, emitter);
+            dispatcher.dispatchDataChangeEvent(currentPartition, table, emitter);
         }
         catch (Exception e) {
             LOGGER.error("Error processing changefeed event for table {}: {}",
