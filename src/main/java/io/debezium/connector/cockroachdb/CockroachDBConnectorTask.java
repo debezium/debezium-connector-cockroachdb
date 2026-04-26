@@ -100,6 +100,7 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
 
         this.queue = new ChangeEventQueue.Builder<DataChangeEvent>()
                 .pollInterval(connectorConfig.getPollInterval())
+                .pollDispatchInterval(connectorConfig.getPollDispatchInterval())
                 .maxBatchSize(connectorConfig.getMaxBatchSize())
                 .maxQueueSize(connectorConfig.getMaxQueueSize())
                 .maxQueueSizeInBytes(connectorConfig.getMaxQueueSizeInBytes())
