@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
 import java.sql.SQLException;
+import java.time.Duration;
 
 import org.junit.jupiter.api.Test;
 
@@ -37,6 +38,8 @@ public class CockroachDBErrorHandlerTest {
                     .build()),
             new ChangeEventQueue.Builder<DataChangeEvent>()
                     .queueProvider(new DefaultQueueProvider<>(DEFAULT_MAX_QUEUE_SIZE))
+                    .pollInterval(Duration.ofMillis(500))
+                    .pollDispatchInterval(Duration.ofMillis(0))
                     .build(),
             null);
 
