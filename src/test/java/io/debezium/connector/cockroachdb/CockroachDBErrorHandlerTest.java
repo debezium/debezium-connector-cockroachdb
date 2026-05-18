@@ -36,7 +36,7 @@ public class CockroachDBErrorHandlerTest {
                     .with("database.dbname", "testdb")
                     .build()),
             new ChangeEventQueue.Builder<DataChangeEvent>()
-                    .queueProvider(new DefaultQueueProvider<>(DEFAULT_MAX_QUEUE_SIZE))
+                    .queueProvider(createDefaultQueueProvider(DEFAULT_MAX_QUEUE_SIZE))
                     .build(),
             null);
 
@@ -80,5 +80,11 @@ public class CockroachDBErrorHandlerTest {
     void illegalArgumentExceptionNotRetriable() {
         IllegalArgumentException testException = new IllegalArgumentException("bad config");
         assertThat(errorHandler.isRetriable(testException)).isFalse();
+    }
+
+    private static DefaultQueueProvider<DataChangeEvent> createDefaultQueueProvider(int maxQueueSize) {
+        DefaultQueueProvider<DataChangeEvent> provider = new DefaultQueueProvider<>();
+        provider.configure(java.util.Map.of("max.queue.size", String.valueOf(maxQueueSize)));
+        return provider;
     }
 }
