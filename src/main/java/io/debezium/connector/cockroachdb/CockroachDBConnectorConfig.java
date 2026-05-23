@@ -344,6 +344,43 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDescription("Additional options for the sink in key=value format, comma-separated. "
                     + "Example: 'compression=gzip,retry_count=3'");
 
+    public static final Field CHANGEFEED_SINK_KAFKA_CA_CERT_FILE = Field.create("cockroachdb.changefeed.sink.kafka.ca.cert.file")
+            .withDisplayName("Kafka sink CA certificate file")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 15))
+            .withWidth(Width.LONG)
+            .withImportance(Importance.MEDIUM)
+            .withValidation(CockroachDBConnectorConfig::validateOptionalReadableFile)
+            .withDescription("Path to a PEM-encoded CA certificate file. "
+                    + "When set, the connector reads the file, base64-encodes it, and adds 'ca_cert=...' "
+                    + "to the changefeed Kafka sink URI. Overrides any 'ca_cert' query parameter already "
+                    + "present in 'cockroachdb.changefeed.sink.uri'.");
+
+    public static final Field CHANGEFEED_SINK_KAFKA_CLIENT_CERT_FILE = Field.create("cockroachdb.changefeed.sink.kafka.client.cert.file")
+            .withDisplayName("Kafka sink client certificate file")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 16))
+            .withWidth(Width.LONG)
+            .withImportance(Importance.MEDIUM)
+            .withValidation(CockroachDBConnectorConfig::validateOptionalReadableFile)
+            .withDescription("Path to a PEM-encoded client certificate file. "
+                    + "When set, the connector reads the file, base64-encodes it, and adds 'client_cert=...' "
+                    + "to the changefeed Kafka sink URI. Overrides any 'client_cert' query parameter already "
+                    + "present in 'cockroachdb.changefeed.sink.uri'.");
+
+    public static final Field CHANGEFEED_SINK_KAFKA_CLIENT_KEY_FILE = Field.create("cockroachdb.changefeed.sink.kafka.client.key.file")
+            .withDisplayName("Kafka sink client key file")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 17))
+            .withWidth(Width.LONG)
+            .withImportance(Importance.MEDIUM)
+            .withValidation(CockroachDBConnectorConfig::validateOptionalReadableFile)
+            .withDescription("Path to a PEM-encoded client private key file. "
+                    + "When set, the connector reads the file, base64-encodes it, and adds 'client_key=...' "
+                    + "to the changefeed Kafka sink URI. Overrides any 'client_key' query parameter already "
+                    + "present in 'cockroachdb.changefeed.sink.uri'. Setting any of the three sink TLS file "
+                    + "options also implies 'tls_enabled=true' on the sink URI.");
+
     // Connection-related configuration fields
     public static final Field CONNECTION_TIMEOUT_MS = Field.create("connection.timeout.ms")
             .withDisplayName("Connection timeout (ms)")
@@ -428,7 +465,10 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     CHANGEFEED_KAFKA_CONSUMER_GROUP_PREFIX,
                     CHANGEFEED_KAFKA_POLL_TIMEOUT_MS,
                     CHANGEFEED_KAFKA_AUTO_OFFSET_RESET,
-                    CHANGEFEED_SINK_OPTIONS)
+                    CHANGEFEED_SINK_OPTIONS,
+                    CHANGEFEED_SINK_KAFKA_CA_CERT_FILE,
+                    CHANGEFEED_SINK_KAFKA_CLIENT_CERT_FILE,
+                    CHANGEFEED_SINK_KAFKA_CLIENT_KEY_FILE)
             .create();
 
     public static final Field.Set ALL_FIELDS = Field.setOf(CONFIG_DEFINITION.all());
@@ -854,6 +894,36 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
         return 0;
     }
 
+    private static int validateOptionalReadableFile(Configuration config, Field field, Field.ValidationOutput problems) {
+        String value = config.getString(field);
+        if (value == null || value.isEmpty()) {
+            return 0;
+        }
+        java.nio.file.Path path;
+        try {
+            path = java.nio.file.Path.of(value);
+        }
+        catch (java.nio.file.InvalidPathException e) {
+            problems.accept(field, value, "Value is not a valid file path: " + e.getMessage());
+            return 1;
+        }
+        if (!java.nio.file.Files.isReadable(path)) {
+            problems.accept(field, value, "File does not exist or is not readable: " + path);
+            return 1;
+        }
+        try {
+            if (java.nio.file.Files.size(path) == 0L) {
+                problems.accept(field, value, "File is empty: " + path);
+                return 1;
+            }
+        }
+        catch (java.io.IOException e) {
+            problems.accept(field, value, "Failed to read file: " + path + " (" + e.getMessage() + ")");
+            return 1;
+        }
+        return 0;
+    }
+
     private static class SystemTablesPredicate implements TableFilter {
         protected static final List<String> SYSTEM_SCHEMAS = Arrays.asList(
                 "pg_catalog", "information_schema", "crdb_internal", "pg_extension");
@@ -999,6 +1069,24 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public String getChangefeedKafkaAutoOffsetReset() {
         return config.getString(CHANGEFEED_KAFKA_AUTO_OFFSET_RESET);
+    }
+
+    public String getChangefeedSinkKafkaCaCertFile() {
+        return config.getString(CHANGEFEED_SINK_KAFKA_CA_CERT_FILE);
+    }
+
+    public String getChangefeedSinkKafkaClientCertFile() {
+        return config.getString(CHANGEFEED_SINK_KAFKA_CLIENT_CERT_FILE);
+    }
+
+    public String getChangefeedSinkKafkaClientKeyFile() {
+        return config.getString(CHANGEFEED_SINK_KAFKA_CLIENT_KEY_FILE);
+    }
+
+    public boolean isChangefeedSinkKafkaTlsEnabled() {
+        return getChangefeedSinkKafkaCaCertFile() != null
+                || getChangefeedSinkKafkaClientCertFile() != null
+                || getChangefeedSinkKafkaClientKeyFile() != null;
     }
 
     /**
