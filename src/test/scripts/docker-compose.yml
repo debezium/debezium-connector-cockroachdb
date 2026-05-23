@@ -28,7 +28,7 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
   cockroachdb:
-    image: cockroachdb/cockroach:${COCKROACHDB_VERSION:-v25.4.6}
+    image: cockroachdb/cockroach:${COCKROACHDB_VERSION:-v25.4.10}
     hostname: cockroachdb
     container_name: cockroachdb
     command: start-single-node --insecure

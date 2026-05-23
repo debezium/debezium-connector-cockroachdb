@@ -53,10 +53,12 @@ public class CockroachDBMultiTableIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBMultiTableIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v26.1.0");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.10");
     private static final String DATABASE_NAME = "multi_table_testdb";
     private static final String ORDERS_TABLE = "mt_orders";
     private static final String CUSTOMERS_TABLE = "mt_customers";
+    private static final String INVENTORY_SCHEMA = "inventory";
+    private static final String INVENTORY_TABLE = "warehouse_items";
 
     private static final Network NETWORK = Network.newNetwork();
 
@@ -107,6 +109,14 @@ public class CockroachDBMultiTableIT {
                     + "email STRING, "
                     + "tier STRING DEFAULT 'standard'"
                     + ")");
+
+            // Non-public schema for the dbz#1973 regression test
+            stmt.execute("CREATE SCHEMA IF NOT EXISTS " + INVENTORY_SCHEMA);
+            stmt.execute("CREATE TABLE IF NOT EXISTS " + INVENTORY_SCHEMA + "." + INVENTORY_TABLE + " ("
+                    + "sku INT PRIMARY KEY, "
+                    + "description STRING NOT NULL, "
+                    + "quantity INT DEFAULT 0"
+                    + ")");
         }
     }
 
@@ -155,7 +165,6 @@ public class CockroachDBMultiTableIT {
         config.put("topic.prefix", "mt-test");
         config.put("table.include.list", "public." + ORDERS_TABLE + ",public." + CUSTOMERS_TABLE);
 
-        config.put("cockroachdb.schema.name", "public");
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
         config.put("cockroachdb.changefeed.kafka.bootstrap.servers", hostBootstrap);
@@ -262,7 +271,6 @@ public class CockroachDBMultiTableIT {
         config.put("topic.prefix", "mt-insert-test");
         config.put("table.include.list", "public." + ORDERS_TABLE + ",public." + CUSTOMERS_TABLE);
 
-        config.put("cockroachdb.schema.name", "public");
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
         config.put("cockroachdb.changefeed.kafka.bootstrap.servers", hostBootstrap);
@@ -341,6 +349,118 @@ public class CockroachDBMultiTableIT {
         boolean hasCustomerRecords = topicsSeen.stream().anyMatch(t -> t.contains(CUSTOMERS_TABLE));
         assertThat(hasOrderRecords).as("Should have insert from " + ORDERS_TABLE).isTrue();
         assertThat(hasCustomerRecords).as("Should have insert from " + CUSTOMERS_TABLE).isTrue();
+    }
+
+    /**
+     * Regression test for debezium/dbz#1973: table discovery must honor
+     * {@code table.include.list} entries that reference non-public schemas.
+     * Before the fix, schema discovery only scanned a single configured schema
+     * and silently dropped any table whose qualifier was not that schema.
+     */
+    @Test
+    public void shouldCaptureEventsFromNonPublicSchema() throws Exception {
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO " + ORDERS_TABLE + " VALUES (100, 'PublicOrder', 50.00, 'PENDING')");
+            stmt.execute("INSERT INTO " + INVENTORY_SCHEMA + "." + INVENTORY_TABLE
+                    + " VALUES (1001, 'widget', 42)");
+            stmt.execute("INSERT INTO " + INVENTORY_SCHEMA + "." + INVENTORY_TABLE
+                    + " VALUES (1002, 'gadget', 7)");
+        }
+        LOGGER.info("Inserted rows into public and {} schemas", INVENTORY_SCHEMA);
+
+        Thread.sleep(2000);
+
+        String hostBootstrap = kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", "");
+
+        Map<String, String> config = new HashMap<>();
+        config.put("name", "multi-schema-test");
+        config.put("connector.class", "io.debezium.connector.cockroachdb.CockroachDBConnector");
+        config.put("database.hostname", cockroachdb.getHost());
+        config.put("database.port", String.valueOf(cockroachdb.getMappedPort(26257)));
+        config.put("database.user", cockroachdb.getUsername());
+        config.put("database.password", cockroachdb.getPassword());
+        config.put("database.dbname", DATABASE_NAME);
+        config.put("database.sslmode", "disable");
+        config.put("database.server.name", "ms-test");
+        config.put("topic.prefix", "ms-test");
+        // Mix public and non-public schemas in a single include list
+        config.put("table.include.list",
+                "public." + ORDERS_TABLE + "," + INVENTORY_SCHEMA + "." + INVENTORY_TABLE);
+
+        config.put("cockroachdb.changefeed.sink.type", "kafka");
+        config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
+        config.put("cockroachdb.changefeed.kafka.bootstrap.servers", hostBootstrap);
+        config.put("cockroachdb.changefeed.envelope", "enriched");
+        config.put("cockroachdb.changefeed.enriched.properties", "source,schema");
+        config.put("cockroachdb.changefeed.include.diff", "true");
+        config.put("cockroachdb.changefeed.kafka.auto.offset.reset", "earliest");
+        config.put("cockroachdb.changefeed.kafka.poll.timeout.ms", "1000");
+        config.put("cockroachdb.changefeed.resolved.interval", "5s");
+        config.put("snapshot.mode", "initial");
+        config.put("offset.storage", "org.apache.kafka.connect.storage.MemoryOffsetBackingStore");
+
+        task = new CockroachDBConnectorTask();
+        task.initialize(createMockContext());
+
+        AtomicReference<Throwable> taskError = new AtomicReference<>();
+        CountDownLatch started = new CountDownLatch(1);
+
+        Thread taskThread = new Thread(() -> {
+            try {
+                task.start(config);
+                started.countDown();
+            }
+            catch (Throwable e) {
+                taskError.set(e);
+                started.countDown();
+                LOGGER.error("Task start failed: {}", e.getMessage(), e);
+            }
+        });
+        taskThread.setDaemon(true);
+        taskThread.start();
+
+        boolean didStart = started.await(30, TimeUnit.SECONDS);
+        assertThat(didStart).as("Task should start within 30 seconds").isTrue();
+        assertThat(taskError.get()).as("Task should start without error").isNull();
+
+        List<SourceRecord> allRecords = new ArrayList<>();
+        Set<String> topicsSeen = new HashSet<>();
+        int maxAttempts = 40;
+
+        for (int i = 0; i < maxAttempts; i++) {
+            try {
+                List<SourceRecord> records = task.poll();
+                if (records != null && !records.isEmpty()) {
+                    allRecords.addAll(records);
+                    for (SourceRecord record : records) {
+                        topicsSeen.add(record.topic());
+                        LOGGER.info("  Record: topic={}, key={}", record.topic(), record.key());
+                    }
+                }
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            catch (Exception e) {
+                LOGGER.warn("Poll attempt {} failed: {}", i + 1, e.getMessage());
+            }
+            Thread.sleep(1000);
+        }
+
+        LOGGER.info("Multi-schema IT collected {} SourceRecords from topics: {}",
+                allRecords.size(), topicsSeen);
+
+        assertThat(allRecords).as("Should receive records from both schemas").isNotEmpty();
+
+        boolean hasPublicRecords = topicsSeen.stream().anyMatch(t -> t.contains(ORDERS_TABLE));
+        boolean hasInventoryRecords = topicsSeen.stream().anyMatch(t -> t.contains(INVENTORY_TABLE));
+        assertThat(hasPublicRecords)
+                .as("Should have records from public." + ORDERS_TABLE).isTrue();
+        assertThat(hasInventoryRecords)
+                .as("Should have records from " + INVENTORY_SCHEMA + "." + INVENTORY_TABLE
+                        + " (regression for dbz#1973)")
+                .isTrue();
     }
 
     private SourceTaskContext createMockContext() {

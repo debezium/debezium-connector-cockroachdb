@@ -53,7 +53,7 @@ public class CockroachDBEndToEndIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBEndToEndIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v26.1.0");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.10");
     private static final String DATABASE_NAME = "e2e_testdb";
     private static final String TABLE_NAME = "e2e_orders";
 
@@ -156,7 +156,6 @@ public class CockroachDBEndToEndIT {
         config.put("database.server.name", "e2e-test");
         config.put("topic.prefix", "e2e-test");
 
-        config.put("cockroachdb.schema.name", "public");
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         String bootstrapServers = kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", "");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://" + bootstrapServers);
