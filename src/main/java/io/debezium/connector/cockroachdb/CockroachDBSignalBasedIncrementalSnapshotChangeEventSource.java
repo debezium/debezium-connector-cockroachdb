@@ -63,16 +63,7 @@ public class CockroachDBSignalBasedIncrementalSnapshotChangeEventSource
     @Override
     protected Table refreshTableSchema(Table table) throws SQLException {
         LOGGER.debug("Refreshing table '{}' schema for incremental snapshot.", table.id());
-        try {
-            cockroachDBSchema.refreshTable(cockroachDBConnection, table.id());
-        }
-        catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new SQLException("Interrupted while refreshing schema for table " + table.id(), e);
-        }
-        catch (Exception e) {
-            throw new SQLException("Failed to refresh schema for table " + table.id(), e);
-        }
+        cockroachDBSchema.refreshTable(cockroachDBConnection, table.id());
         return cockroachDBSchema.tableFor(table.id());
     }
 }

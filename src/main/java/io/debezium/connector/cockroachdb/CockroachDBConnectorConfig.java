@@ -384,15 +384,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withImportance(Importance.LOW)
             .withDescription("Timeout in seconds for validating that an existing JDBC connection is still usable.");
 
-    public static final Field SCHEMA_NAME = Field.create("cockroachdb.schema.name")
-            .withDisplayName("Schema name")
-            .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 11))
-            .withDefault("public")
-            .withWidth(Width.MEDIUM)
-            .withImportance(Importance.MEDIUM)
-            .withDescription("The schema name to use for changefeed operations.");
-
     private static final ConfigDefinition CONFIG_DEFINITION = RelationalDatabaseConnectorConfig.CONFIG_DEFINITION.edit()
             .name("CockroachDB")
             .type(
@@ -422,7 +413,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     SNAPSHOT_LOCKING_MODE,
                     UNAVAILABLE_VALUE_PLACEHOLDER,
                     READ_ONLY_CONNECTION,
-                    SCHEMA_NAME,
                     CHANGEFEED_ENVELOPE,
                     CHANGEFEED_RESOLVED_INTERVAL,
                     CHANGEFEED_INCLUDE_UPDATED,
@@ -865,7 +855,8 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     }
 
     private static class SystemTablesPredicate implements TableFilter {
-        protected static final List<String> SYSTEM_SCHEMAS = Arrays.asList("pg_catalog", "information_schema");
+        protected static final List<String> SYSTEM_SCHEMAS = Arrays.asList(
+                "pg_catalog", "information_schema", "crdb_internal", "pg_extension");
         // these are tables that may be placed in the user's schema but are system tables. This typically includes modules
         // that install system tables such as the GEO module
         protected static final List<String> SYSTEM_TABLES = List.of("spatial_ref_sys");
@@ -988,10 +979,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public int getConnectionMaxRetries() {
         return config.getInteger(CONNECTION_MAX_RETRIES);
-    }
-
-    public String getSchemaName() {
-        return config.getString(SCHEMA_NAME);
     }
 
     public int getConnectionValidationTimeoutSeconds() {

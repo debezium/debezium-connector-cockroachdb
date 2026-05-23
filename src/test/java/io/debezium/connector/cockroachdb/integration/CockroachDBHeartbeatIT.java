@@ -49,7 +49,7 @@ public class CockroachDBHeartbeatIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBHeartbeatIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v26.1.0");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.10");
     private static final String DATABASE_NAME = "heartbeat_testdb";
     private static final String TABLE_NAME = "hb_events";
 
@@ -132,7 +132,6 @@ public class CockroachDBHeartbeatIT {
         config.put("topic.prefix", "hb-test");
         config.put("table.include.list", "public." + TABLE_NAME);
 
-        config.put("cockroachdb.schema.name", "public");
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
         config.put("cockroachdb.changefeed.kafka.bootstrap.servers", hostBootstrap);

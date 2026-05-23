@@ -235,7 +235,6 @@ public class CockroachDBCloudConnectionIT {
                 .with("database.sslmode", sslMode)
                 .with("database.server.name", "cloud-test")
                 .with("topic.prefix", "cloud-test")
-                .with("cockroachdb.schema.name", "public")
                 .build();
     }
 }

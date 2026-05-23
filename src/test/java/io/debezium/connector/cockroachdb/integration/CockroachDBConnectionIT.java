@@ -35,7 +35,7 @@ import io.debezium.connector.cockroachdb.CockroachDBConnector;
 @Testcontainers
 public class CockroachDBConnectionIT {
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v26.1.0");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.10");
     private static final Network NETWORK = Network.newNetwork();
 
     @Container
