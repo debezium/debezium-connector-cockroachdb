@@ -7,11 +7,14 @@ package io.debezium.connector.cockroachdb;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.kafka.common.config.ConfigDef;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import io.debezium.config.Configuration;
 
@@ -362,5 +365,129 @@ public class CockroachDBConnectorConfigTest {
         props.put("topic.prefix", "test");
         props.put("snapshot.mode", snapshotMode);
         return new CockroachDBConnectorConfig(Configuration.from(props));
+    }
+
+    @Test
+    public void shouldExposeKafkaSinkTlsFieldsInConfigDef() {
+        ConfigDef configDef = new CockroachDBConnector().config();
+        assertThat(configDef.names()).contains(
+                "cockroachdb.changefeed.sink.kafka.ca.cert.file",
+                "cockroachdb.changefeed.sink.kafka.client.cert.file",
+                "cockroachdb.changefeed.sink.kafka.client.key.file");
+    }
+
+    @Test
+    public void shouldDefaultKafkaSinkTlsFieldsToNullAndDisabled() {
+        CockroachDBConnectorConfig config = baseConfigBuilder().build();
+        assertThat(config.getChangefeedSinkKafkaCaCertFile()).isNull();
+        assertThat(config.getChangefeedSinkKafkaClientCertFile()).isNull();
+        assertThat(config.getChangefeedSinkKafkaClientKeyFile()).isNull();
+        assertThat(config.isChangefeedSinkKafkaTlsEnabled()).isFalse();
+    }
+
+    @Test
+    public void shouldImplyTlsEnabledWhenAnyKafkaSinkTlsFileSet(@TempDir Path tmp) throws Exception {
+        Path caCert = tmp.resolve("ca.pem");
+        Files.writeString(caCert, "ca-cert-bytes");
+        CockroachDBConnectorConfig config = baseConfigBuilder()
+                .with("cockroachdb.changefeed.sink.kafka.ca.cert.file", caCert.toString())
+                .build();
+        assertThat(config.isChangefeedSinkKafkaTlsEnabled()).isTrue();
+        assertThat(config.getChangefeedSinkKafkaCaCertFile()).isEqualTo(caCert.toString());
+    }
+
+    @Test
+    public void shouldAcceptValidReadableKafkaSinkTlsFiles(@TempDir Path tmp) throws Exception {
+        Path caCert = tmp.resolve("ca.pem");
+        Path clientCert = tmp.resolve("client.crt");
+        Path clientKey = tmp.resolve("client.key");
+        Files.writeString(caCert, "ca");
+        Files.writeString(clientCert, "client-cert");
+        Files.writeString(clientKey, "client-key");
+        Configuration config = baseProps()
+                .with("cockroachdb.changefeed.sink.kafka.ca.cert.file", caCert.toString())
+                .with("cockroachdb.changefeed.sink.kafka.client.cert.file", clientCert.toString())
+                .with("cockroachdb.changefeed.sink.kafka.client.key.file", clientKey.toString())
+                .build();
+        assertThat(config.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                CockroachDBConnectorConfigTest::failOnProblem)).isTrue();
+    }
+
+    @Test
+    public void shouldRejectMissingKafkaSinkTlsFile(@TempDir Path tmp) {
+        Path missing = tmp.resolve("does-not-exist.pem");
+        Configuration config = baseProps()
+                .with("cockroachdb.changefeed.sink.kafka.ca.cert.file", missing.toString())
+                .build();
+        StringBuilder problemMessage = new StringBuilder();
+        boolean ok = config.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                (String message) -> problemMessage.append(message));
+        assertThat(ok).isFalse();
+        assertThat(problemMessage.toString()).contains("does not exist or is not readable");
+        assertThat(problemMessage.toString()).contains(missing.toString());
+    }
+
+    @Test
+    public void shouldRejectEmptyKafkaSinkTlsFile(@TempDir Path tmp) throws Exception {
+        Path empty = tmp.resolve("empty.pem");
+        Files.createFile(empty);
+        Configuration config = baseProps()
+                .with("cockroachdb.changefeed.sink.kafka.client.cert.file", empty.toString())
+                .build();
+        StringBuilder problemMessage = new StringBuilder();
+        boolean ok = config.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                (String message) -> problemMessage.append(message));
+        assertThat(ok).isFalse();
+        assertThat(problemMessage.toString()).contains("File is empty");
+    }
+
+    @Test
+    public void shouldAcceptEmptyStringForKafkaSinkTlsFile() {
+        Configuration config = baseProps()
+                .with("cockroachdb.changefeed.sink.kafka.ca.cert.file", "")
+                .build();
+        assertThat(config.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                CockroachDBConnectorConfigTest::failOnProblem)).isTrue();
+    }
+
+    private static Configuration.Builder baseProps() {
+        return Configuration.create()
+                .with("database.hostname", "localhost")
+                .with("database.port", "26257")
+                .with("database.user", "root")
+                .with("database.password", "")
+                .with("database.dbname", "defaultdb")
+                .with("database.server.name", "test-server")
+                .with("topic.prefix", "test")
+                .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
+    }
+
+    private static ConfigurationBuilder baseConfigBuilder() {
+        return new ConfigurationBuilder(baseProps());
+    }
+
+    private static void failOnProblem(String message) {
+        throw new AssertionError("Unexpected validation problem: " + message);
+    }
+
+    private static final class ConfigurationBuilder {
+        private final Configuration.Builder delegate;
+
+        ConfigurationBuilder(Configuration.Builder delegate) {
+            this.delegate = delegate;
+        }
+
+        ConfigurationBuilder with(String key, String value) {
+            delegate.with(key, value);
+            return this;
+        }
+
+        CockroachDBConnectorConfig build() {
+            return new CockroachDBConnectorConfig(delegate.build());
+        }
     }
 }
