@@ -344,42 +344,45 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDescription("Additional options for the sink in key=value format, comma-separated. "
                     + "Example: 'compression=gzip,retry_count=3'");
 
-    public static final Field CHANGEFEED_SINK_KAFKA_CA_CERT_FILE = Field.create("cockroachdb.changefeed.sink.kafka.ca.cert.file")
-            .withDisplayName("Kafka sink CA certificate file")
+    public static final Field CHANGEFEED_SINK_TLS_CA_CERT_FILE = Field.create("cockroachdb.changefeed.sink.tls.ca.cert.file")
+            .withDisplayName("Changefeed sink CA certificate file")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 15))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withValidation(CockroachDBConnectorConfig::validateOptionalReadableFile)
             .withDescription("Path to a PEM-encoded CA certificate file. "
-                    + "When set, the connector reads the file, base64-encodes it, and adds 'ca_cert=...' "
-                    + "to the changefeed Kafka sink URI. Overrides any 'ca_cert' query parameter already "
-                    + "present in 'cockroachdb.changefeed.sink.uri'.");
+                    + "When set, the connector reads the file, base64-encodes it, and adds the CA "
+                    + "certificate to the changefeed sink URI in the form expected by the configured "
+                    + "sink type (for example, 'ca_cert=...' for Kafka sinks). Overrides any equivalent "
+                    + "query parameter already present in 'cockroachdb.changefeed.sink.uri'.");
 
-    public static final Field CHANGEFEED_SINK_KAFKA_CLIENT_CERT_FILE = Field.create("cockroachdb.changefeed.sink.kafka.client.cert.file")
-            .withDisplayName("Kafka sink client certificate file")
+    public static final Field CHANGEFEED_SINK_TLS_CLIENT_CERT_FILE = Field.create("cockroachdb.changefeed.sink.tls.client.cert.file")
+            .withDisplayName("Changefeed sink client certificate file")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 16))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withValidation(CockroachDBConnectorConfig::validateOptionalReadableFile)
             .withDescription("Path to a PEM-encoded client certificate file. "
-                    + "When set, the connector reads the file, base64-encodes it, and adds 'client_cert=...' "
-                    + "to the changefeed Kafka sink URI. Overrides any 'client_cert' query parameter already "
-                    + "present in 'cockroachdb.changefeed.sink.uri'.");
+                    + "When set, the connector reads the file, base64-encodes it, and adds the client "
+                    + "certificate to the changefeed sink URI in the form expected by the configured "
+                    + "sink type (for example, 'client_cert=...' for Kafka sinks). Overrides any equivalent "
+                    + "query parameter already present in 'cockroachdb.changefeed.sink.uri'.");
 
-    public static final Field CHANGEFEED_SINK_KAFKA_CLIENT_KEY_FILE = Field.create("cockroachdb.changefeed.sink.kafka.client.key.file")
-            .withDisplayName("Kafka sink client key file")
+    public static final Field CHANGEFEED_SINK_TLS_CLIENT_KEY_FILE = Field.create("cockroachdb.changefeed.sink.tls.client.key.file")
+            .withDisplayName("Changefeed sink client key file")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 17))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withValidation(CockroachDBConnectorConfig::validateOptionalReadableFile)
             .withDescription("Path to a PEM-encoded client private key file. "
-                    + "When set, the connector reads the file, base64-encodes it, and adds 'client_key=...' "
-                    + "to the changefeed Kafka sink URI. Overrides any 'client_key' query parameter already "
-                    + "present in 'cockroachdb.changefeed.sink.uri'. Setting any of the three sink TLS file "
-                    + "options also implies 'tls_enabled=true' on the sink URI.");
+                    + "When set, the connector reads the file, base64-encodes it, and adds the client "
+                    + "key to the changefeed sink URI in the form expected by the configured sink type "
+                    + "(for example, 'client_key=...' for Kafka sinks). Overrides any equivalent query "
+                    + "parameter already present in 'cockroachdb.changefeed.sink.uri'. Setting any of "
+                    + "the three sink TLS file options also implies 'tls_enabled=true' on the sink URI.");
 
     // Connection-related configuration fields
     public static final Field CONNECTION_TIMEOUT_MS = Field.create("connection.timeout.ms")
@@ -466,9 +469,9 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     CHANGEFEED_KAFKA_POLL_TIMEOUT_MS,
                     CHANGEFEED_KAFKA_AUTO_OFFSET_RESET,
                     CHANGEFEED_SINK_OPTIONS,
-                    CHANGEFEED_SINK_KAFKA_CA_CERT_FILE,
-                    CHANGEFEED_SINK_KAFKA_CLIENT_CERT_FILE,
-                    CHANGEFEED_SINK_KAFKA_CLIENT_KEY_FILE)
+                    CHANGEFEED_SINK_TLS_CA_CERT_FILE,
+                    CHANGEFEED_SINK_TLS_CLIENT_CERT_FILE,
+                    CHANGEFEED_SINK_TLS_CLIENT_KEY_FILE)
             .create();
 
     public static final Field.Set ALL_FIELDS = Field.setOf(CONFIG_DEFINITION.all());
@@ -1071,22 +1074,22 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
         return config.getString(CHANGEFEED_KAFKA_AUTO_OFFSET_RESET);
     }
 
-    public String getChangefeedSinkKafkaCaCertFile() {
-        return config.getString(CHANGEFEED_SINK_KAFKA_CA_CERT_FILE);
+    public String getChangefeedSinkTlsCaCertFile() {
+        return config.getString(CHANGEFEED_SINK_TLS_CA_CERT_FILE);
     }
 
-    public String getChangefeedSinkKafkaClientCertFile() {
-        return config.getString(CHANGEFEED_SINK_KAFKA_CLIENT_CERT_FILE);
+    public String getChangefeedSinkTlsClientCertFile() {
+        return config.getString(CHANGEFEED_SINK_TLS_CLIENT_CERT_FILE);
     }
 
-    public String getChangefeedSinkKafkaClientKeyFile() {
-        return config.getString(CHANGEFEED_SINK_KAFKA_CLIENT_KEY_FILE);
+    public String getChangefeedSinkTlsClientKeyFile() {
+        return config.getString(CHANGEFEED_SINK_TLS_CLIENT_KEY_FILE);
     }
 
-    public boolean isChangefeedSinkKafkaTlsEnabled() {
-        return getChangefeedSinkKafkaCaCertFile() != null
-                || getChangefeedSinkKafkaClientCertFile() != null
-                || getChangefeedSinkKafkaClientKeyFile() != null;
+    public boolean isChangefeedSinkTlsEnabled() {
+        return getChangefeedSinkTlsCaCertFile() != null
+                || getChangefeedSinkTlsClientCertFile() != null
+                || getChangefeedSinkTlsClientKeyFile() != null;
     }
 
     /**

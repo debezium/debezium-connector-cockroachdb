@@ -5,10 +5,16 @@
  */
 package io.debezium.connector.cockroachdb;
 
+import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -551,6 +557,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 .collect(Collectors.joining(", ")));
 
         String sinkUri = config.getChangefeedSinkUri();
+        sinkUri = injectSinkTlsParams(sinkUri);
         String topicPrefix = config.getChangefeedSinkTopicPrefix();
         if (topicPrefix == null || topicPrefix.trim().isEmpty()) {
             topicPrefix = config.getLogicalName();
@@ -631,6 +638,72 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             return "";
         }
         return identifier.replaceAll("[^a-zA-Z0-9_.\\-]", "");
+    }
+
+    /**
+     * Reads any configured sink TLS files, base64-encodes their contents, and
+     * appends them as query parameters on the sink URI in the form expected by
+     * the configured sink type. File-based values overwrite any same-named
+     * parameter that was already present inline in the URI.
+     *
+     * <p>Currently only the Kafka sink is supported, where the parameters are
+     * {@code ca_cert}, {@code client_cert}, {@code client_key}, and
+     * {@code tls_enabled=true}. Other sink types pass through unchanged.
+     */
+    private String injectSinkTlsParams(String sinkUri) {
+        if (!config.isChangefeedSinkTlsEnabled()) {
+            return sinkUri;
+        }
+        if (!"kafka".equalsIgnoreCase(config.getChangefeedSinkType())) {
+            return sinkUri;
+        }
+        String result = stripQueryParams(sinkUri, "ca_cert", "client_cert", "client_key", "tls_enabled");
+        result = appendParam(result, "ca_cert", encodeTlsFile(config.getChangefeedSinkTlsCaCertFile()));
+        result = appendParam(result, "client_cert", encodeTlsFile(config.getChangefeedSinkTlsClientCertFile()));
+        result = appendParam(result, "client_key", encodeTlsFile(config.getChangefeedSinkTlsClientKeyFile()));
+        result = appendParam(result, "tls_enabled", "true");
+        return result;
+    }
+
+    private static String encodeTlsFile(String filePath) {
+        if (filePath == null || filePath.isEmpty()) {
+            return null;
+        }
+        try {
+            byte[] bytes = Files.readAllBytes(Path.of(filePath));
+            String base64 = Base64.getEncoder().encodeToString(bytes);
+            return URLEncoder.encode(base64, StandardCharsets.UTF_8);
+        }
+        catch (IOException e) {
+            throw new IllegalStateException("Failed to read sink TLS file: " + filePath, e);
+        }
+    }
+
+    private static String appendParam(String uri, String key, String value) {
+        if (value == null) {
+            return uri;
+        }
+        String separator = uri.contains("?") ? "&" : "?";
+        return uri + separator + key + "=" + value;
+    }
+
+    private static String stripQueryParams(String uri, String... keys) {
+        int queryStart = uri.indexOf('?');
+        if (queryStart < 0) {
+            return uri;
+        }
+        String base = uri.substring(0, queryStart);
+        String query = uri.substring(queryStart + 1);
+        java.util.Set<String> toRemove = java.util.Set.of(keys);
+        String kept = java.util.Arrays.stream(query.split("&"))
+                .filter(pair -> !pair.isEmpty())
+                .filter(pair -> {
+                    int eq = pair.indexOf('=');
+                    String name = eq < 0 ? pair : pair.substring(0, eq);
+                    return !toRemove.contains(name);
+                })
+                .collect(Collectors.joining("&"));
+        return kept.isEmpty() ? base : base + "?" + kept;
     }
 
     /**
