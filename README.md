@@ -192,6 +192,30 @@ The connector will re-read all rows from the specified table(s) and emit them as
 - Backfill a newly added sink or topic
 - Verify source-target consistency by re-snapshotting and comparing
 
+#### Changefeed Sink TLS / mTLS
+
+For changefeed sinks that require TLS (or mutual TLS), point the connector at the PEM files on disk. The connector reads each file, base64-encodes the contents, URL-encodes the result, and appends the parameters to the sink URI in the form expected by the sink type (for Kafka: `ca_cert=...`, `client_cert=...`, `client_key=...`, `tls_enabled=true`). File-based values overwrite any same-named query parameter that was already present inline in `cockroachdb.changefeed.sink.uri`.
+
+| Option                                            | Default | Description                                                                                                                                       |
+|---------------------------------------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------|
+| `cockroachdb.changefeed.sink.tls.ca.cert.file`    | -       | Path to a PEM-encoded CA certificate file. Used to verify the sink broker's certificate.                                                          |
+| `cockroachdb.changefeed.sink.tls.client.cert.file`| -       | Path to a PEM-encoded client certificate file. Required for mutual TLS.                                                                            |
+| `cockroachdb.changefeed.sink.tls.client.key.file` | -       | Path to a PEM-encoded client private key file. Required for mutual TLS. Setting any of these three options implies `tls_enabled=true` on the URI. |
+
+Example for an mTLS-secured Kafka cluster:
+
+```json
+{
+  "cockroachdb.changefeed.sink.type": "kafka",
+  "cockroachdb.changefeed.sink.uri": "kafka://kafka.example.com:9093",
+  "cockroachdb.changefeed.sink.tls.ca.cert.file": "/etc/kafka/secrets/ca.pem",
+  "cockroachdb.changefeed.sink.tls.client.cert.file": "/etc/kafka/secrets/client.pem",
+  "cockroachdb.changefeed.sink.tls.client.key.file": "/etc/kafka/secrets/client-key.pem"
+}
+```
+
+Currently only the Kafka sink consumes these TLS parameters; other sink types pass through unchanged.
+
 #### Kafka Consumer Configuration (Advanced)
 
 | Option                                               | Default     | Description                                                                                                                                                                    |

@@ -368,36 +368,36 @@ public class CockroachDBConnectorConfigTest {
     }
 
     @Test
-    public void shouldExposeKafkaSinkTlsFieldsInConfigDef() {
+    public void shouldExposeSinkTlsFieldsInConfigDef() {
         ConfigDef configDef = new CockroachDBConnector().config();
         assertThat(configDef.names()).contains(
-                "cockroachdb.changefeed.sink.kafka.ca.cert.file",
-                "cockroachdb.changefeed.sink.kafka.client.cert.file",
-                "cockroachdb.changefeed.sink.kafka.client.key.file");
+                "cockroachdb.changefeed.sink.tls.ca.cert.file",
+                "cockroachdb.changefeed.sink.tls.client.cert.file",
+                "cockroachdb.changefeed.sink.tls.client.key.file");
     }
 
     @Test
-    public void shouldDefaultKafkaSinkTlsFieldsToNullAndDisabled() {
+    public void shouldDefaultSinkTlsFieldsToNullAndDisabled() {
         CockroachDBConnectorConfig config = baseConfigBuilder().build();
-        assertThat(config.getChangefeedSinkKafkaCaCertFile()).isNull();
-        assertThat(config.getChangefeedSinkKafkaClientCertFile()).isNull();
-        assertThat(config.getChangefeedSinkKafkaClientKeyFile()).isNull();
-        assertThat(config.isChangefeedSinkKafkaTlsEnabled()).isFalse();
+        assertThat(config.getChangefeedSinkTlsCaCertFile()).isNull();
+        assertThat(config.getChangefeedSinkTlsClientCertFile()).isNull();
+        assertThat(config.getChangefeedSinkTlsClientKeyFile()).isNull();
+        assertThat(config.isChangefeedSinkTlsEnabled()).isFalse();
     }
 
     @Test
-    public void shouldImplyTlsEnabledWhenAnyKafkaSinkTlsFileSet(@TempDir Path tmp) throws Exception {
+    public void shouldImplyTlsEnabledWhenAnySinkTlsFileSet(@TempDir Path tmp) throws Exception {
         Path caCert = tmp.resolve("ca.pem");
         Files.writeString(caCert, "ca-cert-bytes");
         CockroachDBConnectorConfig config = baseConfigBuilder()
-                .with("cockroachdb.changefeed.sink.kafka.ca.cert.file", caCert.toString())
+                .with("cockroachdb.changefeed.sink.tls.ca.cert.file", caCert.toString())
                 .build();
-        assertThat(config.isChangefeedSinkKafkaTlsEnabled()).isTrue();
-        assertThat(config.getChangefeedSinkKafkaCaCertFile()).isEqualTo(caCert.toString());
+        assertThat(config.isChangefeedSinkTlsEnabled()).isTrue();
+        assertThat(config.getChangefeedSinkTlsCaCertFile()).isEqualTo(caCert.toString());
     }
 
     @Test
-    public void shouldAcceptValidReadableKafkaSinkTlsFiles(@TempDir Path tmp) throws Exception {
+    public void shouldAcceptValidReadableSinkTlsFiles(@TempDir Path tmp) throws Exception {
         Path caCert = tmp.resolve("ca.pem");
         Path clientCert = tmp.resolve("client.crt");
         Path clientKey = tmp.resolve("client.key");
@@ -405,9 +405,9 @@ public class CockroachDBConnectorConfigTest {
         Files.writeString(clientCert, "client-cert");
         Files.writeString(clientKey, "client-key");
         Configuration config = baseProps()
-                .with("cockroachdb.changefeed.sink.kafka.ca.cert.file", caCert.toString())
-                .with("cockroachdb.changefeed.sink.kafka.client.cert.file", clientCert.toString())
-                .with("cockroachdb.changefeed.sink.kafka.client.key.file", clientKey.toString())
+                .with("cockroachdb.changefeed.sink.tls.ca.cert.file", caCert.toString())
+                .with("cockroachdb.changefeed.sink.tls.client.cert.file", clientCert.toString())
+                .with("cockroachdb.changefeed.sink.tls.client.key.file", clientKey.toString())
                 .build();
         assertThat(config.validateAndRecord(
                 CockroachDBConnectorConfig.ALL_FIELDS,
@@ -415,10 +415,10 @@ public class CockroachDBConnectorConfigTest {
     }
 
     @Test
-    public void shouldRejectMissingKafkaSinkTlsFile(@TempDir Path tmp) {
+    public void shouldRejectMissingSinkTlsFile(@TempDir Path tmp) {
         Path missing = tmp.resolve("does-not-exist.pem");
         Configuration config = baseProps()
-                .with("cockroachdb.changefeed.sink.kafka.ca.cert.file", missing.toString())
+                .with("cockroachdb.changefeed.sink.tls.ca.cert.file", missing.toString())
                 .build();
         StringBuilder problemMessage = new StringBuilder();
         boolean ok = config.validateAndRecord(
@@ -430,11 +430,11 @@ public class CockroachDBConnectorConfigTest {
     }
 
     @Test
-    public void shouldRejectEmptyKafkaSinkTlsFile(@TempDir Path tmp) throws Exception {
+    public void shouldRejectEmptySinkTlsFile(@TempDir Path tmp) throws Exception {
         Path empty = tmp.resolve("empty.pem");
         Files.createFile(empty);
         Configuration config = baseProps()
-                .with("cockroachdb.changefeed.sink.kafka.client.cert.file", empty.toString())
+                .with("cockroachdb.changefeed.sink.tls.client.cert.file", empty.toString())
                 .build();
         StringBuilder problemMessage = new StringBuilder();
         boolean ok = config.validateAndRecord(
@@ -445,9 +445,9 @@ public class CockroachDBConnectorConfigTest {
     }
 
     @Test
-    public void shouldAcceptEmptyStringForKafkaSinkTlsFile() {
+    public void shouldAcceptEmptyStringForSinkTlsFile() {
         Configuration config = baseProps()
-                .with("cockroachdb.changefeed.sink.kafka.ca.cert.file", "")
+                .with("cockroachdb.changefeed.sink.tls.ca.cert.file", "")
                 .build();
         assertThat(config.validateAndRecord(
                 CockroachDBConnectorConfig.ALL_FIELDS,
