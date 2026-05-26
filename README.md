@@ -106,9 +106,12 @@ Example connector configuration:
 
 #### Table Selection
 
-| Option               | Default | Description                               |
-|----------------------|---------|-------------------------------------------|
-| `table.include.list` | -       | Comma-separated list of tables to monitor |
+| Option                | Default | Description                                                                                            |
+|-----------------------|---------|--------------------------------------------------------------------------------------------------------|
+| `schema.include.list` | -       | Comma-separated list of schemas (regex) to include. When set, only tables in matching schemas are captured. |
+| `schema.exclude.list` | -       | Comma-separated list of schemas (regex) to exclude. Mutually exclusive with `schema.include.list`.     |
+| `table.include.list`  | -       | Comma-separated list of fully-qualified tables (`schema.table`) to monitor. May span multiple schemas. |
+| `table.exclude.list`  | -       | Comma-separated list of fully-qualified tables to exclude. Mutually exclusive with `table.include.list`. |
 
 #### Changefeed Configuration
 
@@ -313,7 +316,7 @@ Run integration tests (requires Docker for Testcontainers):
 ./mvnw clean test -Dtest="*IT"
 ```
 
-Run against a specific CockroachDB version (default is v25.4.6):
+Run against a specific CockroachDB version (default is v25.4.10):
 
 ```bash
 ./mvnw clean test -Dtest="*IT" -Dcockroachdb.version=v25.4.10
