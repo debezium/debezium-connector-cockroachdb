@@ -38,14 +38,15 @@ public class CockroachDBSchema extends RelationalDatabaseSchema {
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBSchema.class);
 
     public CockroachDBSchema(CdcSourceTaskContext<CockroachDBConnectorConfig> cdcSourceTaskContext,
-                             TopicNamingStrategy<TableId> topicNamingStrategy) {
+                             TopicNamingStrategy<TableId> topicNamingStrategy,
+                             CockroachDBValueConverterProvider valueConverterProvider) {
         super(
                 cdcSourceTaskContext.getConfig(),
                 topicNamingStrategy,
                 cdcSourceTaskContext.getConfig().getTableFilters().dataCollectionFilter(),
                 cdcSourceTaskContext.getConfig().getColumnFilter(),
                 new TableSchemaBuilder(
-                        new CockroachDBValueConverterProvider(),
+                        valueConverterProvider,
                         new CockroachDBDefaultValueConverter(),
                         cdcSourceTaskContext.getConfig().schemaNameAdjuster(),
                         new CustomConverterRegistry(Collections.emptyList()),
