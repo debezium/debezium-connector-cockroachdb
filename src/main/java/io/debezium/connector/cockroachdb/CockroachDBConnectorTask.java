@@ -14,6 +14,7 @@ import org.apache.kafka.connect.source.SourceRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.bean.StandardBeanNames;
 import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.config.Field;
@@ -95,6 +96,10 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
         final Offsets<CockroachDBPartition, CockroachDBOffsetContext> previousOffsets = getPreviousOffsets(
                 partitionProvider, offsetLoader);
         final CockroachDBOffsetContext previousOffset = previousOffsets.getTheOnlyOffset();
+
+        // Manual Bean Registration
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.CONFIGURATION, config);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.CONNECTOR_CONFIG, connectorConfig);
 
         if (previousOffset == null) {
             LOGGER.info("No previous offset found");
