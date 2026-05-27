@@ -5,6 +5,7 @@
  */
 package io.debezium.connector.cockroachdb;
 
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -21,10 +22,13 @@ import io.debezium.config.Field;
 import io.debezium.connector.base.ChangeEventQueue;
 import io.debezium.connector.base.QueueProviderService;
 import io.debezium.connector.base.QueueProviderServiceProvider;
+import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
 import io.debezium.connector.common.BaseSourceTask;
 import io.debezium.connector.common.CdcSourceTaskContext;
 import io.debezium.connector.common.DebeziumHeaderProducer;
 import io.debezium.document.DocumentReader;
+import io.debezium.jdbc.DefaultMainConnectionProvidingConnectionFactory;
+import io.debezium.jdbc.MainConnectionProvidingConnectionFactory;
 import io.debezium.pipeline.ChangeEventSourceCoordinator;
 import io.debezium.pipeline.DataChangeEvent;
 import io.debezium.pipeline.ErrorHandler;
@@ -59,6 +63,7 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
     private volatile CockroachDBSchema schema;
     private volatile CockroachDBErrorHandler errorHandler;
     private volatile ChangeEventQueue<DataChangeEvent> queue;
+    private volatile CockroachDBConnection beanRegistryJdbcConnection;
 
     @Override
     public String version() {
@@ -83,7 +88,8 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
         // Service providers
         registerServiceProviders(connectorConfig.getServiceRegistry());
 
-        schema = new CockroachDBSchema(taskContext, topicNamingStrategy);
+        CockroachDBValueConverterProvider valueConverter = new CockroachDBValueConverterProvider();
+        schema = new CockroachDBSchema(taskContext, topicNamingStrategy, valueConverter);
         try {
             schema.initialize(connectorConfig);
         }
@@ -97,9 +103,18 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
                 partitionProvider, offsetLoader);
         final CockroachDBOffsetContext previousOffset = previousOffsets.getTheOnlyOffset();
 
+        final MainConnectionProvidingConnectionFactory<CockroachDBConnection> connectionFactory = new DefaultMainConnectionProvidingConnectionFactory<>(
+                () -> new CockroachDBConnection(connectorConfig));
+
         // Manual Bean Registration
+        beanRegistryJdbcConnection = connectionFactory.newConnection();
         connectorConfig.getBeanRegistry().add(StandardBeanNames.CONFIGURATION, config);
         connectorConfig.getBeanRegistry().add(StandardBeanNames.CONNECTOR_CONFIG, connectorConfig);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.DATABASE_SCHEMA, schema);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.JDBC_CONNECTION, beanRegistryJdbcConnection);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.VALUE_CONVERTER, valueConverter);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.OFFSETS, previousOffsets);
+        connectorConfig.getBeanRegistry().add(StandardBeanNames.CDC_SOURCE_TASK_CONTEXT, taskContext);
 
         if (previousOffset == null) {
             LOGGER.info("No previous offset found");
@@ -190,6 +205,15 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
     @Override
     protected void doStop() {
         LOGGER.info("Stopping CockroachDB connector task");
+        try {
+            if (beanRegistryJdbcConnection != null) {
+                beanRegistryJdbcConnection.close();
+            }
+        }
+        catch (SQLException e) {
+            LOGGER.error("Exception while closing JDBC bean registry connection", e);
+        }
+
         if (schema != null) {
             try {
                 schema.close();

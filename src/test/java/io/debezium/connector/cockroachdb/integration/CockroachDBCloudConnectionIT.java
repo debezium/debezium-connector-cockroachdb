@@ -26,6 +26,7 @@ import io.debezium.config.Configuration;
 import io.debezium.connector.cockroachdb.CockroachDBConnectorConfig;
 import io.debezium.connector.cockroachdb.CockroachDBSchema;
 import io.debezium.connector.cockroachdb.CockroachDBTaskContext;
+import io.debezium.connector.cockroachdb.CockroachDBValueConverterProvider;
 import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
 import io.debezium.relational.TableId;
 import io.debezium.spi.topic.TopicNamingStrategy;
@@ -207,7 +208,7 @@ public class CockroachDBCloudConnectionIT {
         TopicNamingStrategy<TableId> topicNamingStrategy = connectorConfig.getTopicNamingStrategy(
                 CommonConnectorConfig.TOPIC_NAMING_STRATEGY);
 
-        CockroachDBSchema schema = new CockroachDBSchema(taskContext, topicNamingStrategy);
+        CockroachDBSchema schema = new CockroachDBSchema(taskContext, topicNamingStrategy, new CockroachDBValueConverterProvider());
         schema.initialize(connectorConfig);
 
         assertThat(schema.getDiscoveredTables()).isNotEmpty();
