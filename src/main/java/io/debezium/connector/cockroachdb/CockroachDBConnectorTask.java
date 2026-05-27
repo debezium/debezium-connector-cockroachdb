@@ -19,6 +19,7 @@ import io.debezium.config.Configuration;
 import io.debezium.config.Field;
 import io.debezium.connector.base.ChangeEventQueue;
 import io.debezium.connector.base.QueueProviderService;
+import io.debezium.connector.base.QueueProviderServiceProvider;
 import io.debezium.connector.common.BaseSourceTask;
 import io.debezium.connector.common.CdcSourceTaskContext;
 import io.debezium.connector.common.DebeziumHeaderProducer;
@@ -34,6 +35,7 @@ import io.debezium.pipeline.spi.Offsets;
 import io.debezium.relational.TableId;
 import io.debezium.schema.SchemaFactory;
 import io.debezium.schema.SchemaNameAdjuster;
+import io.debezium.service.spi.ServiceRegistry;
 import io.debezium.spi.topic.TopicNamingStrategy;
 import io.debezium.util.Clock;
 import io.debezium.util.LoggingContext;
@@ -76,6 +78,9 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
                 CommonConnectorConfig.TOPIC_NAMING_STRATEGY);
         final SchemaNameAdjuster schemaNameAdjuster = connectorConfig.schemaNameAdjuster();
         final Clock clock = Clock.system();
+
+        // Service providers
+        registerServiceProviders(connectorConfig.getServiceRegistry());
 
         schema = new CockroachDBSchema(taskContext, topicNamingStrategy);
         try {
@@ -198,5 +203,12 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
     @Override
     protected String connectorName() {
         return Module.name();
+    }
+
+    @Override
+    protected void registerServiceProviders(ServiceRegistry serviceRegistry) {
+        // Currently overrides base task to support what is needed now
+        // Need to add support for BeanRegistry beans
+        serviceRegistry.registerServiceProvider(new QueueProviderServiceProvider());
     }
 }
