@@ -72,7 +72,6 @@ Example connector configuration:
     "database.server.name": "cockroachdb",
     "topic.prefix": "cockroachdb",
     "table.include.list": "public.orders,public.customers",
-    "cockroachdb.changefeed.envelope": "enriched",
     "cockroachdb.changefeed.enriched.properties": "source",
     "cockroachdb.changefeed.sink.type": "kafka",
     "cockroachdb.changefeed.sink.uri": "kafka://kafka-test:9092",
@@ -117,8 +116,7 @@ Example connector configuration:
 
 | Option                                       | Default  | Description                                   |
 |----------------------------------------------|----------|-----------------------------------------------|
-| `cockroachdb.changefeed.envelope`            | enriched | Envelope type: enriched, wrapped, bare        |
-| `cockroachdb.changefeed.enriched.properties` | source   | Comma-separated enriched properties           |
+| `cockroachdb.changefeed.enriched.properties` | source   | Comma-separated enriched properties (passthrough to CockroachDB) |
 | `cockroachdb.changefeed.sink.type`           | kafka    | Sink type (kafka, webhook, pubsub, etc.)      |
 | `cockroachdb.changefeed.sink.uri`            | -        | Sink URI (required). e.g. `kafka://host:port` |
 | `cockroachdb.changefeed.sink.topic.prefix`   | ""       | Prefix for intermediate changefeed Kafka topic names. If empty, defaults to `topic.prefix` |
