@@ -227,10 +227,18 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDisplayName("Changefeed enriched properties")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 4))
-            .withDefault("source,schema")
+            .withDefault("source")
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
-            .withDescription("Comma-separated list of properties to include in enriched envelope: 'source', 'schema', 'mvcc'.");
+            .withDescription("Comma-separated enriched envelope properties to request, passed through verbatim to the "
+                    + "CockroachDB CREATE CHANGEFEED statement (only applicable when the envelope is 'enriched'). "
+                    + "CockroachDB owns the set of valid values (currently 'source' and 'schema') and validates them "
+                    + "when the changefeed is created. The connector defaults to 'source' because that block carries the "
+                    + "originating database, schema, table, and timestamp, which is useful when inspecting the "
+                    + "intermediate topics or when other tools also consume them. The connector derives its own schemas "
+                    + "from JDBC table discovery and identifies each event's table from the topic it arrives on, so it "
+                    + "does not read the 'schema' block; any value beyond 'source' is passed through for other consumers "
+                    + "but is not used by the connector.");
 
     public static final Field CHANGEFEED_CURSOR = Field.create("cockroachdb.changefeed.cursor")
             .withDisplayName("Changefeed cursor")
