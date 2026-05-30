@@ -432,7 +432,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 return;
             }
 
-            String eventId = createEventId(jsonNode);
+            String eventId = createEventId(table, jsonNode);
             if (eventId != null && processedEvents.putIfAbsent(eventId, Boolean.TRUE) != null) {
                 LOGGER.debug("Skipping duplicate event: {}", eventId);
                 return;
@@ -476,16 +476,22 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
-     * Creates a unique event identifier from the JSON payload for deduplication.
-     * Uses table name, operation type, and nanosecond timestamp.
+     * Creates a unique event identifier for deduplication.
+     * <p>The key combines the schema-qualified {@link TableId} with the operation type
+     * and the event's nanosecond timestamp. The table identity is taken from the
+     * {@code TableId} (derived from the Kafka topic the event arrived on), not from the
+     * message body: the changefeed {@code source.table_name} field is unqualified, so two
+     * same-named tables in different schemas (for example {@code public.orders} and
+     * {@code inventory.orders}) that change at the same MVCC timestamp would otherwise
+     * collide and have one event silently dropped. Using the {@code TableId} also removes
+     * any dependency on the {@code source} enriched property being present.
      */
-    private String createEventId(JsonNode jsonNode) {
+    static String createEventId(TableId table, JsonNode jsonNode) {
         try {
             JsonNode payloadNode = resolvePayload(jsonNode);
-            String tableName = payloadNode.path("source").path("table_name").asText("");
             String operation = payloadNode.path("op").asText("");
             String timestamp = payloadNode.path("ts_ns").asText("");
-            return tableName + ":" + operation + ":" + timestamp;
+            return table.identifier() + ":" + operation + ":" + timestamp;
         }
         catch (Exception e) {
             return null;
@@ -495,7 +501,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     /**
      * Resolves the payload node, handling both direct and nested {@code payload} structures.
      */
-    private JsonNode resolvePayload(JsonNode jsonNode) {
+    private static JsonNode resolvePayload(JsonNode jsonNode) {
         JsonNode payloadNode = jsonNode.path("payload");
         return payloadNode.isMissingNode() ? jsonNode : payloadNode;
     }
