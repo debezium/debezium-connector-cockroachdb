@@ -9,7 +9,6 @@
     "database.dbname": "${DATABASE_NAME:-testdb}",
     "database.server.name": "${DATABASE_SERVER_NAME:-cockroachdb}",
     "table.include.list": "${SCHEMA_NAME:-public}.${TABLE_NAME:-products}",
-    "cockroachdb.changefeed.envelope": "${CHANGEFEED_ENVELOPE:-enriched}",
     "cockroachdb.changefeed.enriched.properties": "${CHANGEFEED_ENRICHED_PROPERTIES:-source,schema}",
     "cockroachdb.changefeed.include.updated": "${CHANGEFEED_INCLUDE_UPDATED:-true}",
     "cockroachdb.changefeed.include.diff": "${CHANGEFEED_INCLUDE_DIFF:-true}",
