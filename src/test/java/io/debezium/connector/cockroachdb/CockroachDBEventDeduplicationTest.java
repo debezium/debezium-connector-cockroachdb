@@ -98,4 +98,22 @@ public class CockroachDBEventDeduplicationTest {
         assertThat(CockroachDBStreamingChangeEventSource.createEventId(orders, nested))
                 .isEqualTo(CockroachDBStreamingChangeEventSource.createEventId(orders, flat));
     }
+
+    @Test
+    public void shouldDetectEnrichedEnvelopeInChangefeedDescription() {
+        // The connector reuses an existing changefeed only if it was created with envelope='enriched'.
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedUsesEnrichedEnvelope(
+                "CREATE CHANGEFEED ... WITH OPTIONS (envelope = 'enriched', full_table_name)")).isTrue();
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedUsesEnrichedEnvelope(
+                "CREATE CHANGEFEED ... WITH OPTIONS (envelope='enriched')")).isTrue();
+    }
+
+    @Test
+    public void shouldRejectNonEnrichedEnvelopeInChangefeedDescription() {
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedUsesEnrichedEnvelope(
+                "CREATE CHANGEFEED ... WITH OPTIONS (envelope = 'wrapped')")).isFalse();
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedUsesEnrichedEnvelope(
+                "CREATE CHANGEFEED ... WITH OPTIONS (full_table_name)")).isFalse();
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedUsesEnrichedEnvelope(null)).isFalse();
+    }
 }

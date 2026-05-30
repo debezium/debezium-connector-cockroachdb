@@ -185,17 +185,12 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDescription("Switched connector to use alternative methods to deliver signals to Debezium instead "
                     + "of writing to signaling table");
 
-    // Changefeed-specific configuration fields
-    public static final Field CHANGEFEED_ENVELOPE = Field.create("cockroachdb.changefeed.envelope")
-            .withDisplayName("Changefeed envelope type")
-            .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 0))
-            .withDefault("enriched")
-            .withWidth(Width.SHORT)
-            .withImportance(Importance.HIGH)
-            .withValidation(CockroachDBConnectorConfig::validateChangefeedEnvelope)
-            .withDescription("The envelope type for changefeed events. Options: 'enriched', 'wrapped', 'bare'.");
-
+    // Changefeed-specific configuration fields.
+    // Note: the changefeed envelope is intentionally not configurable. The connector parses only
+    // the CockroachDB 'enriched' envelope (it relies on the 'op' and 'ts_ns' fields it provides),
+    // so the connector always creates changefeeds with envelope='enriched' (see
+    // CockroachDBStreamingChangeEventSource#buildSinkChangefeedQuery). Exposing it as an option
+    // would only let a user select a value the connector cannot parse.
     public static final Field CHANGEFEED_RESOLVED_INTERVAL = Field.create("cockroachdb.changefeed.resolved.interval")
             .withDisplayName("Changefeed resolved interval")
             .withType(Type.STRING)
@@ -461,7 +456,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     SNAPSHOT_LOCKING_MODE,
                     UNAVAILABLE_VALUE_PLACEHOLDER,
                     READ_ONLY_CONNECTION,
-                    CHANGEFEED_ENVELOPE,
                     CHANGEFEED_RESOLVED_INTERVAL,
                     CHANGEFEED_INCLUDE_UPDATED,
                     CHANGEFEED_INCLUDE_DIFF,
@@ -833,9 +827,9 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
         this.readOnlyConnection = config.getBoolean(READ_ONLY_CONNECTION);
 
-        LOGGER.debug("CockroachDB config: database={}, snapshotMode={}, snapshotIsolation={}, readOnly={}, sinkType={}, envelope={}",
+        LOGGER.debug("CockroachDB config: database={}, snapshotMode={}, snapshotIsolation={}, readOnly={}, sinkType={}",
                 databaseName, this.snapshotMode.getValue(), this.snapshotIsolationMode.getValue(),
-                readOnlyConnection, config.getString(CHANGEFEED_SINK_TYPE), config.getString(CHANGEFEED_ENVELOPE));
+                readOnlyConnection, config.getString(CHANGEFEED_SINK_TYPE));
     }
 
     public String getDatabaseName() {
@@ -885,15 +879,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public static ConfigDef configDef() {
         return CONFIG_DEFINITION.configDef();
-    }
-
-    private static int validateChangefeedEnvelope(Configuration config, Field field, Field.ValidationOutput problems) {
-        String value = config.getString(field);
-        if (value != null && !value.equals("enriched") && !value.equals("wrapped") && !value.equals("bare")) {
-            problems.accept(field, value, "Must be one of 'enriched', 'wrapped', or 'bare'");
-            return 1;
-        }
-        return 0;
     }
 
     private static int validateChangefeedSinkType(Configuration config, Field field, Field.ValidationOutput problems) {
@@ -1000,10 +985,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     }
 
     // Changefeed configuration getters
-    public String getChangefeedEnvelope() {
-        return config.getString(CHANGEFEED_ENVELOPE);
-    }
-
     public String getChangefeedResolvedInterval() {
         return config.getString(CHANGEFEED_RESOLVED_INTERVAL);
     }

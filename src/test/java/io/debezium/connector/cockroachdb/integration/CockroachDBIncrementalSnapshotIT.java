@@ -154,7 +154,6 @@ public class CockroachDBIncrementalSnapshotIT {
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
         config.put("cockroachdb.changefeed.kafka.bootstrap.servers", hostBootstrap);
-        config.put("cockroachdb.changefeed.envelope", "enriched");
         config.put("cockroachdb.changefeed.enriched.properties", "source,schema");
         config.put("cockroachdb.changefeed.kafka.auto.offset.reset", "earliest");
         config.put("cockroachdb.changefeed.kafka.poll.timeout.ms", "1000");
