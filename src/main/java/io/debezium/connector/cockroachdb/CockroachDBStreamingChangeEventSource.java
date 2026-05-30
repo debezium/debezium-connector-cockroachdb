@@ -182,8 +182,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             consumeChangefeedEvents(tables, offsetContext, context);
         }
         catch (SQLException e) {
+            // CockroachDB is the authority on changefeed options (sink URI, enriched_properties,
+            // privileges, and so on). Surface its message directly so an invalid value or a
+            // permission problem is visible in the task status without digging into the cause chain.
             LOGGER.error("Error in CockroachDB streaming", e);
-            throw new RuntimeException("Failed to stream changes from CockroachDB", e);
+            throw new RuntimeException("Failed to stream changes from CockroachDB: " + e.getMessage(), e);
         }
         finally {
             this.schemaRefreshConnection = null;

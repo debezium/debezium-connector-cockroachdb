@@ -73,7 +73,7 @@ Example connector configuration:
     "topic.prefix": "cockroachdb",
     "table.include.list": "public.orders,public.customers",
     "cockroachdb.changefeed.envelope": "enriched",
-    "cockroachdb.changefeed.enriched.properties": "source,schema",
+    "cockroachdb.changefeed.enriched.properties": "source",
     "cockroachdb.changefeed.sink.type": "kafka",
     "cockroachdb.changefeed.sink.uri": "kafka://kafka-test:9092",
     "cockroachdb.changefeed.sink.options": "",
