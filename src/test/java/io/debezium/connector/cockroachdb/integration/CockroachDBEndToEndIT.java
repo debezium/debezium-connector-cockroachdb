@@ -160,7 +160,6 @@ public class CockroachDBEndToEndIT {
         String bootstrapServers = kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", "");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://" + bootstrapServers);
         config.put("cockroachdb.changefeed.sink.topic.prefix", changefeedTopicPrefix);
-        config.put("cockroachdb.changefeed.envelope", "enriched");
         config.put("cockroachdb.changefeed.enriched.properties", "source,schema");
         config.put("cockroachdb.changefeed.include.diff", "true");
         config.put("cockroachdb.changefeed.kafka.auto.offset.reset", "earliest");

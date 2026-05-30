@@ -272,6 +272,17 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 while (rs.next()) {
                     String description = rs.getString(1);
                     if (description != null && description.contains(fqTableName) && description.contains(sinkMarker)) {
+                        // A changefeed with our topic prefix already covers this table. The connector
+                        // can only consume the enriched envelope, so refuse to reuse one created with a
+                        // different envelope rather than consuming it and failing to parse events. We
+                        // cannot fall back to creating our own here either: it would target the same
+                        // topics as the existing feed.
+                        if (!changefeedUsesEnrichedEnvelope(description)) {
+                            throw new IllegalStateException("Found an existing running changefeed for table " + table
+                                    + " using topic prefix '" + topicPrefix + "' that was not created with envelope='enriched'. "
+                                    + "The CockroachDB connector can only consume the enriched envelope. Drop or recreate that "
+                                    + "changefeed with envelope='enriched' (and full_table_name), or use a different topic prefix.");
+                        }
                         return true;
                     }
                 }
@@ -282,6 +293,19 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             LOGGER.warn("Unable to check existing changefeed jobs: {}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Returns {@code true} if a {@code SHOW CHANGEFEED JOBS} description indicates the changefeed
+     * was created with the enriched envelope. The connector can only consume the enriched envelope,
+     * so this guards reuse of a pre-existing changefeed. Whitespace is normalized because the
+     * description may render the option as {@code envelope = 'enriched'} or {@code envelope='enriched'}.
+     */
+    static boolean changefeedUsesEnrichedEnvelope(String description) {
+        if (description == null) {
+            return false;
+        }
+        return description.replaceAll("\\s+", "").contains("envelope='enriched'");
     }
 
     /**
@@ -577,7 +601,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         query.append(" INTO '").append(sanitizeLiteral(sinkUri)).append("'");
 
         query.append(" WITH full_table_name");
-        query.append(", envelope = '").append(sanitizeLiteral(config.getChangefeedEnvelope())).append("'");
+        // The connector parses only the enriched envelope (it relies on the 'op' and 'ts_ns'
+        // fields it provides), so the envelope is fixed rather than configurable.
+        query.append(", envelope = 'enriched'");
 
         String enrichedProperties = config.getChangefeedEnrichedProperties();
         if (enrichedProperties != null && !enrichedProperties.trim().isEmpty()) {

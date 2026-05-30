@@ -42,7 +42,6 @@ public class CockroachDBMultiTableTest {
                 .with("database.dbname", "testdb")
                 .with("topic.prefix", "cockroachdb")
                 .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
-                .with("cockroachdb.changefeed.envelope", "enriched")
                 .with("cockroachdb.changefeed.enriched.properties", "source,schema")
                 .with("cockroachdb.changefeed.resolved.interval", "10s")
                 .build();
@@ -124,7 +123,6 @@ public class CockroachDBMultiTableTest {
                 .with("database.dbname", "testdb")
                 .with("topic.prefix", "cockroachdb")
                 .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
-                .with("cockroachdb.changefeed.envelope", "enriched")
                 .with("cockroachdb.changefeed.enriched.properties", "source,schema")
                 .with("cockroachdb.changefeed.resolved.interval", "10s")
                 .with("cockroachdb.changefeed.include.diff", "true")
@@ -151,7 +149,6 @@ public class CockroachDBMultiTableTest {
                 .with("database.dbname", "testdb")
                 .with("topic.prefix", "cockroachdb")
                 .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
-                .with("cockroachdb.changefeed.envelope", "enriched")
                 .with("cockroachdb.changefeed.resolved.interval", "10s")
                 .with("snapshot.mode", "always")
                 .build();
@@ -176,7 +173,6 @@ public class CockroachDBMultiTableTest {
                 .with("database.dbname", "testdb")
                 .with("topic.prefix", "cockroachdb")
                 .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
-                .with("cockroachdb.changefeed.envelope", "enriched")
                 .with("cockroachdb.changefeed.resolved.interval", "10s")
                 .with("snapshot.mode", "no_data")
                 .build();
@@ -216,7 +212,6 @@ public class CockroachDBMultiTableTest {
                 .with("database.dbname", "testdb")
                 .with("topic.prefix", "myapp")
                 .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
-                .with("cockroachdb.changefeed.envelope", "enriched")
                 .with("cockroachdb.changefeed.resolved.interval", "10s")
                 .build();
 
@@ -240,7 +235,6 @@ public class CockroachDBMultiTableTest {
                 .with("topic.prefix", "myapp")
                 .with("cockroachdb.changefeed.sink.topic.prefix", "custom")
                 .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
-                .with("cockroachdb.changefeed.envelope", "enriched")
                 .with("cockroachdb.changefeed.resolved.interval", "10s")
                 .build();
 
@@ -303,7 +297,6 @@ public class CockroachDBMultiTableTest {
                 .with("database.dbname", "testdb")
                 .with("topic.prefix", "cockroachdb")
                 .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9093")
-                .with("cockroachdb.changefeed.envelope", "enriched")
                 .with("cockroachdb.changefeed.enriched.properties", "source,schema")
                 .with("cockroachdb.changefeed.resolved.interval", "10s")
                 .with("cockroachdb.changefeed.sink.tls.ca.cert.file", caCert.toString())

@@ -168,7 +168,6 @@ public class CockroachDBMultiTableIT {
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
         config.put("cockroachdb.changefeed.kafka.bootstrap.servers", hostBootstrap);
-        config.put("cockroachdb.changefeed.envelope", "enriched");
         config.put("cockroachdb.changefeed.enriched.properties", "source,schema");
         config.put("cockroachdb.changefeed.include.diff", "true");
         config.put("cockroachdb.changefeed.include.updated", "true");
@@ -274,7 +273,6 @@ public class CockroachDBMultiTableIT {
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
         config.put("cockroachdb.changefeed.kafka.bootstrap.servers", hostBootstrap);
-        config.put("cockroachdb.changefeed.envelope", "enriched");
         config.put("cockroachdb.changefeed.enriched.properties", "source,schema");
         config.put("cockroachdb.changefeed.include.diff", "true");
         config.put("cockroachdb.changefeed.include.updated", "true");
@@ -390,7 +388,6 @@ public class CockroachDBMultiTableIT {
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
         config.put("cockroachdb.changefeed.kafka.bootstrap.servers", hostBootstrap);
-        config.put("cockroachdb.changefeed.envelope", "enriched");
         config.put("cockroachdb.changefeed.enriched.properties", "source,schema");
         config.put("cockroachdb.changefeed.include.diff", "true");
         config.put("cockroachdb.changefeed.kafka.auto.offset.reset", "earliest");
