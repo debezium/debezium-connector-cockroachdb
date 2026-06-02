@@ -16,11 +16,11 @@ The Debezium CockroachDB connector processes row-level changes from CockroachDB 
 
 The connector uses a two-stage Kafka architecture:
 
-1. **CockroachDB changefeed -> Intermediate Kafka**: The connector creates a single CockroachDB changefeed covering all configured tables (`CREATE CHANGEFEED FOR table1, table2, ...`) with the `enriched` envelope format. CockroachDB automatically routes events to per-table Kafka topics in the intermediate cluster. The enriched format includes both schema metadata and the full before/after row state.
+1. **CockroachDB changefeed -> Intermediate Kafka**: By default the connector creates a single CockroachDB changefeed covering all configured tables (`CREATE CHANGEFEED FOR table1, table2, ...`) with the `enriched` envelope format. CockroachDB automatically routes events to per-table Kafka topics in the intermediate cluster. The enriched format includes both schema metadata and the full before/after row state.
 
 2. **Intermediate Kafka -> Debezium -> Output Kafka**: The connector subscribes to all per-table Kafka topics in a single KafkaConsumer, routes each event to the correct table based on the topic name, transforms the enriched changefeed events into the standard Debezium envelope format (with `before`, `after`, `source`, and `op` fields), and produces them to the final output Kafka topics.
 
-Using a single multi-table changefeed is the [recommended approach](https://www.cockroachlabs.com/docs/stable/create-and-configure-changefeeds#recommendations) to stay within CockroachDB's limit of approximately 80 changefeed jobs per cluster.
+Consolidating tables into one changefeed keeps the connector to a single changefeed job, which helps stay within CockroachDB's [recommended limit](https://www.cockroachlabs.com/docs/stable/create-and-configure-changefeeds#recommendations) on the number of changefeeds per cluster (around 80 at the time of writing). However, CockroachDB also [advises against](https://www.cockroachlabs.com/docs/stable/changefeed-best-practices) putting very many tables in a single changefeed, because their performance becomes coupled. For large table counts, set `cockroachdb.changefeed.max.tables.per.changefeed` to split the tables across several changefeeds, or run multiple connector instances each capturing a related subset of tables.
 
 **Status**: This connector is currently in incubation phase and is being developed and tested.
 
@@ -118,8 +118,9 @@ Example connector configuration:
 |----------------------------------------------|----------|-----------------------------------------------|
 | `cockroachdb.changefeed.enriched.properties` | source   | Comma-separated enriched properties (passthrough to CockroachDB) |
 | `cockroachdb.changefeed.sink.type`           | kafka    | Sink type (kafka, webhook, pubsub, etc.)      |
-| `cockroachdb.changefeed.sink.uri`            | -        | Sink URI (required). e.g. `kafka://host:port` |
-| `cockroachdb.changefeed.sink.topic.prefix`   | ""       | Prefix for intermediate changefeed Kafka topic names. If empty, defaults to `topic.prefix` |
+| `cockroachdb.changefeed.sink.uri`            | -        | Sink URI (required). e.g. `kafka://host:port`. Do not set `topic_name`/`topic_prefix` here |
+| `cockroachdb.changefeed.sink.topic.prefix`   | ""       | Prefix for intermediate topic names, used verbatim: topics are `<prefix><database>.<schema>.<table>`. Include your own separator (e.g. `crdb.`). If empty, defaults to `<topic.prefix>.` |
+| `cockroachdb.changefeed.max.tables.per.changefeed` | 0  | Max tables per changefeed. `0` = all in one. Set positive to split large table sets across multiple changefeeds and avoid per-table coupling |
 | `cockroachdb.changefeed.sink.options`        | ""       | Additional sink options in key=value format   |
 | `cockroachdb.changefeed.resolved.interval`   | 10s      | Resolved timestamp interval                   |
 | `cockroachdb.changefeed.include.updated`     | false    | Include updated column information            |
@@ -360,8 +361,6 @@ COCKROACHDB_VERSION=v25.4.10 docker-compose -f src/test/scripts/docker-compose.y
 ```
 
 ## Known Limitations
-
-- **Single changefeed job**: The connector creates a single multi-table changefeed (`CREATE CHANGEFEED FOR table1, table2, ...`) and consumes all per-table Kafka topics concurrently in a single KafkaConsumer. This is the [recommended approach](https://www.cockroachlabs.com/docs/stable/create-and-configure-changefeeds#recommendations) to stay within CockroachDB's ~80 changefeed job limit per cluster.
 
 - **Kafka-only sink**: Only Kafka sinks are supported. Webhook, Pub/Sub, and cloud storage sinks are planned.
 
