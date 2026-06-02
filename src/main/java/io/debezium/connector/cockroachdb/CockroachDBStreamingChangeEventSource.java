@@ -52,8 +52,11 @@ import io.debezium.util.Metronome;
  * Kafka topic name, and dispatches events through Debezium's {@link EventDispatcher}
  * pipeline.</p>
  *
- * <p>CockroachDB recommends no more than ~80 changefeed jobs per cluster, so a
- * single multi-table changefeed is preferred over one changefeed per table.</p>
+ * <p>By default all configured tables are captured by a single multi-table changefeed, which
+ * keeps the connector to one changefeed job (CockroachDB recommends keeping the number of
+ * changefeed jobs per cluster modest). For large table counts,
+ * {@code cockroachdb.changefeed.max.tables.per.changefeed} splits the tables across several
+ * changefeeds to avoid CockroachDB's per-table performance coupling.</p>
  *
  * @author Virag Tripathi
  */
@@ -176,7 +179,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             }
 
             // Create a single multi-table changefeed (if not already running)
-            createMultiTableChangefeed(connection, tables, offsetContext, hasPriorOffset);
+            createChangefeeds(connection, tables, offsetContext, hasPriorOffset);
 
             // Consume events from all per-table topics in a single consumer
             consumeChangefeedEvents(tables, offsetContext, context);
@@ -199,28 +202,63 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * Creates a single multi-table changefeed covering all configured tables.
      * If a changefeed already exists for any of the tables, creation is skipped.
      */
-    private void createMultiTableChangefeed(
-                                            CockroachDBConnection connection,
-                                            List<TableId> tables,
-                                            CockroachDBOffsetContext offsetContext,
-                                            boolean hasPriorOffset)
+    /**
+     * Above this many tables in a single changefeed, the connector logs a recommendation to split
+     * the feed (see {@code cockroachdb.changefeed.max.tables.per.changefeed}). This is a connector
+     * heuristic to surface CockroachDB's coupling guidance, not a hard CockroachDB limit.
+     */
+    static final int SINGLE_CHANGEFEED_TABLE_WARN_THRESHOLD = 100;
+
+    /**
+     * Creates the changefeed(s) covering all configured tables. By default all tables go into a
+     * single changefeed; when {@code cockroachdb.changefeed.max.tables.per.changefeed} is positive,
+     * the tables are split into multiple changefeeds of at most that size to avoid CockroachDB's
+     * per-table performance coupling. A changefeed is skipped if one already covers its tables (for
+     * idempotent restarts and reuse of a pre-provisioned feed).
+     */
+    private void createChangefeeds(
+                                   CockroachDBConnection connection,
+                                   List<TableId> tables,
+                                   CockroachDBOffsetContext offsetContext,
+                                   boolean hasPriorOffset)
             throws SQLException {
 
-        // Check if a changefeed already covers any of our tables
-        for (TableId table : tables) {
-            if (changefeedExists(connection, table)) {
-                LOGGER.info("Changefeed already running for table {}, skipping multi-table creation", table);
-                return;
-            }
+        int maxPerChangefeed = config.getChangefeedMaxTablesPerChangefeed();
+        List<List<TableId>> groups = partitionTables(tables, maxPerChangefeed);
+
+        if (maxPerChangefeed <= 0 && tables.size() >= SINGLE_CHANGEFEED_TABLE_WARN_THRESHOLD) {
+            LOGGER.warn("Capturing {} tables in a single changefeed. CockroachDB's performance can become coupled "
+                    + "across many tables in one changefeed. Consider setting "
+                    + "cockroachdb.changefeed.max.tables.per.changefeed to split them into multiple changefeeds, "
+                    + "or run multiple connector instances each capturing a related subset of tables.", tables.size());
         }
 
-        String changefeedQuery = buildSinkChangefeedQuery(tables, offsetContext.getCursor(), hasPriorOffset);
-        LOGGER.info("Creating multi-table changefeed for {} table(s)", tables.size());
-        LOGGER.debug("Changefeed query: {}", changefeedQuery);
+        if (groups.size() > 1) {
+            LOGGER.info("Splitting {} table(s) into {} changefeed(s) (max {} tables each)",
+                    tables.size(), groups.size(), maxPerChangefeed);
+        }
 
-        try (Statement stmt = connection.connection().createStatement()) {
-            stmt.execute(changefeedQuery);
-            LOGGER.info("Created changefeed for tables: {}", tables);
+        for (List<TableId> group : groups) {
+            boolean alreadyRunning = false;
+            for (TableId table : group) {
+                if (changefeedExists(connection, table)) {
+                    alreadyRunning = true;
+                    break;
+                }
+            }
+            if (alreadyRunning) {
+                LOGGER.info("Changefeed already running for table(s) {}, skipping creation", group);
+                continue;
+            }
+
+            String changefeedQuery = buildSinkChangefeedQuery(group, offsetContext.getCursor(), hasPriorOffset);
+            LOGGER.info("Creating changefeed for {} table(s)", group.size());
+            LOGGER.debug("Changefeed query: {}", changefeedQuery);
+
+            try (Statement stmt = connection.connection().createStatement()) {
+                stmt.execute(changefeedQuery);
+                LOGGER.info("Created changefeed for tables: {}", group);
+            }
         }
 
         String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
@@ -229,6 +267,22 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             LOGGER.info("Initial scan in progress (snapshot.mode={})",
                     config.getSnapshotMode().getValue());
         }
+    }
+
+    /**
+     * Partitions the tables into changefeed groups. A {@code maxPerGroup} of 0 or less (the default)
+     * keeps every table in a single group, preserving the single-changefeed behavior. Otherwise the
+     * tables are split into consecutive chunks of at most {@code maxPerGroup}.
+     */
+    static List<List<TableId>> partitionTables(List<TableId> tables, int maxPerGroup) {
+        if (maxPerGroup <= 0 || tables.size() <= maxPerGroup) {
+            return List.of(new java.util.ArrayList<>(tables));
+        }
+        List<List<TableId>> groups = new java.util.ArrayList<>();
+        for (int i = 0; i < tables.size(); i += maxPerGroup) {
+            groups.add(new java.util.ArrayList<>(tables.subList(i, Math.min(i + maxPerGroup, tables.size()))));
+        }
+        return groups;
     }
 
     /**
@@ -260,11 +314,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     private boolean changefeedExists(CockroachDBConnection connection, TableId table) throws SQLException {
         String fqTableName = sanitizeIdentifier(table.toString());
-        String topicPrefix = config.getChangefeedSinkTopicPrefix();
-        if (topicPrefix == null || topicPrefix.trim().isEmpty()) {
-            topicPrefix = config.getLogicalName();
-        }
-        String sinkMarker = "topic_prefix=" + topicPrefix + ".";
+        String topicPrefix = resolveTopicPrefix();
+        String sinkMarker = "topic_prefix=" + topicPrefix;
 
         try (Statement stmt = connection.connection().createStatement()) {
             String query = "SELECT description FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running'";
@@ -591,13 +642,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
         String sinkUri = config.getChangefeedSinkUri();
         sinkUri = injectSinkTlsParams(sinkUri);
-        String topicPrefix = config.getChangefeedSinkTopicPrefix();
-        if (topicPrefix == null || topicPrefix.trim().isEmpty()) {
-            topicPrefix = config.getLogicalName();
-        }
-        // Append topic_prefix to the sink URI so CockroachDB names topics as prefix.db.schema.table
+        // Use the resolved topic prefix verbatim so the user controls the separator. With
+        // full_table_name, CockroachDB names topics <prefix><database>.<schema>.<table>, which is
+        // exactly what buildTopicName subscribes to.
         String separator = sinkUri.contains("?") ? "&" : "?";
-        sinkUri = sinkUri + separator + "topic_prefix=" + sanitizeLiteral(topicPrefix) + ".";
+        sinkUri = sinkUri + separator + "topic_prefix=" + sanitizeLiteral(resolveTopicPrefix());
         query.append(" INTO '").append(sanitizeLiteral(sinkUri)).append("'");
 
         query.append(" WITH full_table_name");
@@ -641,16 +690,27 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
-     * Builds the topic name for a table using the configured prefix and database name.
-     * Format: {@code {prefix}.{database}.{schema}.{table}}.
-     * Falls back to {@code topic.prefix} when no explicit sink topic prefix is configured.
+     * Resolves the intermediate-topic prefix. When the user sets
+     * {@code cockroachdb.changefeed.sink.topic.prefix}, it is used verbatim so the user controls the
+     * separator (for example {@code crdb.} or {@code env-prod-}). When it is not set, it defaults to
+     * {@code <topic.prefix>.} so the default topic layout remains
+     * {@code <topic.prefix>.<database>.<schema>.<table>}.
+     */
+    private String resolveTopicPrefix() {
+        String topicPrefix = config.getChangefeedSinkTopicPrefix();
+        if (topicPrefix != null && !topicPrefix.trim().isEmpty()) {
+            return topicPrefix;
+        }
+        return config.getLogicalName() + ".";
+    }
+
+    /**
+     * Builds the topic name for a table: {@code <prefix><database>.<schema>.<table>}, where the
+     * prefix already carries its own separator (see {@link #resolveTopicPrefix()}). This must match
+     * the topic that CockroachDB produces for {@code topic_prefix=<prefix>} with {@code full_table_name}.
      */
     private String buildTopicName(TableId table) {
-        String topicPrefix = config.getChangefeedSinkTopicPrefix();
-        if (topicPrefix == null || topicPrefix.trim().isEmpty()) {
-            topicPrefix = config.getLogicalName();
-        }
-        return topicPrefix + "." + config.getDatabaseName() + "." + table.schema() + "." + table.table();
+        return resolveTopicPrefix() + config.getDatabaseName() + "." + table.schema() + "." + table.table();
     }
 
     /**

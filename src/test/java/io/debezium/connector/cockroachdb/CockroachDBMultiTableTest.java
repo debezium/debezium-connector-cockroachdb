@@ -226,7 +226,9 @@ public class CockroachDBMultiTableTest {
     }
 
     @Test
-    public void shouldUseExplicitSinkTopicPrefixOverTopicPrefix() {
+    public void shouldUseExplicitSinkTopicPrefixVerbatim() {
+        // An explicitly set sink topic prefix is used verbatim (no separator is appended), so the
+        // user controls the separator. Here "custom" yields topic_prefix=custom (not custom.).
         Configuration config = Configuration.create()
                 .with("database.hostname", "localhost")
                 .with("database.port", "26257")
@@ -244,8 +246,32 @@ public class CockroachDBMultiTableTest {
 
         String query = source.buildSinkChangefeedQuery(tables, null, false);
 
-        assertThat(query).contains("topic_prefix=custom.");
-        assertThat(query).doesNotContain("topic_prefix=myapp.");
+        assertThat(query).contains("topic_prefix=custom");
+        assertThat(query).doesNotContain("topic_prefix=custom.");
+        assertThat(query).doesNotContain("myapp");
+    }
+
+    @Test
+    public void shouldUseSinkTopicPrefixWithCustomSeparatorVerbatim() {
+        // A prefix that carries its own separator (e.g. a dash convention) is preserved exactly,
+        // so the topic becomes <prefix><database>.<schema>.<table> with no connector-added dot.
+        Configuration config = Configuration.create()
+                .with("database.hostname", "localhost")
+                .with("database.port", "26257")
+                .with("database.user", "root")
+                .with("database.dbname", "bankdb")
+                .with("topic.prefix", "myapp")
+                .with("cockroachdb.changefeed.sink.topic.prefix", "env-prod-")
+                .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
+                .with("cockroachdb.changefeed.resolved.interval", "10s")
+                .build();
+
+        CockroachDBStreamingChangeEventSource source = createSource(config);
+        String query = source.buildSinkChangefeedQuery(
+                Collections.singletonList(new TableId("bankdb", "public", "orders")), null, false);
+
+        assertThat(query).contains("topic_prefix=env-prod-");
+        assertThat(query).doesNotContain("topic_prefix=env-prod-.");
     }
 
     @Test
@@ -415,5 +441,64 @@ public class CockroachDBMultiTableTest {
         return URLEncoder.encode(
                 Base64.getEncoder().encodeToString(content.getBytes(StandardCharsets.UTF_8)),
                 StandardCharsets.UTF_8);
+    }
+
+    @Test
+    public void shouldKeepAllTablesInOneGroupWhenMaxIsZero() {
+        List<TableId> tables = List.of(
+                new TableId("db", "public", "t1"),
+                new TableId("db", "public", "t2"),
+                new TableId("db", "public", "t3"));
+
+        List<List<TableId>> groups = CockroachDBStreamingChangeEventSource.partitionTables(tables, 0);
+
+        assertThat(groups).hasSize(1);
+        assertThat(groups.get(0)).containsExactlyElementsOf(tables);
+    }
+
+    @Test
+    public void shouldKeepAllTablesInOneGroupWhenCountUnderMax() {
+        List<TableId> tables = List.of(
+                new TableId("db", "public", "t1"),
+                new TableId("db", "public", "t2"));
+
+        List<List<TableId>> groups = CockroachDBStreamingChangeEventSource.partitionTables(tables, 5);
+
+        assertThat(groups).hasSize(1);
+        assertThat(groups.get(0)).containsExactlyElementsOf(tables);
+    }
+
+    @Test
+    public void shouldSplitTablesIntoEvenChunks() {
+        List<TableId> tables = List.of(
+                new TableId("db", "public", "t1"),
+                new TableId("db", "public", "t2"),
+                new TableId("db", "public", "t3"),
+                new TableId("db", "public", "t4"));
+
+        List<List<TableId>> groups = CockroachDBStreamingChangeEventSource.partitionTables(tables, 2);
+
+        assertThat(groups).hasSize(2);
+        assertThat(groups.get(0)).hasSize(2);
+        assertThat(groups.get(1)).hasSize(2);
+    }
+
+    @Test
+    public void shouldSplitTablesWithRemainderChunk() {
+        List<TableId> tables = List.of(
+                new TableId("db", "public", "t1"),
+                new TableId("db", "public", "t2"),
+                new TableId("db", "public", "t3"),
+                new TableId("db", "public", "t4"),
+                new TableId("db", "public", "t5"));
+
+        List<List<TableId>> groups = CockroachDBStreamingChangeEventSource.partitionTables(tables, 2);
+
+        assertThat(groups).hasSize(3);
+        assertThat(groups.get(0)).hasSize(2);
+        assertThat(groups.get(1)).hasSize(2);
+        assertThat(groups.get(2)).hasSize(1);
+        // Every table is present exactly once across all groups.
+        assertThat(groups.stream().flatMap(List::stream)).containsExactlyElementsOf(tables);
     }
 }

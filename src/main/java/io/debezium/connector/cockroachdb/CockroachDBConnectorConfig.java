@@ -280,11 +280,14 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 8))
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
+            .withValidation(CockroachDBConnectorConfig::validateChangefeedSinkUri)
             .withDescription("The URI for the changefeed sink (required). Format depends on sink type: "
                     + "'kafka://host:port' for Kafka, "
                     + "'pubsub://project:topic' for Pub/Sub, "
                     + "'webhook://url' for Webhook, "
-                    + "'cloudstorage://bucket' for Cloud Storage.");
+                    + "'cloudstorage://bucket' for Cloud Storage. "
+                    + "Do not set the topic_name or topic_prefix query parameters here; the connector manages "
+                    + "intermediate topic naming through cockroachdb.changefeed.sink.topic.prefix.");
 
     public static final Field CHANGEFEED_SINK_TOPIC_PREFIX = Field.create("cockroachdb.changefeed.sink.topic.prefix")
             .withDisplayName("Changefeed sink topic prefix")
@@ -293,9 +296,27 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDefault("")
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
-            .withDescription("Prefix for changefeed topic names. Used to create topics in format: prefix.database.schema.table. " +
-                    "For multi-tenant deployments, consider using a unique prefix per tenant. " +
-                    "If not specified, defaults to the value of 'topic.prefix'.");
+            .withDescription("Prefix prepended to the intermediate changefeed topic names. The connector uses the value "
+                    + "verbatim, so the resulting topics are named <prefix><database>.<schema>.<table>. Include your own "
+                    + "separator if you want one (for example 'crdb.' yields 'crdb.mydb.public.orders', and 'env-prod-' "
+                    + "yields 'env-prod-mydb.public.orders'). If not specified, defaults to the value of 'topic.prefix' "
+                    + "followed by a dot.");
+
+    public static final Field CHANGEFEED_MAX_TABLES_PER_CHANGEFEED = Field.create("cockroachdb.changefeed.max.tables.per.changefeed")
+            .withDisplayName("Maximum tables per changefeed")
+            .withType(Type.INT)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 18))
+            .withDefault(0)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.MEDIUM)
+            .withValidation(Field::isNonNegativeInteger)
+            .withDescription("Maximum number of tables to include in a single CockroachDB changefeed. "
+                    + "The default of 0 places all configured tables in one changefeed. When set to a positive value, "
+                    + "the connector splits the captured tables into multiple changefeeds of at most this many tables "
+                    + "each, which avoids the performance coupling CockroachDB warns about when one changefeed watches "
+                    + "very many tables. Smaller values reduce coupling but create more changefeed jobs, so balance this "
+                    + "against CockroachDB's recommended limit on the number of changefeed jobs per cluster (see the "
+                    + "CockroachDB changefeed documentation for current guidance).");
 
     public static final Field CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS = Field.create("cockroachdb.changefeed.kafka.bootstrap.servers")
             .withDisplayName("Kafka consumer bootstrap servers")
@@ -466,6 +487,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     CHANGEFEED_SINK_TYPE,
                     CHANGEFEED_SINK_URI,
                     CHANGEFEED_SINK_TOPIC_PREFIX,
+                    CHANGEFEED_MAX_TABLES_PER_CHANGEFEED,
                     CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS,
                     CHANGEFEED_KAFKA_CONSUMER_GROUP_PREFIX,
                     CHANGEFEED_KAFKA_POLL_TIMEOUT_MS,
@@ -890,6 +912,28 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
         return 0;
     }
 
+    /**
+     * Rejects sink URIs that try to control topic naming directly. The connector manages the
+     * intermediate topic names itself (via {@code cockroachdb.changefeed.sink.topic.prefix} plus
+     * {@code full_table_name}) and subscribes its consumer to exactly those names. A user-supplied
+     * {@code topic_name} or {@code topic_prefix} in the sink URI would silently disagree with what
+     * the connector consumes and yield zero events, so we fail fast with guidance instead.
+     */
+    private static int validateChangefeedSinkUri(Configuration config, Field field, Field.ValidationOutput problems) {
+        String value = config.getString(field);
+        if (value == null) {
+            return 0;
+        }
+        String lower = value.toLowerCase();
+        if (lower.contains("topic_name=") || lower.contains("topic_prefix=")) {
+            problems.accept(field, value, "Do not set 'topic_name' or 'topic_prefix' in the sink URI. The connector "
+                    + "manages intermediate topic naming; use the 'cockroachdb.changefeed.sink.topic.prefix' property "
+                    + "(or 'topic.prefix') to control the topic prefix.");
+            return 1;
+        }
+        return 0;
+    }
+
     private static int validateOptionalReadableFile(Configuration config, Field field, Field.ValidationOutput problems) {
         String value = config.getString(field);
         if (value == null || value.isEmpty()) {
@@ -1024,6 +1068,10 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public String getChangefeedSinkTopicPrefix() {
         return config.getString(CHANGEFEED_SINK_TOPIC_PREFIX);
+    }
+
+    public int getChangefeedMaxTablesPerChangefeed() {
+        return config.getInteger(CHANGEFEED_MAX_TABLES_PER_CHANGEFEED);
     }
 
     public String getChangefeedSinkOptions() {

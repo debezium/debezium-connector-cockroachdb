@@ -454,6 +454,42 @@ public class CockroachDBConnectorConfigTest {
                 CockroachDBConnectorConfigTest::failOnProblem)).isTrue();
     }
 
+    @Test
+    public void shouldRejectTopicNameInSinkUri() {
+        Configuration config = baseProps()
+                .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092?topic_name=my_topic")
+                .build();
+        StringBuilder problemMessage = new StringBuilder();
+        boolean ok = config.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                (String message) -> problemMessage.append(message));
+        assertThat(ok).isFalse();
+        assertThat(problemMessage.toString()).contains("topic_name");
+    }
+
+    @Test
+    public void shouldRejectTopicPrefixInSinkUri() {
+        Configuration config = baseProps()
+                .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092?topic_prefix=foo")
+                .build();
+        StringBuilder problemMessage = new StringBuilder();
+        boolean ok = config.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                (String message) -> problemMessage.append(message));
+        assertThat(ok).isFalse();
+        assertThat(problemMessage.toString()).contains("sink.topic.prefix");
+    }
+
+    @Test
+    public void shouldAcceptPlainSinkUri() {
+        Configuration config = baseProps()
+                .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
+                .build();
+        assertThat(config.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                CockroachDBConnectorConfigTest::failOnProblem)).isTrue();
+    }
+
     private static Configuration.Builder baseProps() {
         return Configuration.create()
                 .with("database.hostname", "localhost")
