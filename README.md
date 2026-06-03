@@ -223,6 +223,7 @@ Currently only the Kafka sink consumes these TLS parameters; other sink types pa
 | `cockroachdb.changefeed.kafka.consumer.group.prefix` | cockroachdb-connector | Kafka consumer group ID                                                                                                                                               |
 | `cockroachdb.changefeed.kafka.poll.timeout.ms`       | 100         | Kafka consumer poll timeout in milliseconds                                                                                                                                    |
 | `cockroachdb.changefeed.kafka.auto.offset.reset`     | earliest    | Kafka consumer auto offset reset policy                                                                                                                                        |
+| `cockroachdb.changefeed.kafka.consumer.override.*`   | -           | Passed verbatim to the changefeed consumer (Kafka client properties), e.g. `...override.security.protocol=SSL`. Use for SASL, custom trust/key stores, or to override auto-derived SSL. When `sink.tls.*` is set, the consumer's SSL is auto-derived from those PEM files, so this is only needed for extra or different settings. |
 
 #### Connection Settings
 

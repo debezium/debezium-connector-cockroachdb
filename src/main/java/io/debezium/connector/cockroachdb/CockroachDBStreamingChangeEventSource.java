@@ -35,6 +35,7 @@ import org.slf4j.LoggerFactory;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import io.debezium.config.Configuration;
 import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
 import io.debezium.data.Envelope;
 import io.debezium.pipeline.EventDispatcher;
@@ -387,6 +388,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, config.getChangefeedKafkaAutoOffsetReset());
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+
+        applyConsumerSecurity(config, props);
 
         LOGGER.debug("Kafka consumer config: bootstrapServers={}, groupId={}, autoOffsetReset={}, pollTimeout={}ms, topics={}",
                 props.get(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG),
@@ -771,6 +774,68 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
         catch (IOException e) {
             throw new IllegalStateException("Failed to read sink TLS file: " + filePath, e);
+        }
+    }
+
+    /**
+     * Prefix for properties passed verbatim to the connector's changefeed {@link KafkaConsumer}.
+     * Anything under {@code cockroachdb.changefeed.kafka.consumer.override.<kafka-property>} is applied
+     * directly to the consumer (for example {@code ...override.security.protocol=SSL}), following the
+     * same passthrough convention Debezium uses for its schema-history and signal Kafka clients. This
+     * is the escape hatch for SASL, custom trust/key stores, or overriding any auto-derived value.
+     */
+    static final String CONSUMER_OVERRIDE_PREFIX = "cockroachdb.changefeed.kafka.consumer.override.";
+
+    /**
+     * Configures security for the connector's changefeed consumer. The consumer is a normal Kafka
+     * client and is separate from the changefeed push to CockroachDB's Kafka sink, so it needs its
+     * own security settings to read from a secured broker.
+     *
+     * <p>Two layers, applied in order so the passthrough wins:
+     * <ol>
+     * <li>If {@code cockroachdb.changefeed.sink.tls.*} is set (the same PEM material used to push the
+     * changefeed over mTLS), derive {@code security.protocol=SSL} plus a PEM truststore (from the CA)
+     * and, when a client cert and key are present, a PEM keystore. This makes the mTLS round-trip work
+     * with no extra configuration.</li>
+     * <li>Apply every {@code cockroachdb.changefeed.kafka.consumer.override.*} property verbatim, which
+     * overrides the derived values and covers SASL, JKS stores, or a differently-secured broker.</li>
+     * </ol>
+     */
+    static void applyConsumerSecurity(CockroachDBConnectorConfig config, java.util.Properties props) {
+        if (config.isChangefeedSinkTlsEnabled()) {
+            props.put("security.protocol", "SSL");
+            String caCert = config.getChangefeedSinkTlsCaCertFile();
+            if (caCert != null && !caCert.isEmpty()) {
+                props.put("ssl.truststore.type", "PEM");
+                props.put("ssl.truststore.location", caCert);
+            }
+            String clientCert = config.getChangefeedSinkTlsClientCertFile();
+            String clientKey = config.getChangefeedSinkTlsClientKeyFile();
+            if (clientCert != null && !clientCert.isEmpty() && clientKey != null && !clientKey.isEmpty()) {
+                props.put("ssl.keystore.type", "PEM");
+                props.put("ssl.keystore.certificate.chain", readFileContent(clientCert));
+                props.put("ssl.keystore.key", readFileContent(clientKey));
+            }
+            LOGGER.info("Derived SSL config for the changefeed consumer from cockroachdb.changefeed.sink.tls.* (security.protocol=SSL)");
+        }
+
+        Configuration overrides = config.getConfig().subset(CONSUMER_OVERRIDE_PREFIX, true);
+        int applied = 0;
+        for (String key : overrides.keys()) {
+            props.put(key, overrides.getString(key));
+            applied++;
+        }
+        if (applied > 0) {
+            LOGGER.info("Applied {} '{}*' property/properties to the changefeed consumer", applied, CONSUMER_OVERRIDE_PREFIX);
+        }
+    }
+
+    private static String readFileContent(String filePath) {
+        try {
+            return new String(Files.readAllBytes(Path.of(filePath)), StandardCharsets.UTF_8);
+        }
+        catch (IOException e) {
+            throw new IllegalStateException("Failed to read sink TLS file for the changefeed consumer: " + filePath, e);
         }
     }
 
