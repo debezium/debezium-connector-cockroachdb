@@ -29,8 +29,8 @@ Consolidating tables into one changefeed keeps the connector to a single changef
 * CockroachDB v25.2+ with [rangefeed enabled](https://www.cockroachlabs.com/docs/stable/create-and-configure-changefeeds.html#enable-rangefeeds) (enriched envelope support introduced in v25.2)
 * CockroachDB v24.2+ for [pgvector-compatible VECTOR type](https://www.cockroachlabs.com/docs/stable/vector) support
 * Kafka Connect
-* JDK 21+
-* Maven 3.9.8 or later
+* Java 17 or later to run the connector. It is compiled to Java 17 to match common Kafka Connect deployments (see [debezium/dbz#1922](https://issues.redhat.com/browse/DBZ-1922)).
+* To build from source: JDK 21 (required by the Debezium build) and Maven 3.9.8 or later
 
 ### Required CockroachDB Privileges
 
