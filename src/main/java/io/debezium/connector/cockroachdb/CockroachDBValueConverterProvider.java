@@ -5,6 +5,14 @@
  */
 package io.debezium.connector.cockroachdb;
 
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.Locale;
 
 import org.apache.kafka.connect.data.Field;
@@ -18,6 +26,11 @@ import io.debezium.data.vector.DoubleVector;
 import io.debezium.relational.Column;
 import io.debezium.relational.ValueConverter;
 import io.debezium.relational.ValueConverterProvider;
+import io.debezium.time.Date;
+import io.debezium.time.MicroTime;
+import io.debezium.time.MicroTimestamp;
+import io.debezium.time.ZonedTime;
+import io.debezium.time.ZonedTimestamp;
 
 /**
  * Value converter provider for CockroachDB.
@@ -99,23 +112,22 @@ public class CockroachDBValueConverterProvider implements ValueConverterProvider
             case "BLOB":
                 return SchemaBuilder.bytes().optional();
 
-            // Date/time types
+            // Date/time types -- schema names match the Debezium time logical types so downstream
+            // consumers (and the JDBC sink) interpret them the same as other Debezium connectors.
             case "DATE":
-                return SchemaBuilder.int32()
-                        .name("io.debezium.time.Date")
-                        .optional();
+                return Date.builder().optional();
             case "TIME":
-            case "TIMETZ":
             case "TIME WITHOUT TIME ZONE":
+                return MicroTime.builder().optional();
+            case "TIMETZ":
             case "TIME WITH TIME ZONE":
-                return SchemaBuilder.string().optional();
+                return ZonedTime.builder().optional();
             case "TIMESTAMP":
-            case "TIMESTAMPTZ":
             case "TIMESTAMP WITHOUT TIME ZONE":
+                return MicroTimestamp.builder().optional();
+            case "TIMESTAMPTZ":
             case "TIMESTAMP WITH TIME ZONE":
-                return SchemaBuilder.int64()
-                        .name("io.debezium.time.MicroTimestamp")
-                        .optional();
+                return ZonedTimestamp.builder().optional();
             case "INTERVAL":
                 return SchemaBuilder.string().optional();
 
@@ -236,10 +248,9 @@ public class CockroachDBValueConverterProvider implements ValueConverterProvider
                     return DoubleVector.fromLogical(schema, value.toString());
                 };
 
+            // TIMESTAMP without time zone -> MicroTimestamp (micros since epoch, interpreted as UTC).
             case "TIMESTAMP":
-            case "TIMESTAMPTZ":
             case "TIMESTAMP WITHOUT TIME ZONE":
-            case "TIMESTAMP WITH TIME ZONE":
                 return value -> {
                     if (value == null) {
                         return null;
@@ -249,20 +260,58 @@ public class CockroachDBValueConverterProvider implements ValueConverterProvider
                     }
                     String ts = value.toString().trim();
                     try {
-                        java.time.Instant instant = java.time.Instant.parse(ts);
+                        Instant instant = Instant.parse(ts);
                         return instant.getEpochSecond() * 1_000_000L + instant.getNano() / 1_000L;
                     }
-                    catch (java.time.format.DateTimeParseException e) {
+                    catch (DateTimeParseException e) {
                         try {
-                            java.time.ZonedDateTime zdt = java.time.ZonedDateTime.parse(ts, java.time.format.DateTimeFormatter.ISO_DATE_TIME);
-                            java.time.Instant inst = zdt.toInstant();
+                            ZonedDateTime zdt = ZonedDateTime.parse(ts, DateTimeFormatter.ISO_DATE_TIME);
+                            Instant inst = zdt.toInstant();
                             return inst.getEpochSecond() * 1_000_000L + inst.getNano() / 1_000L;
                         }
-                        catch (java.time.format.DateTimeParseException e2) {
-                            return null;
+                        catch (DateTimeParseException e2) {
+                            try {
+                                // TIMESTAMP without time zone (no offset): interpret as UTC.
+                                Instant inst = LocalDateTime.parse(ts, DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+                                        .toInstant(ZoneOffset.UTC);
+                                return inst.getEpochSecond() * 1_000_000L + inst.getNano() / 1_000L;
+                            }
+                            catch (DateTimeParseException e3) {
+                                return null;
+                            }
                         }
                     }
                 };
+
+            // TIMESTAMPTZ -> ZonedTimestamp (ISO-8601 string). CockroachDB already emits a zoned
+            // value (normalized to UTC), so pass it through.
+            case "TIMESTAMPTZ":
+            case "TIMESTAMP WITH TIME ZONE":
+                return value -> value == null ? null : value.toString();
+
+            // TIME without time zone -> MicroTime (micros since midnight).
+            case "TIME":
+            case "TIME WITHOUT TIME ZONE":
+                return value -> {
+                    if (value == null) {
+                        return null;
+                    }
+                    if (value instanceof Long) {
+                        return value;
+                    }
+                    try {
+                        return LocalTime.parse(value.toString().trim(), DateTimeFormatter.ISO_LOCAL_TIME)
+                                .toNanoOfDay() / 1_000L;
+                    }
+                    catch (DateTimeParseException e) {
+                        return null;
+                    }
+                };
+
+            // TIMETZ -> ZonedTime (string). Pass the CockroachDB value through.
+            case "TIMETZ":
+            case "TIME WITH TIME ZONE":
+                return value -> value == null ? null : value.toString();
 
             case "DATE":
                 return value -> {
@@ -273,9 +322,9 @@ public class CockroachDBValueConverterProvider implements ValueConverterProvider
                         return value;
                     }
                     try {
-                        return (int) java.time.LocalDate.parse(value.toString().trim()).toEpochDay();
+                        return (int) LocalDate.parse(value.toString().trim()).toEpochDay();
                     }
-                    catch (java.time.format.DateTimeParseException e) {
+                    catch (DateTimeParseException e) {
                         return null;
                     }
                 };

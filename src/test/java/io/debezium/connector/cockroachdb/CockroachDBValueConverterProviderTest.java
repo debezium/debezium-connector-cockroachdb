@@ -104,10 +104,23 @@ public class CockroachDBValueConverterProviderTest {
     }
 
     @Test
-    void timestamptzColumnReturnsMicroTimestamp() {
-        Column col = column("TIMESTAMPTZ");
-        SchemaBuilder builder = provider.schemaBuilder(col);
-        assertThat(builder.build().name()).isEqualTo("io.debezium.time.MicroTimestamp");
+    void temporalColumnsReturnDebeziumLogicalSchemas() {
+        // Schema names must match the Debezium time logical types (parity with other connectors).
+        assertThat(provider.schemaBuilder(column("TIMESTAMP")).build().name())
+                .isEqualTo("io.debezium.time.MicroTimestamp");
+        assertThat(provider.schemaBuilder(column("TIMESTAMPTZ")).build().name())
+                .isEqualTo("io.debezium.time.ZonedTimestamp");
+        assertThat(provider.schemaBuilder(column("TIME")).build().name())
+                .isEqualTo("io.debezium.time.MicroTime");
+        assertThat(provider.schemaBuilder(column("TIMETZ")).build().name())
+                .isEqualTo("io.debezium.time.ZonedTime");
+        assertThat(provider.schemaBuilder(column("DATE")).build().name())
+                .isEqualTo("io.debezium.time.Date");
+        // TIMESTAMPTZ/TIMETZ are strings; TIMESTAMP/TIME are int64.
+        assertThat(provider.schemaBuilder(column("TIMESTAMPTZ")).build().type()).isEqualTo(Schema.Type.STRING);
+        assertThat(provider.schemaBuilder(column("TIMETZ")).build().type()).isEqualTo(Schema.Type.STRING);
+        assertThat(provider.schemaBuilder(column("TIMESTAMP")).build().type()).isEqualTo(Schema.Type.INT64);
+        assertThat(provider.schemaBuilder(column("TIME")).build().type()).isEqualTo(Schema.Type.INT64);
     }
 
     @Test
@@ -161,6 +174,52 @@ public class CockroachDBValueConverterProviderTest {
 
         assertThat(converter.convert("3.14")).isEqualTo(3.14);
         assertThat(converter.convert(null)).isNull();
+    }
+
+    @Test
+    void timestampConverterHandlesZonedAndZonelessStrings() {
+        Column col = column("TIMESTAMP");
+        Schema schema = provider.schemaBuilder(col).build();
+        Field field = new Field("ts", 0, schema);
+        ValueConverter converter = provider.converter(col, field);
+
+        // Already-parsed micros pass through unchanged.
+        assertThat(converter.convert(1_000_000L)).isEqualTo(1_000_000L);
+        // TIMESTAMP without time zone (the previously-failing case) is interpreted as UTC.
+        assertThat(converter.convert("1970-01-01T00:00:01.000")).isEqualTo(1_000_000L);
+        assertThat(converter.convert("2026-06-08T11:01:45.883")).isNotNull();
+        // TIMESTAMPTZ with a trailing Z still works.
+        assertThat(converter.convert("1970-01-01T00:00:01Z")).isEqualTo(1_000_000L);
+        assertThat(converter.convert(null)).isNull();
+        assertThat(converter.convert("not-a-timestamp")).isNull();
+    }
+
+    @Test
+    void timeConverterParsesToMicrosSinceMidnight() {
+        Column col = column("TIME");
+        Field field = new Field("tm", 0, provider.schemaBuilder(col).build());
+        ValueConverter converter = provider.converter(col, field);
+
+        assertThat(converter.convert("00:00:01")).isEqualTo(1_000_000L);
+        assertThat(converter.convert("00:00:00.000001")).isEqualTo(1L);
+        assertThat(converter.convert("11:01:45.883")).isNotNull();
+        assertThat(converter.convert(1_000_000L)).isEqualTo(1_000_000L);
+        assertThat(converter.convert(null)).isNull();
+        assertThat(converter.convert("not-a-time")).isNull();
+    }
+
+    @Test
+    void zonedTimestampAndZonedTimeConvertersPassThroughStrings() {
+        Column tstz = column("TIMESTAMPTZ");
+        ValueConverter tstzConv = provider.converter(tstz, new Field("tstz", 0, provider.schemaBuilder(tstz).build()));
+        assertThat(tstzConv.convert("2026-06-08T09:01:45.883Z")).isEqualTo("2026-06-08T09:01:45.883Z");
+        assertThat(tstzConv.convert(null)).isNull();
+
+        Column tmtz = column("TIMETZ");
+        ValueConverter tmtzConv = provider.converter(tmtz, new Field("tmtz", 0, provider.schemaBuilder(tmtz).build()));
+        // CockroachDB emits a short "+02" offset; ZonedTime carries it through as a string.
+        assertThat(tmtzConv.convert("11:01:45.883+02")).isEqualTo("11:01:45.883+02");
+        assertThat(tmtzConv.convert(null)).isNull();
     }
 
     @Test

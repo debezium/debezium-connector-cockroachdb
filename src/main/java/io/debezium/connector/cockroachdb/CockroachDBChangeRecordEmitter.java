@@ -7,6 +7,9 @@ package io.debezium.connector.cockroachdb;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
@@ -149,9 +152,18 @@ public class CockroachDBChangeRecordEmitter extends RelationalChangeRecordEmitte
                 return node.asText();
             case "TIMESTAMP":
             case "TIMESTAMP WITHOUT TIME ZONE":
+                return parseTimestampMicros(node.asText());
             case "TIMESTAMPTZ":
             case "TIMESTAMP WITH TIME ZONE":
-                return parseTimestampMicros(node.asText());
+                // ZonedTimestamp is a string; CockroachDB emits an ISO-8601 zoned value.
+                return node.asText();
+            case "TIME":
+            case "TIME WITHOUT TIME ZONE":
+                return parseTimeMicros(node.asText());
+            case "TIMETZ":
+            case "TIME WITH TIME ZONE":
+                // ZonedTime is a string; pass the CockroachDB value through.
+                return node.asText();
             case "DATE":
                 return parseDateDays(node.asText());
             default:
@@ -175,27 +187,59 @@ public class CockroachDBChangeRecordEmitter extends RelationalChangeRecordEmitte
 
     /**
      * Parses a CockroachDB timestamp string into microseconds since epoch.
-     * CockroachDB changefeed emits ISO-8601 strings like {@code "2026-02-19T19:06:58.916109Z"}.
-     * Debezium's {@code MicroTimestamp} schema expects {@code long} (microseconds since epoch).
+     *
+     * <p>CockroachDB emits {@code TIMESTAMPTZ} with a zone or trailing {@code 'Z'} (for example
+     * {@code "2026-02-19T19:06:58.916109Z"}), and {@code TIMESTAMP} (without time zone) with no zone
+     * at all (for example {@code "2026-06-08T11:01:45.883"}). Both are supported here. A zoneless
+     * {@code TIMESTAMP} is interpreted as UTC, matching Debezium's convention for timestamps without
+     * a time zone. Debezium's {@code MicroTimestamp} schema expects {@code long} microseconds since
+     * epoch.</p>
      */
-    private static Long parseTimestampMicros(String value) {
+    static Long parseTimestampMicros(String value) {
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        // TIMESTAMPTZ with a trailing 'Z'.
+        try {
+            return toMicros(Instant.parse(value));
+        }
+        catch (DateTimeParseException ignored) {
+        }
+        // TIMESTAMPTZ with an explicit offset (for example +00:00).
+        try {
+            return toMicros(ZonedDateTime.parse(value, DateTimeFormatter.ISO_DATE_TIME).toInstant());
+        }
+        catch (DateTimeParseException ignored) {
+        }
+        // TIMESTAMP without time zone (no offset): interpret as UTC.
+        try {
+            return toMicros(LocalDateTime.parse(value, DateTimeFormatter.ISO_LOCAL_DATE_TIME).toInstant(ZoneOffset.UTC));
+        }
+        catch (DateTimeParseException e) {
+            LOGGER.warn("Cannot parse timestamp '{}', returning null", value);
+            return null;
+        }
+    }
+
+    private static long toMicros(Instant instant) {
+        return instant.getEpochSecond() * 1_000_000L + instant.getNano() / 1_000L;
+    }
+
+    /**
+     * Parses a CockroachDB TIME string into microseconds since midnight.
+     * CockroachDB emits TIME as {@code "HH:mm:ss[.ffffff]"}; Debezium's {@code MicroTime} schema
+     * expects {@code long} microseconds since midnight.
+     */
+    static Long parseTimeMicros(String value) {
         if (value == null || value.isEmpty()) {
             return null;
         }
         try {
-            Instant instant = Instant.parse(value);
-            return instant.getEpochSecond() * 1_000_000L + instant.getNano() / 1_000L;
+            return LocalTime.parse(value, DateTimeFormatter.ISO_LOCAL_TIME).toNanoOfDay() / 1_000L;
         }
         catch (DateTimeParseException e) {
-            try {
-                ZonedDateTime zdt = ZonedDateTime.parse(value, DateTimeFormatter.ISO_DATE_TIME);
-                Instant instant = zdt.toInstant();
-                return instant.getEpochSecond() * 1_000_000L + instant.getNano() / 1_000L;
-            }
-            catch (DateTimeParseException e2) {
-                LOGGER.warn("Cannot parse timestamp '{}', returning null", value);
-                return null;
-            }
+            LOGGER.warn("Cannot parse time '{}', returning null", value);
+            return null;
         }
     }
 
