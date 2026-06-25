@@ -95,6 +95,38 @@ public class CockroachDBDefaultValueConverterTest {
     }
 
     @Test
+    public void shouldParseTimestampDefaultAsMicros() {
+        // CockroachDB writes the literal with a space separator; it maps to MicroTimestamp (long).
+        Column col = column("TIMESTAMP");
+        Optional<Object> parsed = converter.parseDefaultValue(col, "'2026-01-01 12:00:00':::TIMESTAMP");
+        assertThat(parsed).isPresent().get().isInstanceOf(Long.class);
+    }
+
+    @Test
+    public void shouldParseTimestamptzDefaultAsOffsetQualifiedString() {
+        // The default must match the ZonedTimestamp (string) schema, with the hour-only offset widened.
+        Column col = column("TIMESTAMPTZ");
+        Optional<Object> parsed = converter.parseDefaultValue(col, "'2026-01-01 10:00:00+00':::TIMESTAMPTZ");
+        assertThat(parsed).isPresent().get().isInstanceOf(String.class).isEqualTo("2026-01-01T10:00:00Z");
+    }
+
+    @Test
+    public void shouldParseTimeDefaultAsMicrosSinceMidnight() {
+        // TIME maps to MicroTime (long), not a string. 12:34:56 = 45296s.
+        Column col = column("TIME");
+        Optional<Object> parsed = converter.parseDefaultValue(col, "'12:34:56':::TIME");
+        assertThat(parsed).isPresent().get().isInstanceOf(Long.class).isEqualTo(45_296_000_000L);
+    }
+
+    @Test
+    public void shouldParseTimetzDefaultAsOffsetQualifiedString() {
+        // TIMETZ maps to ZonedTime (string); the hour-only "+02" offset is widened to "+02:00".
+        Column col = column("TIMETZ");
+        Optional<Object> parsed = converter.parseDefaultValue(col, "'12:34:56+02':::TIMETZ");
+        assertThat(parsed).isPresent().get().isInstanceOf(String.class).isEqualTo("12:34:56+02:00");
+    }
+
+    @Test
     public void shouldReturnEmptyForUnknownType() {
         Column col = column("WIDGET");
         assertThat(converter.parseDefaultValue(col, "'foo'")).isEmpty();

@@ -26,7 +26,7 @@
         <!-- Debezium parent -->
         <version.debezium>${project.version}</version.debezium>
 
-        <cockroachdb.version>v25.4.10</cockroachdb.version>
+        <cockroachdb.version>v25.4.11</cockroachdb.version>
         <version.jmh>1.37</version.jmh>
     </properties>
 

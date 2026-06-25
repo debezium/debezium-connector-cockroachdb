@@ -251,7 +251,10 @@ The connector maps CockroachDB column types to Kafka Connect schema types:
 | `VARCHAR`, `TEXT`, `STRING`           | `STRING`                          |                                         |
 | `BYTEA`, `BYTES`                      | `BYTES`                           |                                         |
 | `DATE`                                | `io.debezium.time.Date`           | Days since epoch                        |
-| `TIMESTAMP`, `TIMESTAMPTZ`            | `io.debezium.time.MicroTimestamp` | Microseconds since epoch                |
+| `TIMESTAMP`                           | `io.debezium.time.MicroTimestamp` | Microseconds since epoch (UTC)          |
+| `TIMESTAMPTZ`                         | `io.debezium.time.ZonedTimestamp` | Offset-qualified ISO-8601 string        |
+| `TIME`                                | `io.debezium.time.MicroTime`      | Microseconds since midnight             |
+| `TIMETZ`                              | `io.debezium.time.ZonedTime`      | Offset-qualified ISO-8601 string        |
 | `JSON`, `JSONB`                       | `io.debezium.data.Json`           |                                         |
 | `UUID`                                | `io.debezium.data.Uuid`           |                                         |
 | `VECTOR`                              | `io.debezium.data.DoubleVector`   | pgvector-compatible (CockroachDB 24.2+) |
@@ -340,10 +343,10 @@ Run integration tests (requires Docker for Testcontainers):
 ./mvnw clean test -Dtest="*IT"
 ```
 
-Run against a specific CockroachDB version (default is v25.4.10):
+Run against a specific CockroachDB version (default is v25.4.11):
 
 ```bash
-./mvnw clean test -Dtest="*IT" -Dcockroachdb.version=v25.4.10
+./mvnw clean test -Dtest="*IT" -Dcockroachdb.version=v25.4.11
 ```
 
 Run CockroachDB Cloud connectivity tests (requires a Cloud instance):
@@ -358,7 +361,7 @@ The Cloud IT is guarded by `@EnabledIfEnvironmentVariable` and will be skipped i
 For docker-compose based testing with a specific version:
 
 ```bash
-COCKROACHDB_VERSION=v25.4.10 docker-compose -f src/test/scripts/docker-compose.yml up
+COCKROACHDB_VERSION=v25.4.11 docker-compose -f src/test/scripts/docker-compose.yml up
 ```
 
 ## Known Limitations

@@ -17,65 +17,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.debezium.relational.Column;
 
 /**
- * Unit tests for {@link CockroachDBChangeRecordEmitter#parseTimestampMicros(String)}.
- *
- * <p>Covers both forms CockroachDB emits: {@code TIMESTAMPTZ} (with a trailing {@code Z} or an
- * explicit offset) and {@code TIMESTAMP} without a time zone (no offset), which previously failed to
- * parse and produced a null value, including for primary-key columns.</p>
+ * Unit tests for {@link CockroachDBChangeRecordEmitter#extractColumnValues(JsonNode, List)}, the
+ * mapping from an enriched changefeed row to Java values aligned with the column schema types.
+ * Temporal value/normalization rules are covered by {@link CockroachDBTemporalConversionsTest}.
  *
  * @author Virag Tripathi
  */
 public class CockroachDBChangeRecordEmitterTest {
 
     @Test
-    public void shouldParseTimestampWithoutTimeZoneAsUtc() {
-        // TIMESTAMP (no zone): the format that regressed to null. Interpreted as UTC.
-        assertThat(CockroachDBChangeRecordEmitter.parseTimestampMicros("1970-01-01T00:00:01.000"))
-                .isEqualTo(1_000_000L);
-        assertThat(CockroachDBChangeRecordEmitter.parseTimestampMicros("1970-01-01T00:00:00.000001"))
-                .isEqualTo(1L);
-        // Microsecond precision is preserved (6 fractional digits).
-        assertThat(CockroachDBChangeRecordEmitter.parseTimestampMicros("1970-01-01T00:00:00.123456"))
-                .isEqualTo(123_456L);
-        // No fractional seconds.
-        assertThat(CockroachDBChangeRecordEmitter.parseTimestampMicros("1970-01-01T00:00:02"))
-                .isEqualTo(2_000_000L);
-    }
-
-    @Test
-    public void shouldParseRealWorldTimestampWithoutTimeZone() {
-        // The exact format from the field report (TIMESTAMP primary key) must not be null.
-        assertThat(CockroachDBChangeRecordEmitter.parseTimestampMicros("2026-06-08T11:01:45.883"))
-                .isNotNull();
-    }
-
-    @Test
-    public void shouldParseTimestampTzWithTrailingZ() {
-        assertThat(CockroachDBChangeRecordEmitter.parseTimestampMicros("1970-01-01T00:00:01Z"))
-                .isEqualTo(1_000_000L);
-        assertThat(CockroachDBChangeRecordEmitter.parseTimestampMicros("1970-01-01T00:00:00.916109Z"))
-                .isEqualTo(916_109L);
-    }
-
-    @Test
-    public void shouldParseTimestampTzWithExplicitOffset() {
-        // 00:00:01 at +00:00 is epoch+1s; at +01:00 it is one hour earlier in UTC.
-        assertThat(CockroachDBChangeRecordEmitter.parseTimestampMicros("1970-01-01T00:00:01+00:00"))
-                .isEqualTo(1_000_000L);
-        assertThat(CockroachDBChangeRecordEmitter.parseTimestampMicros("1970-01-01T01:00:01+01:00"))
-                .isEqualTo(1_000_000L);
-    }
-
-    @Test
-    public void shouldReturnNullForNullEmptyOrUnparseable() {
-        assertThat(CockroachDBChangeRecordEmitter.parseTimestampMicros(null)).isNull();
-        assertThat(CockroachDBChangeRecordEmitter.parseTimestampMicros("")).isNull();
-        assertThat(CockroachDBChangeRecordEmitter.parseTimestampMicros("not-a-timestamp")).isNull();
-    }
-
-    @Test
     public void shouldExtractTemporalColumnValuesWithCorrectJavaTypes() throws Exception {
-        // Real CockroachDB enriched changefeed output for each temporal type (captured from v25.4.10).
+        // Real CockroachDB enriched changefeed output for each temporal type (captured from v25.4.11).
         String json = "{\"d\":\"2026-06-08\",\"id\":1,\"tm\":\"11:01:45.883\",\"tmtz\":\"11:01:45.883+02\","
                 + "\"ts\":\"2026-06-08T11:01:45.883\",\"tstz\":\"2026-06-08T09:01:45.883Z\"}";
         JsonNode node = new ObjectMapper().readTree(json);
@@ -90,25 +42,28 @@ public class CockroachDBChangeRecordEmitterTest {
 
         // TIMESTAMP (without tz) -> MicroTimestamp (Long micros); must not be null (the original bug).
         assertThat(values[0]).isInstanceOf(Long.class);
-        // TIMESTAMPTZ -> ZonedTimestamp (String, passed through).
+        // TIMESTAMPTZ -> ZonedTimestamp (String); a Z value already satisfies ISO_OFFSET_DATE_TIME.
         assertThat(values[1]).isEqualTo("2026-06-08T09:01:45.883Z");
         // TIME -> MicroTime (Long micros since midnight).
         assertThat(values[2]).isEqualTo(39_705_883_000L);
-        // TIMETZ -> ZonedTime (String, short "+02" offset carried through).
-        assertThat(values[3]).isEqualTo("11:01:45.883+02");
+        // TIMETZ -> ZonedTime (String); the CockroachDB hour-only "+02" offset is normalized to
+        // "+02:00" so it parses with the ZonedTime (ISO_OFFSET_TIME) formatter downstream.
+        assertThat(values[3]).isEqualTo("11:01:45.883+02:00");
         // DATE -> Date (Integer days since epoch).
         assertThat(values[4]).isInstanceOf(Integer.class);
     }
 
     @Test
-    public void shouldParseTimeToMicrosSinceMidnight() {
-        // CockroachDB emits TIME as "HH:mm:ss[.ffffff]"; MicroTime is micros since midnight.
-        assertThat(CockroachDBChangeRecordEmitter.parseTimeMicros("00:00:01")).isEqualTo(1_000_000L);
-        assertThat(CockroachDBChangeRecordEmitter.parseTimeMicros("00:00:00.000001")).isEqualTo(1L);
-        // 11:01:45.883 = (11*3600 + 1*60 + 45)s + 0.883s = 39705.883s.
-        assertThat(CockroachDBChangeRecordEmitter.parseTimeMicros("11:01:45.883")).isEqualTo(39_705_883_000L);
-        assertThat(CockroachDBChangeRecordEmitter.parseTimeMicros(null)).isNull();
-        assertThat(CockroachDBChangeRecordEmitter.parseTimeMicros("")).isNull();
-        assertThat(CockroachDBChangeRecordEmitter.parseTimeMicros("nope")).isNull();
+    public void shouldReturnNullForNullJsonColumnValues() throws Exception {
+        String json = "{\"id\":1,\"tstz\":null,\"tmtz\":null}";
+        JsonNode node = new ObjectMapper().readTree(json);
+        List<Column> columns = List.of(
+                Column.editor().name("tstz").type("TIMESTAMPTZ").create(),
+                Column.editor().name("tmtz").type("TIMETZ").create());
+
+        Object[] values = CockroachDBChangeRecordEmitter.extractColumnValues(node, columns);
+
+        assertThat(values[0]).isNull();
+        assertThat(values[1]).isNull();
     }
 }

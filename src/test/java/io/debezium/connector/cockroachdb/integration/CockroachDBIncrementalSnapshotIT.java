@@ -59,7 +59,7 @@ public class CockroachDBIncrementalSnapshotIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBIncrementalSnapshotIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.10");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.11");
     private static final String DATABASE_NAME = "inc_snap_testdb";
     private static final String TABLE_NAME = "snap_products";
     private static final String SIGNAL_TABLE = "debezium_signal";

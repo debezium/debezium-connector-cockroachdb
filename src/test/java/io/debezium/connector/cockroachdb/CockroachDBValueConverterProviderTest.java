@@ -209,16 +209,19 @@ public class CockroachDBValueConverterProviderTest {
     }
 
     @Test
-    void zonedTimestampAndZonedTimeConvertersPassThroughStrings() {
+    void zonedTimestampAndZonedTimeConvertersNormalizeOffsets() {
         Column tstz = column("TIMESTAMPTZ");
         ValueConverter tstzConv = provider.converter(tstz, new Field("tstz", 0, provider.schemaBuilder(tstz).build()));
+        // A Z value already satisfies ISO_OFFSET_DATE_TIME and is kept.
         assertThat(tstzConv.convert("2026-06-08T09:01:45.883Z")).isEqualTo("2026-06-08T09:01:45.883Z");
+        // A zoneless value (old row replayed under a TZ schema) is interpreted as UTC.
+        assertThat(tstzConv.convert("2026-06-08T09:01:45.883")).isEqualTo("2026-06-08T09:01:45.883Z");
         assertThat(tstzConv.convert(null)).isNull();
 
         Column tmtz = column("TIMETZ");
         ValueConverter tmtzConv = provider.converter(tmtz, new Field("tmtz", 0, provider.schemaBuilder(tmtz).build()));
-        // CockroachDB emits a short "+02" offset; ZonedTime carries it through as a string.
-        assertThat(tmtzConv.convert("11:01:45.883+02")).isEqualTo("11:01:45.883+02");
+        // CockroachDB emits a short "+02" offset; ZonedTime requires "+02:00" downstream.
+        assertThat(tmtzConv.convert("11:01:45.883+02")).isEqualTo("11:01:45.883+02:00");
         assertThat(tmtzConv.convert(null)).isNull();
     }
 

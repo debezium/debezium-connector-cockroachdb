@@ -5,13 +5,7 @@
  */
 package io.debezium.connector.cockroachdb;
 
-import java.time.Instant;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.LocalTime;
-import java.time.ZoneOffset;
-import java.time.ZonedDateTime;
-import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Locale;
 
@@ -252,66 +246,31 @@ public class CockroachDBValueConverterProvider implements ValueConverterProvider
             case "TIMESTAMP":
             case "TIMESTAMP WITHOUT TIME ZONE":
                 return value -> {
-                    if (value == null) {
-                        return null;
-                    }
-                    if (value instanceof Long) {
+                    if (value == null || value instanceof Long) {
                         return value;
                     }
-                    String ts = value.toString().trim();
-                    try {
-                        Instant instant = Instant.parse(ts);
-                        return instant.getEpochSecond() * 1_000_000L + instant.getNano() / 1_000L;
-                    }
-                    catch (DateTimeParseException e) {
-                        try {
-                            ZonedDateTime zdt = ZonedDateTime.parse(ts, DateTimeFormatter.ISO_DATE_TIME);
-                            Instant inst = zdt.toInstant();
-                            return inst.getEpochSecond() * 1_000_000L + inst.getNano() / 1_000L;
-                        }
-                        catch (DateTimeParseException e2) {
-                            try {
-                                // TIMESTAMP without time zone (no offset): interpret as UTC.
-                                Instant inst = LocalDateTime.parse(ts, DateTimeFormatter.ISO_LOCAL_DATE_TIME)
-                                        .toInstant(ZoneOffset.UTC);
-                                return inst.getEpochSecond() * 1_000_000L + inst.getNano() / 1_000L;
-                            }
-                            catch (DateTimeParseException e3) {
-                                return null;
-                            }
-                        }
-                    }
+                    return CockroachDBTemporalConversions.parseTimestampMicros(value.toString());
                 };
 
-            // TIMESTAMPTZ -> ZonedTimestamp (ISO-8601 string). CockroachDB already emits a zoned
-            // value (normalized to UTC), so pass it through.
+            // TIMESTAMPTZ -> ZonedTimestamp (offset-qualified ISO-8601 string).
             case "TIMESTAMPTZ":
             case "TIMESTAMP WITH TIME ZONE":
-                return value -> value == null ? null : value.toString();
+                return value -> value == null ? null : CockroachDBTemporalConversions.normalizeZonedTimestamp(value.toString());
 
             // TIME without time zone -> MicroTime (micros since midnight).
             case "TIME":
             case "TIME WITHOUT TIME ZONE":
                 return value -> {
-                    if (value == null) {
-                        return null;
-                    }
-                    if (value instanceof Long) {
+                    if (value == null || value instanceof Long) {
                         return value;
                     }
-                    try {
-                        return LocalTime.parse(value.toString().trim(), DateTimeFormatter.ISO_LOCAL_TIME)
-                                .toNanoOfDay() / 1_000L;
-                    }
-                    catch (DateTimeParseException e) {
-                        return null;
-                    }
+                    return CockroachDBTemporalConversions.parseTimeMicros(value.toString());
                 };
 
-            // TIMETZ -> ZonedTime (string). Pass the CockroachDB value through.
+            // TIMETZ -> ZonedTime (offset-qualified ISO-8601 string).
             case "TIMETZ":
             case "TIME WITH TIME ZONE":
-                return value -> value == null ? null : value.toString();
+                return value -> value == null ? null : CockroachDBTemporalConversions.normalizeZonedTime(value.toString());
 
             case "DATE":
                 return value -> {
