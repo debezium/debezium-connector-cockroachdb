@@ -6,10 +6,12 @@
 package io.debezium.connector.cockroachdb.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNoException;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -51,7 +53,7 @@ public class CockroachDBTemporalTypesIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBTemporalTypesIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.10");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.11");
     private static final String DATABASE_NAME = "temporal_testdb";
     private static final String TABLE_NAME = "temporal_types";
 
@@ -207,6 +209,18 @@ public class CockroachDBTemporalTypesIT {
         assertThat(after.get("tm")).isInstanceOf(Long.class);
         assertThat(after.get("tmtz")).isInstanceOf(String.class);
         assertThat(after.get("d")).isInstanceOf(Integer.class);
+
+        // The zoned strings must satisfy the logical-type formatters a downstream sink uses. This is
+        // the contract that the raw CockroachDB values violate: TIMESTAMPTZ arrives offset-qualified
+        // but TIMETZ arrives with an hour-only "+02" offset that ISO_OFFSET_TIME rejects.
+        String tstz = (String) after.get("tstz");
+        String tmtz = (String) after.get("tmtz");
+        assertThatNoException()
+                .as("tstz '%s' must parse as ZonedTimestamp (ISO_OFFSET_DATE_TIME)", tstz)
+                .isThrownBy(() -> DateTimeFormatter.ISO_OFFSET_DATE_TIME.parse(tstz));
+        assertThatNoException()
+                .as("tmtz '%s' must parse as ZonedTime (ISO_OFFSET_TIME)", tmtz)
+                .isThrownBy(() -> DateTimeFormatter.ISO_OFFSET_TIME.parse(tmtz));
     }
 
     private void waitForRunningChangefeed(int maxSeconds) throws Exception {

@@ -7,10 +7,6 @@ package io.debezium.connector.cockroachdb;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -106,10 +102,6 @@ public class CockroachDBDefaultValueConverter implements DefaultValueConverter {
         register("JSON", passthroughString);
         register("JSONB", passthroughString);
         register("INTERVAL", passthroughString);
-        register("TIME", passthroughString);
-        register("TIMETZ", passthroughString);
-        register("TIME WITHOUT TIME ZONE", passthroughString);
-        register("TIME WITH TIME ZONE", passthroughString);
         register("GEOGRAPHY", passthroughString);
         register("GEOMETRY", passthroughString);
         register("ENUM", passthroughString);
@@ -119,20 +111,26 @@ public class CockroachDBDefaultValueConverter implements DefaultValueConverter {
 
         register("DATE", (c, v) -> (int) LocalDate.parse(v).toEpochDay());
 
-        Mapper timestampMapper = (c, v) -> {
-            try {
-                OffsetDateTime odt = OffsetDateTime.parse(v, DateTimeFormatter.ISO_OFFSET_DATE_TIME);
-                return odt.toInstant().getEpochSecond() * 1_000_000L + odt.toInstant().getNano() / 1_000L;
-            }
-            catch (DateTimeParseException ignored) {
-                java.time.Instant instant = java.time.LocalDateTime.parse(v).toInstant(ZoneOffset.UTC);
-                return instant.getEpochSecond() * 1_000_000L + instant.getNano() / 1_000L;
-            }
-        };
-        register("TIMESTAMP", timestampMapper);
-        register("TIMESTAMPTZ", timestampMapper);
-        register("TIMESTAMP WITHOUT TIME ZONE", timestampMapper);
-        register("TIMESTAMP WITH TIME ZONE", timestampMapper);
+        // CockroachDB writes temporal defaults as SQL literals with a space separator (for example
+        // '2026-01-01 12:00:00') and an hour-only offset (for example '+00'). Reuse the shared
+        // conversions so the default value matches the schema type each temporal column maps to:
+        // TIMESTAMP -> MicroTimestamp (long), TIMESTAMPTZ -> ZonedTimestamp (string),
+        // TIME -> MicroTime (long), TIMETZ -> ZonedTime (string).
+        Mapper microTimestampMapper = (c, v) -> CockroachDBTemporalConversions.parseTimestampMicros(v.replace(' ', 'T'));
+        register("TIMESTAMP", microTimestampMapper);
+        register("TIMESTAMP WITHOUT TIME ZONE", microTimestampMapper);
+
+        Mapper zonedTimestampMapper = (c, v) -> CockroachDBTemporalConversions.normalizeZonedTimestamp(v.replace(' ', 'T'));
+        register("TIMESTAMPTZ", zonedTimestampMapper);
+        register("TIMESTAMP WITH TIME ZONE", zonedTimestampMapper);
+
+        Mapper microTimeMapper = (c, v) -> CockroachDBTemporalConversions.parseTimeMicros(v);
+        register("TIME", microTimeMapper);
+        register("TIME WITHOUT TIME ZONE", microTimeMapper);
+
+        Mapper zonedTimeMapper = (c, v) -> CockroachDBTemporalConversions.normalizeZonedTime(v);
+        register("TIMETZ", zonedTimeMapper);
+        register("TIME WITH TIME ZONE", zonedTimeMapper);
 
         register("BYTEA", (c, v) -> v.getBytes());
         register("BYTES", (c, v) -> v.getBytes());

@@ -40,7 +40,7 @@ public class CockroachDBConnectorIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBConnectorIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.10");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.11");
     private static final String DATABASE_NAME = "testdb";
     private static final String TABLE_NAME = "users";
     private static final String TOPIC_PREFIX = "test-cockroachdb";

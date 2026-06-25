@@ -53,7 +53,7 @@ public class CockroachDBMultiTableIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBMultiTableIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.10");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.11");
     private static final String DATABASE_NAME = "multi_table_testdb";
     private static final String ORDERS_TABLE = "mt_orders";
     private static final String CUSTOMERS_TABLE = "mt_customers";
