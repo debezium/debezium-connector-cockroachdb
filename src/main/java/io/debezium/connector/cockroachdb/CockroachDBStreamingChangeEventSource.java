@@ -15,6 +15,7 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -25,9 +26,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -399,7 +402,26 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 topicNames);
 
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
-            consumer.subscribe(topicNames);
+            // On (re)assignment, resume each partition from the position persisted in the Debezium
+            // offset. Without this the consumer never commits and resets to earliest on every restart,
+            // re-reading and re-emitting the entire retained changefeed topic (dbz#2154). Partitions
+            // with no stored position fall back to auto.offset.reset, preserving first-start behavior.
+            consumer.subscribe(topicNames, new ConsumerRebalanceListener() {
+                @Override
+                public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
+                }
+
+                @Override
+                public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
+                    for (TopicPartition tp : partitions) {
+                        Long stored = offsetContext.getConsumerOffset(kafkaConsumerOffsetKey(tp.topic(), tp.partition()));
+                        if (stored != null) {
+                            consumer.seek(tp, stored + 1);
+                            LOGGER.info("Resuming {} from stored offset {}", tp, stored + 1);
+                        }
+                    }
+                }
+            });
             LOGGER.info("Consuming from {} Kafka topic(s): {}", topicNames.size(), topicNames);
 
             Duration pollInterval = Duration.ofMillis(config.getChangefeedPollIntervalMs());
@@ -426,6 +448,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     if (!context.isRunning()) {
                         break;
                     }
+                    // Record the consumed position so it is persisted in the Debezium offset (flushed
+                    // by Connect after the dispatched events are produced) and a restart can resume here.
+                    offsetContext.setConsumerOffset(kafkaConsumerOffsetKey(record.topic(), record.partition()), record.offset());
                     String valueJson = record.value();
                     if (valueJson != null && !valueJson.trim().isEmpty()) {
                         TableId table = resolveTableFromTopic(record.topic());
@@ -454,6 +479,15 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             LOGGER.error("Error consuming from Kafka topics {}: {}", topicNames, e.getMessage(), e);
             throw new RuntimeException("Failed to consume from Kafka topics " + topicNames, e);
         }
+    }
+
+    /**
+     * Builds the sink-agnostic consumer-offset key for a Kafka topic partition, used to persist and
+     * resume the intermediate consumer position in the Debezium offset (see
+     * {@link CockroachDBOffsetContext#CONSUMER_OFFSET_PREFIX}).
+     */
+    static String kafkaConsumerOffsetKey(String topic, int partition) {
+        return topic + ":" + partition;
     }
 
     /**

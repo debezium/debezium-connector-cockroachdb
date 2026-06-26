@@ -8,6 +8,7 @@ package io.debezium.connector.cockroachdb;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
@@ -40,30 +41,39 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
     public static final String CURSOR_INITIAL = "initial";
     public static final String CURSOR_NOW = "now";
 
+    /**
+     * Prefix for the intermediate consumer position persisted in the Debezium source offset. This is
+     * sink-agnostic: any delivery mode that consumes change events from an intermediate buffer (the
+     * kafka mode today, pubsub or cloudstorage in future) stores its resume position here under an
+     * opaque, sink-defined key. Persisting it in the source offset means Kafka Connect flushes it
+     * atomically with the cursor, only after the corresponding records are produced, so a restart can
+     * resume from the durable position instead of replaying the whole buffer. The sinkless mode does
+     * not use this; it resumes via the changefeed cursor and has no intermediate consumer.
+     */
+    public static final String CONSUMER_OFFSET_PREFIX = "consumer.offset.";
+
     private final SourceInfo sourceInfo;
 
     private String cursor;
     private Instant timestamp;
     private TransactionContext transactionContext;
     private final IncrementalSnapshotContext<TableId> incrementalSnapshotContext;
-    private Long kafkaOffset;
+    private final Map<String, Long> consumerOffsets = new ConcurrentHashMap<>();
 
     public CockroachDBOffsetContext(CockroachDBConnectorConfig connectorConfig) {
         super(new SourceInfo(connectorConfig), false);
         this.sourceInfo = new SourceInfo(connectorConfig);
         this.cursor = connectorConfig.getChangefeedCursor();
         this.timestamp = Instant.now();
-        this.kafkaOffset = null;
         this.incrementalSnapshotContext = new SignalBasedIncrementalSnapshotContext<>(false);
     }
 
-    public CockroachDBOffsetContext(CockroachDBConnectorConfig config, String cursor, Instant timestamp, Long kafkaOffset,
+    public CockroachDBOffsetContext(CockroachDBConnectorConfig config, String cursor, Instant timestamp,
                                     IncrementalSnapshotContext<TableId> incrementalSnapshotContext) {
         super(new SourceInfo(config), false);
         this.sourceInfo = new SourceInfo(config);
         this.cursor = cursor;
         this.timestamp = timestamp;
-        this.kafkaOffset = kafkaOffset;
         this.incrementalSnapshotContext = incrementalSnapshotContext != null
                 ? incrementalSnapshotContext
                 : new SignalBasedIncrementalSnapshotContext<>(false);
@@ -91,7 +101,13 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
         Instant ts = timestamp != null ? timestamp : Instant.EPOCH;
         offset.put(TIMESTAMP, ts.toEpochMilli());
         offset.put(SNAPSHOT_COMPLETED_KEY, Boolean.toString(snapshotCompleted));
-        LOGGER.trace("Returning offset: cursor='{}', timestamp={}, snapshotCompleted={}", cursor, ts, snapshotCompleted);
+        // Persist the intermediate consumer position so a restart resumes instead of replaying the
+        // whole intermediate buffer from the beginning.
+        for (Map.Entry<String, Long> entry : consumerOffsets.entrySet()) {
+            offset.put(CONSUMER_OFFSET_PREFIX + entry.getKey(), entry.getValue());
+        }
+        LOGGER.trace("Returning offset: cursor='{}', timestamp={}, snapshotCompleted={}, consumerOffsets={}",
+                cursor, ts, snapshotCompleted, consumerOffsets);
         return offset;
     }
 
@@ -162,15 +178,29 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
             }
 
             CockroachDBOffsetContext context = new CockroachDBOffsetContext(
-                    connectorConfig, cursor, ts, null,
+                    connectorConfig, cursor, ts,
                     SignalBasedIncrementalSnapshotContext.load(offset, false));
 
             if (snapshot != null) {
                 context.snapshotCompleted = Boolean.parseBoolean(snapshot);
             }
 
-            LOGGER.debug("Loaded offset from storage: cursor='{}', timestamp={}, snapshotCompleted={}",
-                    context.getCursor(), context.getTimestamp(), context.snapshotCompleted);
+            // Restore the intermediate consumer positions so the consume path can resume from them
+            // on restart rather than replaying the buffer from the beginning.
+            for (Map.Entry<String, ?> entry : offset.entrySet()) {
+                if (entry.getKey().startsWith(CONSUMER_OFFSET_PREFIX) && entry.getValue() != null) {
+                    String key = entry.getKey().substring(CONSUMER_OFFSET_PREFIX.length());
+                    try {
+                        context.consumerOffsets.put(key, Long.parseLong(entry.getValue().toString()));
+                    }
+                    catch (NumberFormatException e) {
+                        LOGGER.warn("Invalid stored consumer offset '{}' for '{}', ignoring", entry.getValue(), key);
+                    }
+                }
+            }
+
+            LOGGER.debug("Loaded offset from storage: cursor='{}', timestamp={}, snapshotCompleted={}, consumerOffsets={}",
+                    context.getCursor(), context.getTimestamp(), context.snapshotCompleted, context.consumerOffsets);
             return context;
         }
     }
@@ -185,11 +215,21 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
         return this.cursor;
     }
 
-    public Long getKafkaOffset() {
-        return kafkaOffset;
+    /**
+     * Returns the last persisted intermediate consumer position for the given sink-defined key, or
+     * {@code null} if none is stored (for example on first start). For the kafka mode the key is
+     * {@code <topic>:<partition>}.
+     */
+    public Long getConsumerOffset(String key) {
+        return consumerOffsets.get(key);
     }
 
-    public void setKafkaOffset(Long kafkaOffset) {
-        this.kafkaOffset = kafkaOffset;
+    /**
+     * Records the intermediate consumer position for the given sink-defined key. This is included in
+     * {@link #getOffset()} and is flushed by Kafka Connect after the corresponding records are
+     * produced, so it marks a durable resume point that survives a restart.
+     */
+    public void setConsumerOffset(String key, long offset) {
+        consumerOffsets.put(key, offset);
     }
 }

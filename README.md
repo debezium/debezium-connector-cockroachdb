@@ -225,6 +225,8 @@ Currently only the Kafka sink consumes these TLS parameters; other sink types pa
 | `cockroachdb.changefeed.kafka.auto.offset.reset`     | earliest    | Kafka consumer auto offset reset policy                                                                                                                                        |
 | `cockroachdb.changefeed.kafka.consumer.override.*`   | -           | Passed verbatim to the changefeed consumer (Kafka client properties), e.g. `...override.security.protocol=SSL`. Use for SASL, custom trust/key stores, or to override auto-derived SSL. When `sink.tls.*` is set, the consumer's SSL is auto-derived from those PEM files, so this is only needed for extra or different settings. |
 
+The connector persists the position it has reached in each intermediate changefeed topic partition in its Debezium offset. On restart it resumes from that position rather than re-reading the topic from the beginning, so a restart does not re-emit the whole retained backlog. `auto.offset.reset` applies only on first start, when there is no stored position yet.
+
 #### Connection Settings
 
 | Option                                  | Default | Description                                 |

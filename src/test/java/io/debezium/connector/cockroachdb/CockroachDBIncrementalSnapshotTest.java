@@ -80,7 +80,7 @@ public class CockroachDBIncrementalSnapshotTest {
         IncrementalSnapshotContext<TableId> snapContext = new SignalBasedIncrementalSnapshotContext<>(false);
 
         CockroachDBOffsetContext context = new CockroachDBOffsetContext(
-                config, "cursor", java.time.Instant.now(), null, snapContext);
+                config, "cursor", java.time.Instant.now(), snapContext);
         assertThat(context.getIncrementalSnapshotContext()).isSameAs(snapContext);
     }
 

@@ -73,11 +73,28 @@ public class CockroachDBOffsetContextTest {
     }
 
     @Test
-    public void shouldHandleKafkaOffsetOperations() {
-        Long testOffset = 12345L;
-        offsetContext.setKafkaOffset(testOffset);
+    public void shouldHandleConsumerOffsetOperations() {
+        String key = "offsetcommit-test.db.public.orders:0";
+        offsetContext.setConsumerOffset(key, 12345L);
 
-        assertThat(offsetContext.getKafkaOffset()).isEqualTo(testOffset);
+        assertThat(offsetContext.getConsumerOffset(key)).isEqualTo(12345L);
+        // The consumer offset is persisted in the source offset so a restart can resume from it.
+        assertThat(offsetContext.getOffset().get(CockroachDBOffsetContext.CONSUMER_OFFSET_PREFIX + key))
+                .isEqualTo(12345L);
+        // Unknown keys return null (first start for that partition).
+        assertThat(offsetContext.getConsumerOffset("unknown:9")).isNull();
+    }
+
+    @Test
+    public void shouldRoundTripConsumerOffsetThroughLoader() {
+        offsetContext.setConsumerOffset("topic-a:0", 100L);
+        offsetContext.setConsumerOffset("topic-a:1", 200L);
+
+        Map<String, ?> persisted = offsetContext.getOffset();
+        CockroachDBOffsetContext restored = new CockroachDBOffsetContext.Loader(config).load(persisted);
+
+        assertThat(restored.getConsumerOffset("topic-a:0")).isEqualTo(100L);
+        assertThat(restored.getConsumerOffset("topic-a:1")).isEqualTo(200L);
     }
 
     @Test
@@ -102,14 +119,12 @@ public class CockroachDBOffsetContextTest {
     public void shouldHandleConstructorWithCursorAndTimestamp() {
         String testCursor = "test-cursor";
         Instant testTimestamp = Instant.now();
-        Long testKafkaOffset = 67890L;
 
-        CockroachDBOffsetContext context = new CockroachDBOffsetContext(config, testCursor, testTimestamp, testKafkaOffset,
+        CockroachDBOffsetContext context = new CockroachDBOffsetContext(config, testCursor, testTimestamp,
                 new io.debezium.pipeline.source.snapshot.incremental.SignalBasedIncrementalSnapshotContext<>(false));
         assertThat(context).isNotNull();
         assertThat(context.getCursor()).isEqualTo(testCursor);
         assertThat(context.getTimestamp()).isEqualTo(testTimestamp);
-        assertThat(context.getKafkaOffset()).isEqualTo(testKafkaOffset);
     }
 
     @Test
