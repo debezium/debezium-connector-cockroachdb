@@ -48,7 +48,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field SERVER_NAME = Field.create("database.server.name")
             .withDisplayName("Server name")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION, 0))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION))
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.HIGH)
             .withDescription("Unique name that identifies the database server and all recorded offsets, and is used as a prefix for all Kafka topic names.");
@@ -56,7 +56,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field ON_CONNECT_STATEMENTS = Field.create(DATABASE_CONFIG_PREFIX + JdbcConfiguration.ON_CONNECT_STATEMENTS)
             .withDisplayName("Initial statements")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 1))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED))
             .withWidth(Width.LONG)
             .withImportance(Importance.LOW)
             .withDescription("A semicolon separated list of SQL statements to be executed when a JDBC connection to the database is established. "
@@ -66,7 +66,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public static final Field SSL_MODE = Field.create(DATABASE_CONFIG_PREFIX + "sslmode")
             .withDisplayName("SSL mode")
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL, 0))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL))
             .withEnum(SecureConnectionMode.class, SecureConnectionMode.PREFER)
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
@@ -82,7 +82,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field SSL_CLIENT_CERT = Field.create(DATABASE_CONFIG_PREFIX + "sslcert")
             .withDisplayName("SSL Client Certificate")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL, 1))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withDescription("File containing the SSL Certificate for the client. See the Postgres SSL docs for further information");
@@ -90,7 +90,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field SSL_CLIENT_KEY = Field.create(DATABASE_CONFIG_PREFIX + "sslkey")
             .withDisplayName("SSL Client Key")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL, 4))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withDescription("File containing the SSL private key for the client. See the Postgres SSL docs for further information");
@@ -98,7 +98,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field SSL_CLIENT_KEY_PASSWORD = Field.create(DATABASE_CONFIG_PREFIX + "sslpassword")
             .withDisplayName("SSL Client Key Password")
             .withType(Type.PASSWORD)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL, 2))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL))
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
             .withDescription("Password to access the client private key from the file specified by 'database.sslkey'. See the Postgres SSL docs for further information");
@@ -106,7 +106,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field SSL_ROOT_CERT = Field.create(DATABASE_CONFIG_PREFIX + "sslrootcert")
             .withDisplayName("SSL Root Certificate")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL, 3))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED_SSL))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withDescription("File containing the root certificate(s) against which the server is validated. See the Postgres JDBC SSL docs for further information");
@@ -114,7 +114,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field TCP_KEEPALIVE = Field.create(DATABASE_CONFIG_PREFIX + "tcpKeepAlive")
             .withDisplayName("TCP keep-alive probe")
             .withType(Type.BOOLEAN)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 0))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED))
             .withDefault(true)
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
@@ -124,12 +124,13 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field STATUS_UPDATE_INTERVAL_MS = Field.create("status.update.interval.ms")
             .withDisplayName("Status update interval (ms)")
             .withType(ConfigDef.Type.INT)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED))
             .withDefault(10_000)
             .withDescription("How often to send status updates to the server in milliseconds.");
 
     public static final Field SNAPSHOT_MODE = Field.create("snapshot.mode")
             .withDisplayName("Snapshot mode")
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_SNAPSHOT, 0))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_SNAPSHOT))
             .withEnum(SnapshotMode.class, SnapshotMode.INITIAL)
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
@@ -147,7 +148,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field SNAPSHOT_ISOLATION_MODE = Field.create("snapshot.isolation.mode")
             .withDisplayName("Snapshot isolation mode")
             .withEnum(SnapshotIsolationMode.class, SnapshotIsolationMode.SERIALIZABLE)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_SNAPSHOT, 1))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_SNAPSHOT))
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
             .withDescription("Controls which transaction isolation level is used. "
@@ -161,7 +162,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withEnum(SnapshotLockingMode.class, SnapshotLockingMode.NONE)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_SNAPSHOT, 13))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_SNAPSHOT))
             .withDescription("Controls how the connector holds locks on tables while performing the schema snapshot. The 'shared' "
                     + "which means the connector will hold a table lock that prevents exclusive table access for just the initial portion of the snapshot "
                     + "while the database schemas and other metadata are being read. The remaining work in a snapshot involves selecting all rows from "
@@ -178,7 +179,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field READ_ONLY_CONNECTION = Field.create("read.only")
             .withDisplayName("Read only connection")
             .withType(ConfigDef.Type.BOOLEAN)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION, 100))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION))
             .withDefault(false)
             .withWidth(ConfigDef.Width.SHORT)
             .withImportance(ConfigDef.Importance.LOW)
@@ -194,7 +195,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_RESOLVED_INTERVAL = Field.create("cockroachdb.changefeed.resolved.interval")
             .withDisplayName("Changefeed resolved interval")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 1))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault("10s")
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
@@ -203,7 +204,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_INCLUDE_UPDATED = Field.create("cockroachdb.changefeed.include.updated")
             .withDisplayName("Include updated column information")
             .withType(Type.BOOLEAN)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 2))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault(false)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
@@ -212,7 +213,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_INCLUDE_DIFF = Field.create("cockroachdb.changefeed.include.diff")
             .withDisplayName("Include diff information")
             .withType(Type.BOOLEAN)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 3))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault(false)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
@@ -221,7 +222,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_ENRICHED_PROPERTIES = Field.create("cockroachdb.changefeed.enriched.properties")
             .withDisplayName("Changefeed enriched properties")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 4))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault("source")
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
@@ -238,7 +239,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_CURSOR = Field.create("cockroachdb.changefeed.cursor")
             .withDisplayName("Changefeed cursor")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 5))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault("now")
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.HIGH)
@@ -247,7 +248,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_BATCH_SIZE = Field.create("cockroachdb.changefeed.batch.size")
             .withDisplayName("Changefeed batch size")
             .withType(Type.INT)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 5))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault(1000)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
@@ -257,7 +258,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_POLL_INTERVAL = Field.create("cockroachdb.changefeed.poll.interval.ms")
             .withDisplayName("Changefeed poll interval (ms)")
             .withType(Type.LONG)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 6))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault(100L)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
@@ -267,7 +268,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_SINK_TYPE = Field.create("cockroachdb.changefeed.sink.type")
             .withDisplayName("Changefeed sink type")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 7))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault("kafka")
             .withWidth(Width.SHORT)
             .withImportance(Importance.HIGH)
@@ -277,7 +278,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_SINK_URI = Field.create("cockroachdb.changefeed.sink.uri")
             .withDisplayName("Changefeed sink URI")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 8))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
             .withValidation(CockroachDBConnectorConfig::validateChangefeedSinkUri)
@@ -292,7 +293,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_SINK_TOPIC_PREFIX = Field.create("cockroachdb.changefeed.sink.topic.prefix")
             .withDisplayName("Changefeed sink topic prefix")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 9))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault("")
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
@@ -305,7 +306,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_MAX_TABLES_PER_CHANGEFEED = Field.create("cockroachdb.changefeed.max.tables.per.changefeed")
             .withDisplayName("Maximum tables per changefeed")
             .withType(Type.INT)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 18))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault(0)
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
@@ -321,7 +322,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS = Field.create("cockroachdb.changefeed.kafka.bootstrap.servers")
             .withDisplayName("Kafka consumer bootstrap servers")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 14))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withDescription("Bootstrap servers for the Kafka consumer that reads changefeed events. "
@@ -332,7 +333,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_KAFKA_CONSUMER_GROUP_PREFIX = Field.create("cockroachdb.changefeed.kafka.consumer.group.prefix")
             .withDisplayName("Kafka consumer group ID")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 11))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault("cockroachdb-connector")
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.LOW)
@@ -343,7 +344,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_KAFKA_POLL_TIMEOUT_MS = Field.create("cockroachdb.changefeed.kafka.poll.timeout.ms")
             .withDisplayName("Kafka consumer poll timeout (ms)")
             .withType(Type.LONG)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 12))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault(100L)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
@@ -352,7 +353,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_KAFKA_AUTO_OFFSET_RESET = Field.create("cockroachdb.changefeed.kafka.auto.offset.reset")
             .withDisplayName("Kafka consumer auto offset reset")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 13))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault("earliest")
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
@@ -362,7 +363,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_SINK_OPTIONS = Field.create("cockroachdb.changefeed.sink.options")
             .withDisplayName("Changefeed sink options")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 10))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withWidth(Width.LONG)
             .withImportance(Importance.LOW)
             .withDescription("Additional options for the sink in key=value format, comma-separated. "
@@ -371,7 +372,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_SINK_TLS_CA_CERT_FILE = Field.create("cockroachdb.changefeed.sink.tls.ca.cert.file")
             .withDisplayName("Changefeed sink CA certificate file")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 15))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withValidation(CockroachDBConnectorConfig::validateOptionalReadableFile)
@@ -384,7 +385,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_SINK_TLS_CLIENT_CERT_FILE = Field.create("cockroachdb.changefeed.sink.tls.client.cert.file")
             .withDisplayName("Changefeed sink client certificate file")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 16))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withValidation(CockroachDBConnectorConfig::validateOptionalReadableFile)
@@ -397,7 +398,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CHANGEFEED_SINK_TLS_CLIENT_KEY_FILE = Field.create("cockroachdb.changefeed.sink.tls.client.key.file")
             .withDisplayName("Changefeed sink client key file")
             .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED, 17))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
             .withValidation(CockroachDBConnectorConfig::validateOptionalReadableFile)
@@ -412,7 +413,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CONNECTION_TIMEOUT_MS = Field.create("connection.timeout.ms")
             .withDisplayName("Connection timeout (ms)")
             .withType(Type.LONG)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 10))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED))
             .withDefault(30000L)
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
@@ -422,7 +423,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CONNECTION_RETRY_DELAY_MS = Field.create("connection.retry.delay.ms")
             .withDisplayName("Connection retry delay (ms)")
             .withType(Type.LONG)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 11))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED))
             .withDefault(1000L)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
@@ -432,7 +433,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CONNECTION_MAX_RETRIES = Field.create("connection.max.retries")
             .withDisplayName("Connection max retries")
             .withType(Type.INT)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 12))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED))
             .withDefault(3)
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
@@ -442,7 +443,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     public static final Field CONNECTION_VALIDATION_TIMEOUT_S = Field.create("connection.validation.timeout.seconds")
             .withDisplayName("Connection validation timeout (seconds)")
             .withType(Type.INT)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED, 13))
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED))
             .withDefault(5)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
@@ -450,33 +451,36 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     private static final ConfigDefinition CONFIG_DEFINITION = RelationalDatabaseConnectorConfig.CONFIG_DEFINITION.edit()
             .name("CockroachDB")
-            .type(
+            .group(Field.Group.CONNECTION,
+                    SERVER_NAME,
                     HOSTNAME,
                     PORT,
                     USER,
                     PASSWORD,
                     DATABASE_NAME,
-                    SERVER_NAME,
-                    ON_CONNECT_STATEMENTS,
-                    SSL_MODE,
-                    SSL_ROOT_CERT,
-                    SSL_CLIENT_CERT,
-                    SSL_CLIENT_KEY,
-                    SSL_CLIENT_KEY_PASSWORD,
+                    READ_ONLY_CONNECTION)
+            .group(Field.Group.CONNECTION_ADVANCED,
                     TCP_KEEPALIVE,
+                    ON_CONNECT_STATEMENTS,
                     STATUS_UPDATE_INTERVAL_MS,
                     CONNECTION_TIMEOUT_MS,
                     CONNECTION_RETRY_DELAY_MS,
                     CONNECTION_MAX_RETRIES,
                     CONNECTION_VALIDATION_TIMEOUT_S)
-            .events(
-                    SOURCE_INFO_STRUCT_MAKER)
-            .connector(
+            .group(Field.Group.CONNECTION_ADVANCED_SSL,
+                    SSL_MODE,
+                    SSL_CLIENT_CERT,
+                    SSL_CLIENT_KEY_PASSWORD,
+                    SSL_ROOT_CERT,
+                    SSL_CLIENT_KEY)
+            .group(Field.Group.CONNECTOR_SNAPSHOT,
                     SNAPSHOT_MODE,
                     SNAPSHOT_ISOLATION_MODE,
-                    SNAPSHOT_LOCKING_MODE,
+                    SNAPSHOT_LOCKING_MODE)
+            .group(Field.Group.CONNECTOR,
                     UNAVAILABLE_VALUE_PLACEHOLDER,
-                    READ_ONLY_CONNECTION,
+                    SOURCE_INFO_STRUCT_MAKER)
+            .group(Field.Group.CONNECTOR_ADVANCED,
                     CHANGEFEED_RESOLVED_INTERVAL,
                     CHANGEFEED_INCLUDE_UPDATED,
                     CHANGEFEED_INCLUDE_DIFF,
@@ -487,15 +491,15 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     CHANGEFEED_SINK_TYPE,
                     CHANGEFEED_SINK_URI,
                     CHANGEFEED_SINK_TOPIC_PREFIX,
-                    CHANGEFEED_MAX_TABLES_PER_CHANGEFEED,
-                    CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS,
+                    CHANGEFEED_SINK_OPTIONS,
                     CHANGEFEED_KAFKA_CONSUMER_GROUP_PREFIX,
                     CHANGEFEED_KAFKA_POLL_TIMEOUT_MS,
                     CHANGEFEED_KAFKA_AUTO_OFFSET_RESET,
-                    CHANGEFEED_SINK_OPTIONS,
+                    CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS,
                     CHANGEFEED_SINK_TLS_CA_CERT_FILE,
                     CHANGEFEED_SINK_TLS_CLIENT_CERT_FILE,
-                    CHANGEFEED_SINK_TLS_CLIENT_KEY_FILE)
+                    CHANGEFEED_SINK_TLS_CLIENT_KEY_FILE,
+                    CHANGEFEED_MAX_TABLES_PER_CHANGEFEED)
             .create();
 
     public static final Field.Set ALL_FIELDS = Field.setOf(CONFIG_DEFINITION.all());
