@@ -31,7 +31,7 @@ public class CockroachDBMultiTableTest {
 
     private CockroachDBStreamingChangeEventSource createSource(Configuration config) {
         CockroachDBConnectorConfig connectorConfig = new CockroachDBConnectorConfig(config);
-        return new CockroachDBStreamingChangeEventSource(connectorConfig, null, null, null);
+        return new CockroachDBStreamingChangeEventSource(connectorConfig, null, null, null, null);
     }
 
     private Configuration baseConfig() {

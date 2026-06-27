@@ -38,6 +38,13 @@ public class CockroachDBChangeEventSourceFactory implements ChangeEventSourceFac
     private final CockroachDBSchema schema;
     private final Clock clock;
 
+    /**
+     * Captured from {@link #getSnapshotChangeEventSource} (the coordinator builds the snapshot source
+     * before the streaming source) and handed to the streaming source so it can drive the JMX
+     * snapshot metrics for the changefeed initial scan, which runs in the streaming path.
+     */
+    private volatile SnapshotProgressListener<CockroachDBPartition> snapshotProgressListener;
+
     public CockroachDBChangeEventSourceFactory(
                                                CockroachDBConnectorConfig config,
                                                EventDispatcher<CockroachDBPartition, TableId> dispatcher,
@@ -53,13 +60,14 @@ public class CockroachDBChangeEventSourceFactory implements ChangeEventSourceFac
     public SnapshotChangeEventSource<CockroachDBPartition, CockroachDBOffsetContext> getSnapshotChangeEventSource(
                                                                                                                   SnapshotProgressListener<CockroachDBPartition> snapshotProgressListener,
                                                                                                                   NotificationService<CockroachDBPartition, CockroachDBOffsetContext> notificationService) {
+        this.snapshotProgressListener = snapshotProgressListener;
         return new CockroachDBSnapshotChangeEventSource(config);
     }
 
     @Override
     public StreamingChangeEventSource<CockroachDBPartition, CockroachDBOffsetContext> getStreamingChangeEventSource() {
         LOGGER.debug("Creating CockroachDBStreamingChangeEventSource");
-        return new CockroachDBStreamingChangeEventSource(config, dispatcher, schema, clock);
+        return new CockroachDBStreamingChangeEventSource(config, dispatcher, schema, clock, snapshotProgressListener);
     }
 
     @Override

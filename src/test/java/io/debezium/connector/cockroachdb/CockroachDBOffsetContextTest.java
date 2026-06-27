@@ -116,6 +116,21 @@ public class CockroachDBOffsetContextTest {
     }
 
     @Test
+    public void shouldMarkSnapshotCompletedInOffsetAndRoundTrip() {
+        // Before completion the flag is false (matches other connectors before the snapshot finishes).
+        assertThat(offsetContext.getOffset().get("snapshot_completed")).isEqualTo("false");
+
+        // Completing the snapshot sets the persisted flag to true.
+        offsetContext.preSnapshotCompletion();
+        assertThat(offsetContext.getOffset().get("snapshot_completed")).isEqualTo("true");
+
+        // The completed state survives a reload from the stored offset.
+        CockroachDBOffsetContext restored = new CockroachDBOffsetContext.Loader(config)
+                .load(offsetContext.getOffset());
+        assertThat(restored.getOffset().get("snapshot_completed")).isEqualTo("true");
+    }
+
+    @Test
     public void shouldHandleConstructorWithCursorAndTimestamp() {
         String testCursor = "test-cursor";
         Instant testTimestamp = Instant.now();
