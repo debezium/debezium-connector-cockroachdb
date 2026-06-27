@@ -321,6 +321,15 @@ To emit heartbeat records to the `__debezium-heartbeat.<topic.prefix>` Kafka top
 
 The `cockroachdb.changefeed.resolved.interval` property (default `10s`) controls how frequently CockroachDB emits resolved timestamps.
 
+## Monitoring and Metrics
+
+The connector exposes the standard Debezium JMX metrics, registered under the usual MBean names so existing Debezium dashboards and exporters work unchanged:
+
+- Snapshot metrics: `debezium.cockroachdb:type=connector-metrics,context=snapshot,server=<topic.prefix>`
+- Streaming metrics: `debezium.cockroachdb:type=connector-metrics,context=streaming,server=<topic.prefix>`
+
+The initial backfill runs through the CockroachDB changefeed `initial_scan`, and the connector drives the snapshot lifecycle around it: backfill rows are marked as snapshot reads (`source.snapshot`), the `SnapshotRunning`/`SnapshotCompleted` snapshot metrics are updated, and the offset `snapshot_completed` flips to `true` when the first resolved timestamp arrives (signalling the scan finished). Streaming and queue metrics (for example `MilliSecondsBehindSource`, `TotalNumberOfEventsSeen`, `QueueTotalCapacity`) populate as change events flow. A ready-to-run Prometheus and Grafana setup is in the examples repository.
+
 ## Schema Evolution Detection
 
 The connector automatically detects DDL changes (`ALTER TABLE ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`) without requiring a restart. When an incoming changefeed event contains fields that don't match the registered table schema, the connector:
