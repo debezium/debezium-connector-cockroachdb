@@ -39,9 +39,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.debezium.config.Configuration;
+import io.debezium.connector.SnapshotRecord;
 import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
 import io.debezium.data.Envelope;
 import io.debezium.pipeline.EventDispatcher;
+import io.debezium.pipeline.source.spi.SnapshotProgressListener;
 import io.debezium.pipeline.source.spi.StreamingChangeEventSource;
 import io.debezium.relational.TableId;
 import io.debezium.util.Clock;
@@ -117,15 +119,23 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     private volatile CockroachDBOffsetContext currentOffsetContext;
 
+    /**
+     * Drives the JMX snapshot metrics (SnapshotRunning/SnapshotCompleted) for the changefeed
+     * initial scan. May be null when the connector is constructed without a snapshot phase.
+     */
+    private final SnapshotProgressListener<CockroachDBPartition> snapshotProgressListener;
+
     public CockroachDBStreamingChangeEventSource(
                                                  CockroachDBConnectorConfig config,
                                                  EventDispatcher<CockroachDBPartition, TableId> dispatcher,
                                                  CockroachDBSchema schema,
-                                                 Clock clock) {
+                                                 Clock clock,
+                                                 SnapshotProgressListener<CockroachDBPartition> snapshotProgressListener) {
         this.config = Objects.requireNonNull(config, "config must not be null");
         this.dispatcher = dispatcher;
         this.schema = schema;
         this.clock = clock;
+        this.snapshotProgressListener = snapshotProgressListener;
     }
 
     @Override
@@ -184,6 +194,24 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
             // Create a single multi-table changefeed (if not already running)
             createChangefeeds(connection, tables, offsetContext, hasPriorOffset);
+
+            // Drive the snapshot lifecycle for the changefeed initial scan so snapshot_completed,
+            // source.snapshot, and the JMX snapshot metrics reflect reality, matching the convention
+            // the PostgreSQL and other connectors follow. Completion is signalled on the first
+            // resolved timestamp (see processChangefeedEvent).
+            if (initialScanInProgress) {
+                offsetContext.markSnapshotRecord(SnapshotRecord.TRUE);
+                if (snapshotProgressListener != null) {
+                    snapshotProgressListener.snapshotStarted(partition);
+                }
+                LOGGER.info("Initial scan started for {} table(s)", tables.size());
+            }
+            else {
+                // No initial scan (snapshot.mode no_data/never, or restart with a prior cursor):
+                // there is nothing to backfill, so mark the snapshot already completed.
+                offsetContext.markSnapshotRecord(SnapshotRecord.FALSE);
+                offsetContext.preSnapshotCompletion();
+            }
 
             // Consume events from all per-table topics in a single consumer
             consumeChangefeedEvents(tables, offsetContext, context);
@@ -536,6 +564,18 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 if (initialScanInProgress) {
                     initialScanInProgress = false;
                     LOGGER.info("Initial scan completed (first resolved timestamp received: {})", resolvedTs);
+                    // The backfill is done: clear source.snapshot, mark snapshot_completed, and update
+                    // the JMX snapshot metrics so all snapshot surfaces agree (matching other connectors).
+                    offsetContext.markSnapshotRecord(SnapshotRecord.FALSE);
+                    offsetContext.preSnapshotCompletion();
+                    if (snapshotProgressListener != null && currentPartition != null) {
+                        try {
+                            snapshotProgressListener.snapshotCompleted(currentPartition);
+                        }
+                        catch (Exception e) {
+                            LOGGER.warn("Snapshot metrics completion notification failed: {}", e.getMessage());
+                        }
+                    }
                 }
 
                 // Update offset with the resolved timestamp so offsets advance
