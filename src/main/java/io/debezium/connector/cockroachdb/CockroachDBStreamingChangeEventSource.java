@@ -417,7 +417,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                         Long stored = offsetContext.getConsumerOffset(kafkaConsumerOffsetKey(tp.topic(), tp.partition()));
                         if (stored != null) {
                             consumer.seek(tp, stored + 1);
-                            LOGGER.info("Resuming {} from stored offset {}", tp, stored + 1);
+                            LOGGER.info("Resuming {}: last committed offset {}, seeking to next offset {}",
+                                    tp, stored, stored + 1);
                         }
                     }
                 }
