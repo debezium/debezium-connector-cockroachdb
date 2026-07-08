@@ -40,7 +40,9 @@ jobs:
         env:
           branch_name: ${{ github.head_ref }}
         run: |
-          curl --silent -X "GET" https://api.github.com/repos/debezium/debezium/pulls | jq '.[] | {branch: .head.ref}' | jq -r '.branch' >> SORTED_PULLS.txt
+          for page in 1 2 3; do
+            curl --silent -X "GET" "https://api.github.com/repos/debezium/debezium/pulls?state=open&per_page=100&page=${page}" | jq '.[] | {branch: .head.ref}' | jq -r '.branch' >> SORTED_PULLS.txt
+          done
 
           while IFS=" " read -r BRANCH;
           do
