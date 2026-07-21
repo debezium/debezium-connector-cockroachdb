@@ -56,7 +56,7 @@ public class CockroachDBRestartResumeIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBRestartResumeIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.11");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.13");
     private static final String DATABASE_NAME = "restartresume_testdb";
     private static final String TABLE_NAME = "restartresume_orders";
 

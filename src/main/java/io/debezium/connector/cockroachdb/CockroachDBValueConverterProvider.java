@@ -125,10 +125,11 @@ public class CockroachDBValueConverterProvider implements ValueConverterProvider
             case "INTERVAL":
                 return SchemaBuilder.string().optional();
 
-            // JSON types
+            // JSON types. Optional like every other mapping: changefeed events can predate the
+            // registered table schema, so a required field fails conversion when the value is absent.
             case "JSON":
             case "JSONB":
-                return Json.builder();
+                return Json.builder().optional();
 
             // UUID
             case "UUID":
@@ -163,9 +164,10 @@ public class CockroachDBValueConverterProvider implements ValueConverterProvider
             case "BIT VARYING":
                 return SchemaBuilder.string().optional();
 
-            // pgvector-compatible VECTOR type (CockroachDB 24.2+)
+            // pgvector-compatible VECTOR type (CockroachDB 24.2+). Optional for the same reason
+            // as JSON/JSONB above.
             case "VECTOR":
-                return DoubleVector.builder();
+                return DoubleVector.builder().optional();
 
             // Geography/Geometry (CockroachDB spatial types)
             case "GEOGRAPHY":

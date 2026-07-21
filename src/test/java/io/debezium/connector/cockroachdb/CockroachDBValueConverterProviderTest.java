@@ -83,6 +83,41 @@ public class CockroachDBValueConverterProviderTest {
     }
 
     @Test
+    void jsonColumnSchemaIsOptional() {
+        assertThat(provider.schemaBuilder(column("JSON")).build().isOptional()).isTrue();
+    }
+
+    @Test
+    void jsonbColumnSchemaIsOptional() {
+        assertThat(provider.schemaBuilder(column("JSONB")).build().isOptional()).isTrue();
+    }
+
+    @Test
+    void vectorColumnSchemaIsOptional() {
+        assertThat(provider.schemaBuilder(column("VECTOR")).build().isOptional()).isTrue();
+    }
+
+    @Test
+    void everyMappedTypeReturnsAnOptionalSchema() {
+        // Changefeed events can predate the registered table schema, so every field must be
+        // optional regardless of column nullability. A required field with no default fails
+        // JsonConverter when the value is absent.
+        List<String> typeNames = List.of(
+                "BOOL", "BOOLEAN", "INT2", "SMALLINT", "INT16", "INT4", "INT", "INTEGER", "INT32",
+                "INT8", "BIGINT", "INT64", "SERIAL", "FLOAT4", "REAL", "FLOAT8", "DOUBLE PRECISION",
+                "FLOAT", "NUMERIC", "DECIMAL", "DEC", "VARCHAR", "CHAR", "CHARACTER VARYING", "TEXT",
+                "STRING", "NAME", "BYTEA", "BYTES", "BLOB", "DATE", "TIME", "TIME WITHOUT TIME ZONE",
+                "TIMETZ", "TIME WITH TIME ZONE", "TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE",
+                "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE", "INTERVAL", "JSON", "JSONB", "UUID",
+                "INET", "ENUM", "BIT", "VARBIT", "BIT VARYING", "VECTOR", "GEOGRAPHY", "GEOMETRY");
+        for (String typeName : typeNames) {
+            assertThat(provider.schemaBuilder(column(typeName)).build().isOptional())
+                    .as("schema for %s must be optional", typeName)
+                    .isTrue();
+        }
+    }
+
+    @Test
     void unknownTypeReturnsOptionalString() {
         Column col = column("SOMEFUTURETYPE");
         SchemaBuilder builder = provider.schemaBuilder(col);

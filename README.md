@@ -354,10 +354,10 @@ Run integration tests (requires Docker for Testcontainers):
 ./mvnw clean test -Dtest="*IT"
 ```
 
-Run against a specific CockroachDB version (default is v25.4.11):
+Run against a specific CockroachDB version (default is v25.4.13):
 
 ```bash
-./mvnw clean test -Dtest="*IT" -Dcockroachdb.version=v25.4.11
+./mvnw clean test -Dtest="*IT" -Dcockroachdb.version=v25.4.13
 ```
 
 Run CockroachDB Cloud connectivity tests (requires a Cloud instance):
@@ -372,7 +372,7 @@ The Cloud IT is guarded by `@EnabledIfEnvironmentVariable` and will be skipped i
 For docker-compose based testing with a specific version:
 
 ```bash
-COCKROACHDB_VERSION=v25.4.11 docker-compose -f src/test/scripts/docker-compose.yml up
+COCKROACHDB_VERSION=v25.4.13 docker-compose -f src/test/scripts/docker-compose.yml up
 ```
 
 ## Known Limitations
