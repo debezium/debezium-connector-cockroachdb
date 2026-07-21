@@ -38,7 +38,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 public class ChangefeedSchemaParser {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ChangefeedSchemaParser.class);
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final ObjectMapper OBJECT_MAPPER = ChangefeedJsonMapper.create();
 
     /**
      * Parses a CockroachDB changefeed message into a Debezium-compatible record.
@@ -233,7 +233,9 @@ public class ChangefeedSchemaParser {
             else if (node.isLong()) {
                 return node.asLong();
             }
-            else if (node.isDouble()) {
+            else if (node.isNumber()) {
+                // Remaining numbers were inferred as FLOAT64; DecimalNode also lands here
+                // because the shared mapper parses JSON floats as BigDecimal.
                 return node.asDouble();
             }
             else if (node.isBoolean()) {

@@ -41,6 +41,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.debezium.config.Configuration;
 import io.debezium.connector.SnapshotRecord;
 import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
+import io.debezium.connector.cockroachdb.serialization.ChangefeedJsonMapper;
 import io.debezium.data.Envelope;
 import io.debezium.pipeline.EventDispatcher;
 import io.debezium.pipeline.source.spi.SnapshotProgressListener;
@@ -77,7 +78,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     private final CockroachDBSchema schema;
     private final Clock clock;
     private final AtomicBoolean running = new AtomicBoolean(false);
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper = ChangefeedJsonMapper.create();
 
     /**
      * Bounded LRU cache for deduplication. Evicts oldest entries when the cache
