@@ -27,7 +27,7 @@ public class CockroachDBChangeRecordEmitterTest {
 
     @Test
     public void shouldExtractTemporalColumnValuesWithCorrectJavaTypes() throws Exception {
-        // Real CockroachDB enriched changefeed output for each temporal type (captured from v25.4.11).
+        // Real CockroachDB enriched changefeed output for each temporal type (captured from v25.4.13).
         String json = "{\"d\":\"2026-06-08\",\"id\":1,\"tm\":\"11:01:45.883\",\"tmtz\":\"11:01:45.883+02\","
                 + "\"ts\":\"2026-06-08T11:01:45.883\",\"tstz\":\"2026-06-08T09:01:45.883Z\"}";
         JsonNode node = new ObjectMapper().readTree(json);
