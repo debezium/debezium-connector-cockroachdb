@@ -140,7 +140,9 @@ public class CockroachDBChangeRecordEmitter extends RelationalChangeRecordEmitte
                 return node.asDouble();
             case "NUMERIC":
             case "DECIMAL":
-                return node.asText();
+            case "DEC":
+                // Emit the exact source digits; toPlainString avoids scientific notation.
+                return node.isNumber() ? node.decimalValue().toPlainString() : node.asText();
             case "BYTEA":
             case "BYTES":
                 return node.asText();
