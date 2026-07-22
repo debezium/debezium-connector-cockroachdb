@@ -485,7 +485,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     if (valueJson != null && !valueJson.trim().isEmpty()) {
                         TableId table = resolveTableFromTopic(record.topic());
                         if (table != null) {
-                            processChangefeedEvent(valueJson, table, offsetContext);
+                            processChangefeedEvent(record.key(), valueJson, table, offsetContext);
                         }
                         else {
                             LOGGER.warn("Cannot resolve table for topic '{}', skipping event", record.topic());
@@ -551,7 +551,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * Processes a single changefeed event (regardless of sink type).
      * Handles deduplication, resolved-timestamp filtering, and dispatching.
      */
-    private void processChangefeedEvent(String valueJson, TableId table,
+    private void processChangefeedEvent(String keyJson, String valueJson, TableId table,
                                         CockroachDBOffsetContext offsetContext) {
         if (valueJson == null || valueJson.trim().isEmpty()) {
             return;
@@ -618,10 +618,19 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 }
             }
 
+            // The changefeed message key carries the primary key columns for every event,
+            // including deletes that have no before image.
+            JsonNode keyNode = null;
+            if (keyJson != null && !keyJson.trim().isEmpty()) {
+                JsonNode parsedKey = objectMapper.readTree(keyJson);
+                keyNode = (parsedKey != null && parsedKey.has("payload")) ? parsedKey.get("payload") : parsedKey;
+            }
+
             CockroachDBChangeRecordEmitter emitter = new CockroachDBChangeRecordEmitter(
                     currentPartition, offsetContext, clock, config, tableObj, operation,
                     afterNode.isMissingNode() ? null : afterNode,
-                    beforeNode.isMissingNode() ? null : beforeNode);
+                    beforeNode.isMissingNode() ? null : beforeNode,
+                    keyNode);
 
             LOGGER.debug("Dispatching {} event for table {}", operation, table);
             dispatcher.dispatchDataChangeEvent(currentPartition, table, emitter);

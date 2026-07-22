@@ -35,6 +35,7 @@ public class CockroachDBChangeRecordEmitter extends RelationalChangeRecordEmitte
     private final Table table;
     private final JsonNode afterNode;
     private final JsonNode beforeNode;
+    private final JsonNode keyNode;
     private final Envelope.Operation operation;
 
     public CockroachDBChangeRecordEmitter(CockroachDBPartition partition,
@@ -45,11 +46,24 @@ public class CockroachDBChangeRecordEmitter extends RelationalChangeRecordEmitte
                                           Envelope.Operation operation,
                                           JsonNode afterNode,
                                           JsonNode beforeNode) {
+        this(partition, offsetContext, clock, connectorConfig, table, operation, afterNode, beforeNode, null);
+    }
+
+    public CockroachDBChangeRecordEmitter(CockroachDBPartition partition,
+                                          CockroachDBOffsetContext offsetContext,
+                                          Clock clock,
+                                          RelationalDatabaseConnectorConfig connectorConfig,
+                                          Table table,
+                                          Envelope.Operation operation,
+                                          JsonNode afterNode,
+                                          JsonNode beforeNode,
+                                          JsonNode keyNode) {
         super(partition, offsetContext, clock, connectorConfig);
         this.table = table;
         this.operation = operation;
         this.afterNode = afterNode;
         this.beforeNode = beforeNode;
+        this.keyNode = keyNode;
     }
 
     @Override
@@ -60,9 +74,48 @@ public class CockroachDBChangeRecordEmitter extends RelationalChangeRecordEmitte
     @Override
     protected Object[] getOldColumnValues() {
         if (beforeNode == null || beforeNode.isNull() || beforeNode.isMissingNode()) {
-            return null;
+            return keyColumnValues();
         }
         return extractColumnValues(beforeNode);
+    }
+
+    /**
+     * Changefeeds created without the {@code diff} option omit the before image, but the
+     * changefeed message key always carries the primary key columns. The record key for delete
+     * events is built from the old column values, so without this fallback deletes would emit a
+     * null key against the required key schema and fail key conversion.
+     */
+    private Object[] keyColumnValues() {
+        if (keyNode == null || keyNode.isNull() || keyNode.isMissingNode()) {
+            return null;
+        }
+        List<Column> columns = table.columns();
+        List<String> primaryKeyColumns = table.primaryKeyColumnNames();
+        Object[] values = new Object[columns.size()];
+        boolean found = false;
+        for (int i = 0; i < columns.size(); i++) {
+            Column column = columns.get(i);
+            if (!primaryKeyColumns.contains(column.name())) {
+                continue;
+            }
+            JsonNode keyValue = null;
+            if (keyNode.isObject() && keyNode.has(column.name())) {
+                // Kafka changefeed key with schema enrichment: an object keyed by column name.
+                keyValue = keyNode.get(column.name());
+            }
+            else if (keyNode.isArray()) {
+                // Sinkless and plain JSON changefeed keys: an array in primary key column order.
+                int position = primaryKeyColumns.indexOf(column.name());
+                if (position >= 0 && position < keyNode.size()) {
+                    keyValue = keyNode.get(position);
+                }
+            }
+            if (keyValue != null && !keyValue.isNull()) {
+                values[i] = convertJsonValue(keyValue, column);
+                found = true;
+            }
+        }
+        return found ? values : null;
     }
 
     @Override
