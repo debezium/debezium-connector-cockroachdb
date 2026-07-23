@@ -55,7 +55,7 @@ public class CockroachDBSinklessIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBSinklessIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.10");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.13");
     private static final String DATABASE_NAME = "sinkless_testdb";
     private static final String TABLE_NAME = "sinkless_orders";
 

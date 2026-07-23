@@ -389,6 +389,21 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                     + "The CockroachDB connector can only consume the enriched envelope. Drop or recreate that "
                                     + "changefeed with envelope='enriched' (and full_table_name), or use a different topic prefix.");
                         }
+                        // Changefeed options are fixed at creation time, so a reused changefeed that
+                        // lacks the diff option can never deliver the before images the configuration
+                        // promises. Fail fast instead of silently emitting updates without them.
+                        if (config.isChangefeedIncludeDiff() && !changefeedHasDiffOption(description)) {
+                            throw new IllegalStateException("Found an existing running changefeed for table " + table
+                                    + " using topic prefix '" + topicPrefix + "' that was created without the diff option, but "
+                                    + "cockroachdb.changefeed.include.diff is enabled. Update events from that changefeed cannot "
+                                    + "carry a before image. Cancel the changefeed job and restart the connector so it recreates "
+                                    + "the changefeed with diff, or disable cockroachdb.changefeed.include.diff.");
+                        }
+                        if (!config.isChangefeedIncludeDiff() && changefeedHasDiffOption(description)) {
+                            LOGGER.warn("Reusing changefeed for table {} that was created with the diff option while "
+                                    + "cockroachdb.changefeed.include.diff is disabled; update events will carry before images.",
+                                    table);
+                        }
                         return true;
                     }
                 }
@@ -407,6 +422,32 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * so this guards reuse of a pre-existing changefeed. Whitespace is normalized because the
      * description may render the option as {@code envelope = 'enriched'} or {@code envelope='enriched'}.
      */
+    /**
+     * Returns {@code true} if a {@code SHOW CHANGEFEED JOBS} description lists the {@code diff}
+     * option. Only the option list inside {@code WITH OPTIONS (...)} is inspected, so table names
+     * that contain the word diff do not match.
+     */
+    static boolean changefeedHasDiffOption(String description) {
+        if (description == null) {
+            return false;
+        }
+        int start = description.indexOf("WITH OPTIONS (");
+        if (start < 0) {
+            return false;
+        }
+        String options = description.substring(start + "WITH OPTIONS (".length());
+        int end = options.lastIndexOf(')');
+        if (end >= 0) {
+            options = options.substring(0, end);
+        }
+        for (String option : options.split(",")) {
+            if ("diff".equals(option.trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     static boolean changefeedUsesEnrichedEnvelope(String description) {
         if (description == null) {
             return false;
