@@ -490,6 +490,31 @@ public class CockroachDBConnectorConfigTest {
                 CockroachDBConnectorConfigTest::failOnProblem)).isTrue();
     }
 
+    @Test
+    public void shouldAcceptSinklessSinkType() {
+        Configuration config = baseProps()
+                .with("cockroachdb.changefeed.sink.type", "sinkless")
+                .build();
+        assertThat(config.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                CockroachDBConnectorConfigTest::failOnProblem)).isTrue();
+        assertThat(new CockroachDBConnectorConfig(config).isSinklessChangefeed()).isTrue();
+    }
+
+    @Test
+    public void shouldRejectUnknownSinkType() {
+        Configuration config = baseProps()
+                .with("cockroachdb.changefeed.sink.type", "rabbitmq")
+                .build();
+        StringBuilder problemMessage = new StringBuilder();
+        boolean ok = config.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                (String message) -> problemMessage.append(message));
+        assertThat(ok).isFalse();
+        assertThat(problemMessage.toString()).contains("kafka");
+        assertThat(problemMessage.toString()).contains("sinkless");
+    }
+
     private static Configuration.Builder baseProps() {
         return Configuration.create()
                 .with("database.hostname", "localhost")

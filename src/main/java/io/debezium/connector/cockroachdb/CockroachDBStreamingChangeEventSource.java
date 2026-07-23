@@ -10,27 +10,37 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
+import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.config.SslConfigs;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -193,7 +203,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 LOGGER.debug("Mapped topic {} -> table {}", topicName, table);
             }
 
-            // Create a single multi-table changefeed (if not already running)
+            // Create a single multi-table changefeed (if not already running). For sinkless mode
+            // this is a no-op; the changefeed is created and streamed during consumption.
             createChangefeeds(connection, tables, offsetContext, hasPriorOffset);
 
             // Drive the snapshot lifecycle for the changefeed initial scan so snapshot_completed,
@@ -214,8 +225,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 offsetContext.preSnapshotCompletion();
             }
 
-            // Consume events from all per-table topics in a single consumer
-            consumeChangefeedEvents(tables, offsetContext, context);
+            // Consume events: from the intermediate Kafka topics (kafka mode) or directly from a
+            // sinkless changefeed streamed over SQL (sinkless mode).
+            consumeChangefeedEvents(tables, offsetContext, context, hasPriorOffset);
         }
         catch (SQLException e) {
             // CockroachDB is the authority on changefeed options (sink URI, enriched_properties,
@@ -255,6 +267,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                    CockroachDBOffsetContext offsetContext,
                                    boolean hasPriorOffset)
             throws SQLException {
+
+        if (config.isSinklessChangefeed()) {
+            // A sinkless changefeed is created and streamed in a single executeQuery during
+            // consumption (see consumeSinkless), so there is nothing to pre-create here.
+            initialScanInProgress = "yes".equals(config.getInitialScanForSnapshotMode(hasPriorOffset));
+            return;
+        }
 
         int maxPerChangefeed = config.getChangefeedMaxTablesPerChangefeed();
         List<List<TableId>> groups = partitionTables(tables, maxPerChangefeed);
@@ -309,11 +328,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     static List<List<TableId>> partitionTables(List<TableId> tables, int maxPerGroup) {
         if (maxPerGroup <= 0 || tables.size() <= maxPerGroup) {
-            return List.of(new java.util.ArrayList<>(tables));
+            return List.of(new ArrayList<>(tables));
         }
-        List<List<TableId>> groups = new java.util.ArrayList<>();
+        List<List<TableId>> groups = new ArrayList<>();
         for (int i = 0; i < tables.size(); i += maxPerGroup) {
-            groups.add(new java.util.ArrayList<>(tables.subList(i, Math.min(i + maxPerGroup, tables.size()))));
+            groups.add(new ArrayList<>(tables.subList(i, Math.min(i + maxPerGroup, tables.size()))));
         }
         return groups;
     }
@@ -323,7 +342,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * Subscribes to all per-table topics in a single consumer for concurrent processing.
      */
     private void consumeChangefeedEvents(List<TableId> tables, CockroachDBOffsetContext offsetContext,
-                                         ChangeEventSourceContext context)
+                                         ChangeEventSourceContext context, boolean hasPriorOffset)
             throws InterruptedException {
         String sinkType = config.getChangefeedSinkType();
         LOGGER.debug("Routing to sink consumer type='{}' for {} table(s)", sinkType, tables.size());
@@ -331,10 +350,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             case "kafka":
                 consumeFromKafkaTopics(tables, offsetContext, context);
                 break;
+            case "sinkless":
+                consumeSinkless(tables, offsetContext, context, hasPriorOffset);
+                break;
             default:
                 throw new IllegalArgumentException(
                         "Unsupported changefeed sink type: '" + sinkType
-                                + "'. Currently supported: kafka. Planned: webhook, pubsub, cloudstorage.");
+                                + "'. Supported: kafka, sinkless. Planned: webhook, pubsub, cloudstorage.");
         }
     }
 
@@ -403,7 +425,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 .map(this::buildTopicName)
                 .collect(Collectors.toList());
 
-        java.util.Properties props = new java.util.Properties();
+        Properties props = new Properties();
         String explicitBootstrap = config.getChangefeedKafkaBootstrapServers();
         if (explicitBootstrap != null && !explicitBootstrap.trim().isEmpty()) {
             props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, explicitBootstrap);
@@ -518,6 +540,135 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     static String kafkaConsumerOffsetKey(String topic, int partition) {
         return topic + ":" + partition;
+    }
+
+    /**
+     * Consumes a CockroachDB sinkless changefeed: runs {@code CREATE CHANGEFEED ... } without
+     * {@code INTO} on a dedicated SQL connection and streams change events directly from the
+     * resulting {@link ResultSet}, with no intermediate Kafka cluster. Each row's {@code value}
+     * column is the same enriched JSON the kafka path receives, so it is handed to the shared
+     * {@link #processChangefeedEvent} pipeline (parse, dedup, schema refresh, dispatch, and
+     * resolved-timestamp offset advancement) unchanged.
+     */
+    private void consumeSinkless(List<TableId> tables, CockroachDBOffsetContext offsetContext,
+                                 ChangeEventSourceContext context, boolean hasPriorOffset)
+            throws InterruptedException {
+        Map<String, TableId> tablesBySchemaAndName = new HashMap<>();
+        for (TableId table : tables) {
+            tablesBySchemaAndName.put(table.schema() + "." + table.table(), table);
+        }
+
+        String changefeedQuery = buildSinklessChangefeedQuery(tables, offsetContext.getCursor(), hasPriorOffset);
+        LOGGER.info("Starting sinkless changefeed for {} table(s) (streaming over SQL, no intermediate Kafka)", tables.size());
+        LOGGER.debug("Sinkless changefeed query: {}", changefeedQuery);
+
+        // The streaming query holds its connection open indefinitely, so it must use a dedicated
+        // connection separate from the schema-refresh connection opened in execute().
+        try (CockroachDBConnection streamConnection = new CockroachDBConnection(config)) {
+            streamConnection.connect();
+            Connection jdbc = streamConnection.connection();
+            // A sinkless changefeed must stream over a server-side cursor: pgjdbc only enables that
+            // when autoCommit is false and a fetch size is set. CockroachDB treats CREATE CHANGEFEED
+            // as DDL and, by default (the autocommit_before_ddl session setting), auto-commits the
+            // surrounding transaction before running it, which tears the cursor down mid-execute and
+            // closes the connection (EOFException). Disabling autocommit_before_ddl on this session
+            // lets the changefeed run inside pgjdbc's transaction so the cursor streams. See
+            // CockroachDB issue #85436.
+            try (Statement init = jdbc.createStatement()) {
+                init.execute("SET autocommit_before_ddl = false");
+            }
+            jdbc.setAutoCommit(false);
+            try (Statement stmt = jdbc.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)) {
+                // Fetch one row at a time. The change stream is unbounded and CockroachDB does not
+                // return a partial cursor batch, so any fetch size greater than one would withhold
+                // events until that many rows accumulated, which is unacceptable latency for CDC.
+                // Row-at-a-time delivers each change (and each resolved timestamp) as soon as
+                // CockroachDB emits it. This is independent of cockroachdb.changefeed.batch.size,
+                // which governs the kafka-mode consumer poll, not the SQL cursor.
+                stmt.setFetchSize(1);
+                try (ResultSet rs = stmt.executeQuery(changefeedQuery)) {
+                    while (context.isRunning() && running.get() && rs.next()) {
+                        String valueJson = readChangefeedValue(rs);
+                        if (valueJson == null || valueJson.trim().isEmpty()) {
+                            continue;
+                        }
+                        String keyJson = readChangefeedKey(rs);
+                        TableId table = resolveTableFromSource(valueJson, tablesBySchemaAndName);
+                        // Resolved-timestamp rows carry no table; processChangefeedEvent handles
+                        // them by their "resolved" field regardless of the table argument.
+                        processChangefeedEvent(keyJson, valueJson, table, offsetContext);
+
+                        if (config.getSnapshotMode() == CockroachDBConnectorConfig.SnapshotMode.INITIAL_ONLY
+                                && !initialScanInProgress) {
+                            LOGGER.info("Initial scan completed and snapshot.mode=initial_only, stopping connector");
+                            running.set(false);
+                            break;
+                        }
+                    }
+                }
+            }
+            LOGGER.debug("Stopped sinkless changefeed consumption");
+        }
+        catch (SQLException e) {
+            // On shutdown the dedicated streaming connection is closed out from under the open
+            // cursor, which surfaces here as an I/O error ("sending to the backend" / EOF). That is
+            // the expected way a never-ending changefeed read ends, not a failure, so do not escalate
+            // it when the source is already stopping.
+            if (!context.isRunning() || !running.get()) {
+                LOGGER.info("Sinkless changefeed consumption stopped during shutdown");
+                return;
+            }
+            LOGGER.error("Error in sinkless changefeed consumption: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to stream sinkless changefeed from CockroachDB: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Reads the changefeed {@code value} column. CockroachDB returns it as BYTES, so prefer
+     * {@code getBytes} and decode UTF-8, falling back to {@code getString}.
+     */
+    private static String readChangefeedKey(ResultSet rs) throws SQLException {
+        try {
+            byte[] bytes = rs.getBytes("key");
+            if (bytes != null) {
+                return new String(bytes, StandardCharsets.UTF_8);
+            }
+            return rs.getString("key");
+        }
+        catch (SQLException e) {
+            // Resolved-timestamp rows and older server versions may not expose a key column.
+            return null;
+        }
+    }
+
+    private static String readChangefeedValue(ResultSet rs) throws SQLException {
+        byte[] bytes = rs.getBytes("value");
+        if (bytes != null) {
+            return new String(bytes, StandardCharsets.UTF_8);
+        }
+        return rs.getString("value");
+    }
+
+    /**
+     * Resolves the {@link TableId} for a sinkless changefeed row from the event's enriched
+     * {@code source} block ({@code schema_name} + {@code table_name}), which is schema-qualified so
+     * same-named tables in different schemas route correctly. Returns null for rows without a usable
+     * source (for example resolved-timestamp rows), which the caller passes through harmlessly.
+     */
+    TableId resolveTableFromSource(String valueJson, Map<String, TableId> tablesBySchemaAndName) {
+        try {
+            JsonNode payload = resolvePayload(objectMapper.readTree(valueJson));
+            JsonNode source = payload.path("source");
+            String schema = source.path("schema_name").asText(null);
+            String table = source.path("table_name").asText(null);
+            if (schema != null && table != null) {
+                return tablesBySchemaAndName.get(schema + "." + table);
+            }
+        }
+        catch (Exception e) {
+            LOGGER.debug("Could not resolve table from sinkless event source block: {}", e.getMessage());
+        }
+        return null;
     }
 
     /**
@@ -737,44 +888,66 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         sinkUri = sinkUri + separator + "topic_prefix=" + sanitizeLiteral(resolveTopicPrefix());
         query.append(" INTO '").append(sanitizeLiteral(sinkUri)).append("'");
 
-        query.append(" WITH full_table_name");
-        // The connector parses only the enriched envelope (it relies on the 'op' and 'ts_ns'
-        // fields it provides), so the envelope is fixed rather than configurable.
-        query.append(", envelope = 'enriched'");
+        // full_table_name is kafka-specific: it drives the per-table topic naming the consumer
+        // subscribes to. The remaining options are shared with the sinkless changefeed.
+        query.append(" WITH full_table_name, ").append(buildChangefeedWithOptions(cursor, hasPriorOffset));
+        return query.toString();
+    }
+
+    /**
+     * Builds the {@code CREATE CHANGEFEED} statement for a sinkless changefeed: no {@code INTO},
+     * no {@code topic_prefix}, no {@code full_table_name}, and no sink TLS injection. CockroachDB
+     * streams the change events back over the SQL connection (see {@link #consumeSinkless}).
+     */
+    String buildSinklessChangefeedQuery(List<TableId> tables, String cursor, boolean hasPriorOffset) {
+        StringBuilder query = new StringBuilder();
+        query.append("CREATE CHANGEFEED FOR TABLE ");
+        query.append(tables.stream()
+                .map(t -> sanitizeIdentifier(t.toString()))
+                .collect(Collectors.joining(", ")));
+        query.append(" WITH ").append(buildChangefeedWithOptions(cursor, hasPriorOffset));
+        return query.toString();
+    }
+
+    /**
+     * Builds the comma-separated {@code WITH} options shared by the sink-based and sinkless
+     * changefeeds: the fixed enriched envelope, enriched_properties, updated/diff, the resolved
+     * interval, the snapshot-derived initial_scan, an optional resume cursor, and any user sink
+     * options. Returned without a leading comma so callers can prefix it with their own options
+     * (for example {@code full_table_name} for the kafka sink).
+     */
+    private String buildChangefeedWithOptions(String cursor, boolean hasPriorOffset) {
+        List<String> options = new ArrayList<>();
+        // The connector parses only the enriched envelope (it relies on the 'op' and 'ts_ns' fields
+        // it provides), so the envelope is fixed rather than configurable.
+        options.add("envelope = 'enriched'");
 
         String enrichedProperties = config.getChangefeedEnrichedProperties();
         if (enrichedProperties != null && !enrichedProperties.trim().isEmpty()) {
-            query.append(", enriched_properties = '").append(sanitizeLiteral(enrichedProperties)).append("'");
+            options.add("enriched_properties = '" + sanitizeLiteral(enrichedProperties) + "'");
         }
-
         if (config.isChangefeedIncludeUpdated()) {
-            query.append(", updated");
+            options.add("updated");
         }
-
         if (config.isChangefeedIncludeDiff()) {
-            query.append(", diff");
+            options.add("diff");
         }
-
-        String resolvedInterval = config.getChangefeedResolvedInterval();
-        query.append(", resolved = '").append(sanitizeLiteral(resolvedInterval)).append("'");
+        options.add("resolved = '" + sanitizeLiteral(config.getChangefeedResolvedInterval()) + "'");
 
         String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
         if (initialScan != null) {
-            query.append(", initial_scan = '").append(sanitizeLiteral(initialScan)).append("'");
+            options.add("initial_scan = '" + sanitizeLiteral(initialScan) + "'");
         }
-
         if (cursor != null && !cursor.trim().isEmpty()
                 && !CockroachDBOffsetContext.CURSOR_INITIAL.equals(cursor)
                 && !CockroachDBOffsetContext.CURSOR_NOW.equals(cursor)) {
-            query.append(", cursor = '").append(sanitizeLiteral(cursor)).append("'");
+            options.add("cursor = '" + sanitizeLiteral(cursor) + "'");
         }
-
         String sinkOptions = config.getChangefeedSinkOptions();
         if (sinkOptions != null && !sinkOptions.trim().isEmpty()) {
-            query.append(", ").append(sanitizeLiteral(sinkOptions));
+            options.add(sanitizeLiteral(sinkOptions));
         }
-
-        return query.toString();
+        return String.join(", ", options);
     }
 
     /**
@@ -872,6 +1045,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     static final String CONSUMER_OVERRIDE_PREFIX = "cockroachdb.changefeed.kafka.consumer.override.";
 
     /**
+     * Kafka SSL store type for inline PEM material. Kafka exposes constants for the SSL config keys
+     * (see {@link SslConfigs}) but not for this store-type value, so it is named here. It lets the
+     * consumer reuse the connector's PEM sink TLS files directly without converting them to a JKS store.
+     */
+    private static final String PEM_STORE_TYPE = "PEM";
+
+    /**
      * Configures security for the connector's changefeed consumer. The consumer is a normal Kafka
      * client and is separate from the changefeed push to CockroachDB's Kafka sink, so it needs its
      * own security settings to read from a secured broker.
@@ -886,20 +1066,20 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * overrides the derived values and covers SASL, JKS stores, or a differently-secured broker.</li>
      * </ol>
      */
-    static void applyConsumerSecurity(CockroachDBConnectorConfig config, java.util.Properties props) {
+    static void applyConsumerSecurity(CockroachDBConnectorConfig config, Properties props) {
         if (config.isChangefeedSinkTlsEnabled()) {
-            props.put("security.protocol", "SSL");
+            props.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, SecurityProtocol.SSL.name());
             String caCert = config.getChangefeedSinkTlsCaCertFile();
             if (caCert != null && !caCert.isEmpty()) {
-                props.put("ssl.truststore.type", "PEM");
-                props.put("ssl.truststore.location", caCert);
+                props.put(SslConfigs.SSL_TRUSTSTORE_TYPE_CONFIG, PEM_STORE_TYPE);
+                props.put(SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG, caCert);
             }
             String clientCert = config.getChangefeedSinkTlsClientCertFile();
             String clientKey = config.getChangefeedSinkTlsClientKeyFile();
             if (clientCert != null && !clientCert.isEmpty() && clientKey != null && !clientKey.isEmpty()) {
-                props.put("ssl.keystore.type", "PEM");
-                props.put("ssl.keystore.certificate.chain", readFileContent(clientCert));
-                props.put("ssl.keystore.key", readFileContent(clientKey));
+                props.put(SslConfigs.SSL_KEYSTORE_TYPE_CONFIG, PEM_STORE_TYPE);
+                props.put(SslConfigs.SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG, readFileContent(clientCert));
+                props.put(SslConfigs.SSL_KEYSTORE_KEY_CONFIG, readFileContent(clientKey));
             }
             LOGGER.info("Derived SSL config for the changefeed consumer from cockroachdb.changefeed.sink.tls.* (security.protocol=SSL)");
         }
@@ -939,8 +1119,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
         String base = uri.substring(0, queryStart);
         String query = uri.substring(queryStart + 1);
-        java.util.Set<String> toRemove = java.util.Set.of(keys);
-        String kept = java.util.Arrays.stream(query.split("&"))
+        Set<String> toRemove = Set.of(keys);
+        String kept = Arrays.stream(query.split("&"))
                 .filter(pair -> !pair.isEmpty())
                 .filter(pair -> {
                     int eq = pair.indexOf('=');
@@ -983,7 +1163,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     static boolean hasSchemaChanged(JsonNode dataNode, io.debezium.relational.Table table) {
         // Check for new columns: event field not in registered schema
-        java.util.Iterator<String> fieldNames = dataNode.fieldNames();
+        Iterator<String> fieldNames = dataNode.fieldNames();
         int eventFieldCount = 0;
         while (fieldNames.hasNext()) {
             String field = fieldNames.next();

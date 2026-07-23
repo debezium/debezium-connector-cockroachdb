@@ -273,7 +273,13 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withWidth(Width.SHORT)
             .withImportance(Importance.HIGH)
             .withValidation(CockroachDBConnectorConfig::validateChangefeedSinkType)
-            .withDescription("The type of sink for changefeed events. Currently supported: 'kafka'. Planned: 'webhook', 'pubsub', 'cloudstorage'.");
+            .withDescription("How the connector receives changefeed events. "
+                    + "'kafka' (default): CockroachDB pushes the changefeed to an intermediate Kafka cluster "
+                    + "(set via cockroachdb.changefeed.sink.uri) and the connector consumes it. "
+                    + "'sinkless': the connector runs a CockroachDB sinkless changefeed (CREATE CHANGEFEED without INTO) "
+                    + "and streams change events directly over its SQL connection, with no intermediate Kafka cluster; "
+                    + "cockroachdb.changefeed.sink.uri is not used in this mode. "
+                    + "Planned: 'webhook', 'pubsub', 'cloudstorage'.");
 
     public static final Field CHANGEFEED_SINK_URI = Field.create("cockroachdb.changefeed.sink.uri")
             .withDisplayName("Changefeed sink URI")
@@ -909,8 +915,8 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     private static int validateChangefeedSinkType(Configuration config, Field field, Field.ValidationOutput problems) {
         String value = config.getString(field);
-        if (value != null && !value.equals("kafka")) {
-            problems.accept(field, value, "Currently only 'kafka' is supported. Planned: webhook, pubsub, cloudstorage");
+        if (value != null && !value.equals("kafka") && !value.equals("sinkless")) {
+            problems.accept(field, value, "Must be 'kafka' or 'sinkless'. Planned: webhook, pubsub, cloudstorage");
             return 1;
         }
         return 0;
@@ -1064,6 +1070,15 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
     // Sink-related getter methods
     public String getChangefeedSinkType() {
         return config.getString(CHANGEFEED_SINK_TYPE);
+    }
+
+    /**
+     * Returns {@code true} when the connector should use a CockroachDB sinkless changefeed
+     * (CREATE CHANGEFEED without INTO) and stream change events directly over the SQL connection,
+     * rather than pushing to an intermediate Kafka cluster and consuming it back.
+     */
+    public boolean isSinklessChangefeed() {
+        return "sinkless".equals(getChangefeedSinkType());
     }
 
     public String getChangefeedSinkUri() {
