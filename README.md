@@ -117,8 +117,8 @@ Example connector configuration:
 | Option                                       | Default  | Description                                   |
 |----------------------------------------------|----------|-----------------------------------------------|
 | `cockroachdb.changefeed.enriched.properties` | source   | Comma-separated enriched properties (passthrough to CockroachDB) |
-| `cockroachdb.changefeed.sink.type`           | kafka    | Sink type (kafka, webhook, pubsub, etc.)      |
-| `cockroachdb.changefeed.sink.uri`            | -        | Sink URI (required). e.g. `kafka://host:port`. Do not set `topic_name`/`topic_prefix` here |
+| `cockroachdb.changefeed.sink.type`           | kafka    | Changefeed delivery mode: `kafka` (changefeed pushes to an intermediate Kafka that the connector consumes) or `sinkless` (changefeed streams over the connector's SQL connection, no intermediate Kafka). See [Changefeed delivery modes](#changefeed-delivery-modes-kafka-vs-sinkless). Planned: webhook, pubsub, cloudstorage |
+| `cockroachdb.changefeed.sink.uri`            | -        | Sink URI. **Required for `sink.type=kafka`**, e.g. `kafka://host:port`; ignored for `sink.type=sinkless`. Do not set `topic_name`/`topic_prefix` here |
 | `cockroachdb.changefeed.sink.topic.prefix`   | ""       | Prefix for intermediate topic names, used verbatim: topics are `<prefix><database>.<schema>.<table>`. Include your own separator (e.g. `crdb.`). If empty, defaults to `<topic.prefix>.` |
 | `cockroachdb.changefeed.max.tables.per.changefeed` | 0  | Max tables per changefeed. `0` = all in one. Set positive to split large table sets across multiple changefeeds and avoid per-table coupling |
 | `cockroachdb.changefeed.sink.options`        | ""       | Additional sink options in key=value format   |
@@ -128,6 +128,36 @@ Example connector configuration:
 | `cockroachdb.changefeed.cursor`              | now      | Start cursor position                         |
 | `cockroachdb.changefeed.batch.size`          | 1000     | Batch size for changefeed processing          |
 | `cockroachdb.changefeed.poll.interval.ms`    | 100      | Poll interval in milliseconds                 |
+
+#### Changefeed delivery modes (kafka vs sinkless)
+
+CockroachDB can run a changefeed two ways, selected by `cockroachdb.changefeed.sink.type`:
+
+- **`kafka`** (default): the connector creates a changefeed with `INTO 'kafka://...'`, so CockroachDB
+  pushes change events to an intermediate Kafka cluster, and the connector runs its own consumer to
+  read them back. This consumer is a separate client to secure (see the changefeed TLS options) and
+  operate, but the intermediate topics durably buffer change events independently of the connector.
+  `cockroachdb.changefeed.sink.uri` is required.
+
+- **`sinkless`**: the connector creates a [core (sinkless) changefeed](https://www.cockroachlabs.com/docs/stable/changefeed-for)
+  with `CREATE CHANGEFEED FOR TABLE ...` and **no** `INTO` clause, and streams the change events back
+  over its own SQL connection. There is no intermediate Kafka, no changefeed job
+  (`SHOW CHANGEFEED JOBS` does not list it), and no separate consumer to secure: security collapses
+  onto the single JDBC connection the connector already uses. `cockroachdb.changefeed.sink.uri` is
+  not used. The Debezium output is identical to `kafka` mode.
+
+The output topics the connector produces (and the Debezium envelope) are the same in both modes; only
+the ingestion path differs. A runnable example is in
+[`crdb-to-sinkless`](https://github.com/viragtripathi/debezium-cockroachdb-examples/tree/main/crdb-to-sinkless).
+
+**Durability tradeoff:** `kafka` mode buffers change events in Kafka, so the connector can be down for
+a long time and still resume from the intermediate topics. `sinkless` mode has no intermediate buffer:
+if the connector stops, the changefeed stops, and resume is bounded by CockroachDB's garbage-collection
+window ([`gc.ttlseconds`](https://www.cockroachlabs.com/docs/stable/configure-replication-zones#gc-ttlseconds),
+whose default varies by version and deployment). The connector resumes from the persisted resolved
+timestamp (`cursor`), but CockroachDB can only serve changes newer than the GC window; if the connector
+is down longer than the GC TTL, a new snapshot is required. Size `gc.ttlseconds` for your worst-case
+connector downtime if you rely on sinkless resume.
 
 #### Snapshot Configuration
 
