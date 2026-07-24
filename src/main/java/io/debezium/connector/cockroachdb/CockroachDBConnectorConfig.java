@@ -23,6 +23,7 @@ import io.debezium.config.EnumeratedValue;
 import io.debezium.config.Field;
 import io.debezium.connector.AbstractSourceInfo;
 import io.debezium.connector.SourceInfoStructMaker;
+import io.debezium.connector.cockroachdb.serialization.ChangefeedJsonMapper;
 import io.debezium.jdbc.JdbcConfiguration;
 import io.debezium.relational.ColumnFilterMode;
 import io.debezium.relational.RelationalDatabaseConnectorConfig;
@@ -374,6 +375,33 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withImportance(Importance.LOW)
             .withDescription("Additional options for the sink in key=value format, comma-separated. "
                     + "Example: 'compression=gzip,retry_count=3'");
+
+    public static final Field CHANGEFEED_KAFKA_SINK_CONFIG = Field.create("cockroachdb.changefeed.kafka.sink.config")
+            .withDisplayName("Changefeed kafka sink config")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
+            .withWidth(Width.LONG)
+            .withImportance(Importance.LOW)
+            .withValidation(CockroachDBConnectorConfig::validateKafkaSinkConfig)
+            .withDescription("JSON value for the CockroachDB kafka_sink_config changefeed option, which tunes "
+                    + "how the changefeed batches and flushes writes to the intermediate Kafka sink. "
+                    + "Example: {\"Flush\": {\"Messages\": 100, \"Frequency\": \"500ms\"}}. "
+                    + "Only used when cockroachdb.changefeed.sink.type is kafka.");
+
+    private static int validateKafkaSinkConfig(Configuration config, Field field, Field.ValidationOutput problems) {
+        String value = config.getString(field);
+        if (value == null || value.trim().isEmpty()) {
+            return 0;
+        }
+        try {
+            ChangefeedJsonMapper.create().readTree(value);
+            return 0;
+        }
+        catch (Exception e) {
+            problems.accept(field, value, "must be a valid JSON document");
+            return 1;
+        }
+    }
 
     public static final Field CHANGEFEED_SINK_TLS_CA_CERT_FILE = Field.create("cockroachdb.changefeed.sink.tls.ca.cert.file")
             .withDisplayName("Changefeed sink CA certificate file")
@@ -1095,6 +1123,10 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public String getChangefeedSinkOptions() {
         return config.getString(CHANGEFEED_SINK_OPTIONS);
+    }
+
+    public String getChangefeedKafkaSinkConfig() {
+        return config.getString(CHANGEFEED_KAFKA_SINK_CONFIG);
     }
 
     // Connection-related configuration getters
