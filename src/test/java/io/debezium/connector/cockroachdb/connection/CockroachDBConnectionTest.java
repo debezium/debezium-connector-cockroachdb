@@ -7,6 +7,7 @@ package io.debezium.connector.cockroachdb.connection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -199,5 +200,38 @@ public class CockroachDBConnectionTest {
 
         assertThat(tcpKeepAliveConnection).isNotNull();
         assertThat(tcpKeepAliveConfig.isTcpKeepAlive()).isTrue();
+    }
+
+    @Test
+    public void shouldClassifyRetryableTransactionStatesAsTransient() {
+        // 40001 serialization_failure, 40P01 deadlock_detected, 40003 statement_completion_unknown
+        // (ambiguous result; safe to retry at connection establishment where nothing is in flight).
+        assertThat(CockroachDBConnection.isTransientError(new SQLException("retry", "40001"))).isTrue();
+        assertThat(CockroachDBConnection.isTransientError(new SQLException("deadlock", "40P01"))).isTrue();
+        assertThat(CockroachDBConnection.isTransientError(new SQLException("ambiguous", "40003"))).isTrue();
+    }
+
+    @Test
+    public void shouldClassifyWholeConnectionExceptionClassAsTransient() {
+        // pgjdbc raises 08001 for both connection-refused and unknown-host (debezium/dbz#2285),
+        // so the whole 08 class must be transient, not an enumerated subset.
+        for (String state : new String[]{ "08000", "08001", "08003", "08004", "08006", "08007", "08P01", "08S01" }) {
+            assertThat(CockroachDBConnection.isTransientError(new SQLException("conn", state)))
+                    .as("SQL state %s", state)
+                    .isTrue();
+        }
+    }
+
+    @Test
+    public void shouldClassifyNodeShutdownAsTransient() {
+        // 57P01 admin_shutdown is raised while a CockroachDB node drains during a rolling restart.
+        assertThat(CockroachDBConnection.isTransientError(new SQLException("draining", "57P01"))).isTrue();
+    }
+
+    @Test
+    public void shouldNotClassifyNonTransientStatesAsTransient() {
+        assertThat(CockroachDBConnection.isTransientError(new SQLException("syntax", "42601"))).isFalse();
+        assertThat(CockroachDBConnection.isTransientError(new SQLException("auth", "28P01"))).isFalse();
+        assertThat(CockroachDBConnection.isTransientError(new SQLException("no state", (String) null))).isFalse();
     }
 }

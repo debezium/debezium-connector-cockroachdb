@@ -30,11 +30,10 @@ public class CockroachDBConnection extends JdbcConnection {
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBConnection.class);
 
     private static final String SERIALIZATION_FAILURE = "40001";
+    private static final String STATEMENT_COMPLETION_UNKNOWN = "40003";
     private static final String DEADLOCK_DETECTED = "40P01";
-    private static final String CONNECTION_FAILURE = "08000";
-    private static final String CONNECTION_DOES_NOT_EXIST = "08003";
-    private static final String CONNECTION_FAILURE_DURING_EXECUTION = "08006";
-    private static final String COMMUNICATION_LINK_FAILURE = "08S01";
+    private static final String ADMIN_SHUTDOWN = "57P01";
+    private static final String CONNECTION_EXCEPTION_CLASS_PREFIX = "08";
 
     private final CockroachDBConnectorConfig connectorConfig;
 
@@ -205,16 +204,27 @@ public class CockroachDBConnection extends JdbcConnection {
         return identifier;
     }
 
-    private static boolean isTransientError(SQLException e) {
+    /**
+     * Classifies a connect-time failure as transient (retried up to
+     * {@code connection.max.retries} times) or permanent.
+     *
+     * <p>The whole SQL state class 08 (connection exception) is transient by prefix:
+     * pgjdbc raises 08001 for both connection-refused and unknown-host failures, so
+     * enumerating individual members misses the most common transient connect error
+     * (debezium/dbz#2285). 57P01 (admin_shutdown) is raised while a node drains during a
+     * rolling restart. 40001, 40P01, and 40003 are CockroachDB's retryable transaction
+     * states; 40003 (statement_completion_unknown) is safe to retry here because nothing
+     * is in flight at connection establishment.</p>
+     */
+    static boolean isTransientError(SQLException e) {
         String sqlState = e.getSQLState();
         if (sqlState == null) {
             return false;
         }
         return SERIALIZATION_FAILURE.equals(sqlState)
+                || STATEMENT_COMPLETION_UNKNOWN.equals(sqlState)
                 || DEADLOCK_DETECTED.equals(sqlState)
-                || CONNECTION_FAILURE.equals(sqlState)
-                || CONNECTION_DOES_NOT_EXIST.equals(sqlState)
-                || CONNECTION_FAILURE_DURING_EXECUTION.equals(sqlState)
-                || COMMUNICATION_LINK_FAILURE.equals(sqlState);
+                || ADMIN_SHUTDOWN.equals(sqlState)
+                || sqlState.startsWith(CONNECTION_EXCEPTION_CLASS_PREFIX);
     }
 }
