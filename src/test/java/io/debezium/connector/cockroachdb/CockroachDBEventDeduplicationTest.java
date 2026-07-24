@@ -47,8 +47,8 @@ public class CockroachDBEventDeduplicationTest {
         JsonNode publicEvent = event("c", "1749572623476416439", "orders");
         JsonNode inventoryEvent = event("c", "1749572623476416439", "orders");
 
-        String publicId = CockroachDBStreamingChangeEventSource.createEventId(publicOrders, publicEvent);
-        String inventoryId = CockroachDBStreamingChangeEventSource.createEventId(inventoryOrders, inventoryEvent);
+        String publicId = CockroachDBStreamingChangeEventSource.createEventId(publicOrders, publicEvent, "[1]");
+        String inventoryId = CockroachDBStreamingChangeEventSource.createEventId(inventoryOrders, inventoryEvent, "[1]");
 
         assertThat(publicId).isNotNull();
         assertThat(inventoryId).isNotNull();
@@ -56,22 +56,39 @@ public class CockroachDBEventDeduplicationTest {
     }
 
     @Test
-    public void shouldProduceStableIdForSameTableOpAndTimestamp() throws Exception {
+    public void shouldDistinguishDifferentRowsSharingOpAndTimestamp() throws Exception {
+        // Two rows changed in the same transaction share op and ts_ns. Reproduced live with the
+        // bank workload (debezium/dbz#2283): a transfer updates two accounts in one transaction,
+        // and the second event was dropped as a duplicate, losing the row change.
+        TableId bank = new TableId("bank", "public", "bank");
+        JsonNode firstRow = event("u", "1784905282711794397", "bank");
+        JsonNode secondRow = event("u", "1784905282711794397", "bank");
+
+        String firstId = CockroachDBStreamingChangeEventSource.createEventId(bank, firstRow, "[871]");
+        String secondId = CockroachDBStreamingChangeEventSource.createEventId(bank, secondRow, "[883]");
+
+        assertThat(firstId).isNotNull();
+        assertThat(secondId).isNotNull();
+        assertThat(firstId).isNotEqualTo(secondId);
+    }
+
+    @Test
+    public void shouldProduceStableIdForSameTableOpTimestampAndKey() throws Exception {
         TableId orders = new TableId("demodb", "public", "orders");
         JsonNode first = event("u", "100", "orders");
         JsonNode second = event("u", "100", "orders");
 
-        assertThat(CockroachDBStreamingChangeEventSource.createEventId(orders, first))
-                .isEqualTo(CockroachDBStreamingChangeEventSource.createEventId(orders, second));
+        assertThat(CockroachDBStreamingChangeEventSource.createEventId(orders, first, "[1]"))
+                .isEqualTo(CockroachDBStreamingChangeEventSource.createEventId(orders, second, "[1]"));
     }
 
     @Test
     public void shouldDistinguishByOperationAndTimestamp() throws Exception {
         TableId orders = new TableId("demodb", "public", "orders");
 
-        String create = CockroachDBStreamingChangeEventSource.createEventId(orders, event("c", "100", "orders"));
-        String update = CockroachDBStreamingChangeEventSource.createEventId(orders, event("u", "100", "orders"));
-        String laterUpdate = CockroachDBStreamingChangeEventSource.createEventId(orders, event("u", "200", "orders"));
+        String create = CockroachDBStreamingChangeEventSource.createEventId(orders, event("c", "100", "orders"), "[1]");
+        String update = CockroachDBStreamingChangeEventSource.createEventId(orders, event("u", "100", "orders"), "[1]");
+        String laterUpdate = CockroachDBStreamingChangeEventSource.createEventId(orders, event("u", "200", "orders"), "[1]");
 
         assertThat(create).isNotEqualTo(update);
         assertThat(update).isNotEqualTo(laterUpdate);
@@ -79,13 +96,24 @@ public class CockroachDBEventDeduplicationTest {
 
     @Test
     public void shouldNotDependOnSourceBlockBeingPresent() throws Exception {
-        // No source block at all: the key still resolves from the TableId, op and ts_ns.
+        // No source block at all: the key still resolves from the TableId, op, ts_ns and row key.
         TableId orders = new TableId("demodb", "public", "orders");
         JsonNode noSource = MAPPER.readTree("{\"op\": \"c\", \"ts_ns\": 100, \"after\": {\"id\": 1}}");
 
-        String id = CockroachDBStreamingChangeEventSource.createEventId(orders, noSource);
+        String id = CockroachDBStreamingChangeEventSource.createEventId(orders, noSource, "[1]");
         assertThat(id).isNotNull();
         assertThat(id).contains(orders.identifier());
+    }
+
+    @Test
+    public void shouldTolerateMissingMessageKey() throws Exception {
+        // A missing key must not fail id creation; dedup degrades to table, op and ts_ns.
+        TableId orders = new TableId("demodb", "public", "orders");
+        JsonNode event = event("c", "100", "orders");
+
+        assertThat(CockroachDBStreamingChangeEventSource.createEventId(orders, event, null))
+                .isEqualTo(CockroachDBStreamingChangeEventSource.createEventId(orders, event, null));
+        assertThat(CockroachDBStreamingChangeEventSource.createEventId(orders, event, null)).isNotNull();
     }
 
     @Test
@@ -95,8 +123,8 @@ public class CockroachDBEventDeduplicationTest {
         JsonNode nested = MAPPER.readTree("{\"payload\": {\"op\": \"c\", \"ts_ns\": 100, \"after\": {\"id\": 1}}}");
         JsonNode flat = MAPPER.readTree("{\"op\": \"c\", \"ts_ns\": 100, \"after\": {\"id\": 1}}");
 
-        assertThat(CockroachDBStreamingChangeEventSource.createEventId(orders, nested))
-                .isEqualTo(CockroachDBStreamingChangeEventSource.createEventId(orders, flat));
+        assertThat(CockroachDBStreamingChangeEventSource.createEventId(orders, nested, "[1]"))
+                .isEqualTo(CockroachDBStreamingChangeEventSource.createEventId(orders, flat, "[1]"));
     }
 
     @Test
