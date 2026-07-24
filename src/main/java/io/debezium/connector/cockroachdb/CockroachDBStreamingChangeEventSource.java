@@ -988,6 +988,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         if (sinkOptions != null && !sinkOptions.trim().isEmpty()) {
             options.add(sanitizeLiteral(sinkOptions));
         }
+        // kafka_sink_config takes a JSON document as a quoted SQL literal; the value is
+        // validated as JSON at configuration time and internal single quotes are doubled here.
+        String kafkaSinkConfig = config.getChangefeedKafkaSinkConfig();
+        if (kafkaSinkConfig != null && !kafkaSinkConfig.trim().isEmpty()) {
+            options.add("kafka_sink_config='" + sanitizeLiteral(kafkaSinkConfig) + "'");
+        }
         return String.join(", ", options);
     }
 

@@ -122,6 +122,7 @@ Example connector configuration:
 | `cockroachdb.changefeed.sink.topic.prefix`   | ""       | Prefix for intermediate topic names, used verbatim: topics are `<prefix><database>.<schema>.<table>`. Include your own separator (e.g. `crdb.`). If empty, defaults to `<topic.prefix>.` |
 | `cockroachdb.changefeed.max.tables.per.changefeed` | 0  | Max tables per changefeed. `0` = all in one. Set positive to split large table sets across multiple changefeeds and avoid per-table coupling |
 | `cockroachdb.changefeed.sink.options`        | ""       | Additional sink options in key=value format   |
+| `cockroachdb.changefeed.kafka.sink.config`   | -        | JSON for CockroachDB's `kafka_sink_config` changefeed option, e.g. `{"Flush": {"Messages": 100, "Frequency": "500ms"}}`. Tunes changefeed-to-Kafka flush batching (delivery latency). Kafka mode only |
 | `cockroachdb.changefeed.resolved.interval`   | 10s      | Resolved timestamp interval                   |
 | `cockroachdb.changefeed.include.updated`     | false    | Include updated column information            |
 | `cockroachdb.changefeed.include.diff`        | false    | Include before/after diff information         |
