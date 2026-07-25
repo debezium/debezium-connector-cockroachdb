@@ -55,3 +55,9 @@ jobs:
           -Dmaven.wagon.httpconnectionManager.ttlSeconds=120
       - name: Maven build CockroachDB
         run: ./cockroachdb/mvnw clean install -f cockroachdb/pom.xml -Passembly -Dformat.formatter.goal=validate -Dformat.imports.goal=check -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false -Dmaven.wagon.httpconnectionManager.ttlSeconds=120 -DfailFlakyTests=false -Ddebezium.test.records.waittime=5
+      - name: Upload JaCoCo coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: jacoco-coverage-report
+          path: cockroachdb/target/site/jacoco/
+          retention-days: 90
