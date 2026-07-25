@@ -28,6 +28,9 @@
 
         <cockroachdb.version>v25.4.13</cockroachdb.version>
         <version.jmh>1.37</version.jmh>
+        <version.jacoco>0.8.12</version.jacoco>
+        <!-- Overridden by the JaCoCo agent at runtime; empty so plain builds are unaffected. -->
+        <argLine></argLine>
     </properties>
 
     <dependencyManagement>
@@ -320,10 +323,41 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
+                    <!-- Preserve the parent argLine and append the agent argLine (JaCoCo and
+                         similar tooling); without the passthrough the unit-test JVM silently
+                         runs without the agent and coverage reports only integration data. -->
+                    <argLine>-Djava.awt.headless=true ${debug.argline} ${modules.argline} ${mockito.argLine} @{argLine}</argLine>
                     <systemPropertyVariables>
                         <cockroachdb.version>${cockroachdb.version}</cockroachdb.version>
                     </systemPropertyVariables>
                 </configuration>
+            </plugin>
+            <!-- Informational code coverage: run with ./mvnw verify jacoco:report and read
+                 target/site/jacoco/index.html. No enforcement threshold. -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${version.jacoco}</version>
+                <configuration>
+                    <excludes>
+                        <exclude>io/debezium/connector/cockroachdb/benchmark/**</exclude>
+                    </excludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
             <!-- Failsafe for integration test lifecycle -->
             <plugin>
@@ -331,7 +365,7 @@
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <configuration>
                     <skipTests>${skipITs}</skipTests>
-                    <argLine>${argLine}</argLine>
+                    <argLine>@{argLine}</argLine>
                     <systemPropertyVariables>
                         <cockroachdb.version>${cockroachdb.version}</cockroachdb.version>
                         <cockroachdb.host>localhost</cockroachdb.host>
