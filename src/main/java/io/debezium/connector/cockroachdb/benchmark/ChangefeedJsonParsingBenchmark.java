@@ -27,15 +27,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.debezium.connector.cockroachdb.CockroachDBChangeRecordEmitter;
-import io.debezium.connector.cockroachdb.serialization.ChangefeedSchemaParser;
 import io.debezium.relational.Column;
 import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
 
 /**
- * JMH benchmark for CockroachDB enriched changefeed JSON parsing.
- * Measures both the legacy ChangefeedSchemaParser path and the real production hot path
- * (JSON deserialization + column value extraction via CockroachDBChangeRecordEmitter).
+ * JMH benchmark for CockroachDB enriched changefeed JSON parsing: the production hot path
+ * of JSON deserialization plus column value extraction via CockroachDBChangeRecordEmitter.
  *
  * @author Virag Tripathi
  */
@@ -53,7 +51,6 @@ public class ChangefeedJsonParsingBenchmark {
     private String payloadSize;
 
     private ObjectMapper mapper;
-    private String[] keyJsons;
     private String[] valueJsons;
     private JsonNode[] parsedAfterNodes;
     private Table smallTable;
@@ -63,12 +60,10 @@ public class ChangefeedJsonParsingBenchmark {
     @Setup(Level.Trial)
     public void setup() throws Exception {
         mapper = new ObjectMapper();
-        keyJsons = new String[BATCH_SIZE];
         valueJsons = new String[BATCH_SIZE];
         parsedAfterNodes = new JsonNode[BATCH_SIZE];
 
         for (int i = 0; i < BATCH_SIZE; i++) {
-            keyJsons[i] = generateKeyJson(i);
             valueJsons[i] = generateValueJson(i, payloadSize);
             JsonNode root = mapper.readTree(valueJsons[i]);
             parsedAfterNodes[i] = root.path("after");
@@ -99,26 +94,9 @@ public class ChangefeedJsonParsingBenchmark {
 
     @Benchmark
     @OperationsPerInvocation(BATCH_SIZE)
-    public void parseEnrichedChangefeedEvent(Blackhole bh) throws Exception {
-        for (int i = 0; i < BATCH_SIZE; i++) {
-            bh.consume(ChangefeedSchemaParser.parse(keyJsons[i], valueJsons[i]));
-        }
-    }
-
-    @Benchmark
-    @OperationsPerInvocation(BATCH_SIZE)
     public void jsonDeserializationOnly(Blackhole bh) throws Exception {
         for (int i = 0; i < BATCH_SIZE; i++) {
             bh.consume(mapper.readTree(valueJsons[i]));
-        }
-    }
-
-    @Benchmark
-    @OperationsPerInvocation(BATCH_SIZE)
-    public void resolvedTimestampParsing(Blackhole bh) throws Exception {
-        String resolved = "{\"resolved\":\"1709312345678901234.0000000000\"}";
-        for (int i = 0; i < BATCH_SIZE; i++) {
-            bh.consume(ChangefeedSchemaParser.parse(null, resolved));
         }
     }
 
@@ -147,10 +125,6 @@ public class ChangefeedJsonParsingBenchmark {
         for (int i = 0; i < BATCH_SIZE; i++) {
             bh.consume(CockroachDBChangeRecordEmitter.extractColumnValues(parsedAfterNodes[i], columns));
         }
-    }
-
-    private static String generateKeyJson(int id) {
-        return "[" + id + "]";
     }
 
     private static String generateValueJson(int id, String size) {
