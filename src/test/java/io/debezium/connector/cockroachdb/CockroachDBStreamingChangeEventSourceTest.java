@@ -7,23 +7,38 @@ package io.debezium.connector.cockroachdb;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.List;
+
 import org.junit.jupiter.api.Test;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import io.debezium.config.Configuration;
 import io.debezium.relational.TableId;
 
 /**
- * Unit tests for the deduplication event identifier.
+ * Unit tests for the statically testable pieces of {@link CockroachDBStreamingChangeEventSource}:
+ * the deduplication event identifier, changefeed reuse detection, and the generated
+ * {@code CREATE CHANGEFEED} statement.
  *
- * <p>The dedup key must be derived from the schema-qualified {@link TableId} (the topic the
- * event arrived on), not from the unqualified {@code source.table_name} field in the message.
- * Otherwise two same-named tables in different schemas can collide and have one event dropped.
+ * <p>The dedup identifier must be derived from the schema-qualified {@link TableId}, the
+ * operation, the timestamp, and the changefeed message key; dropping any component silently
+ * discards events for same-named tables across schemas or for different rows that share a
+ * timestamp (debezium/dbz#2283).</p>
+ *
+ * <p>The {@code cockroachdb.changefeed.kafka.sink.config} property passes CockroachDB's
+ * {@code kafka_sink_config} changefeed option through as a single-quoted JSON literal; the
+ * general sink options passthrough cannot carry it because it escapes the required quotes
+ * (debezium/dbz#2278).</p>
  *
  * @author Virag Tripathi
  */
-public class CockroachDBEventDeduplicationTest {
+public class CockroachDBStreamingChangeEventSourceTest {
+
+    // ---------------------------------------------------------------------------------------
+    // Dedup event identifier and changefeed reuse detection
+    // ---------------------------------------------------------------------------------------
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -143,5 +158,66 @@ public class CockroachDBEventDeduplicationTest {
         assertThat(CockroachDBStreamingChangeEventSource.changefeedUsesEnrichedEnvelope(
                 "CREATE CHANGEFEED ... WITH OPTIONS (full_table_name)")).isFalse();
         assertThat(CockroachDBStreamingChangeEventSource.changefeedUsesEnrichedEnvelope(null)).isFalse();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // kafka_sink_config emission in the generated CREATE CHANGEFEED statement
+    // ---------------------------------------------------------------------------------------
+
+    private static final String FLUSH_CONFIG = "{\"Flush\": {\"Messages\": 100, \"Frequency\": \"500ms\"}}";
+
+    private CockroachDBStreamingChangeEventSource source(Configuration config) {
+        return new CockroachDBStreamingChangeEventSource(new CockroachDBConnectorConfig(config), null, null, null, null);
+    }
+
+    private Configuration.Builder baseConfig() {
+        return Configuration.create()
+                .with("database.hostname", "localhost")
+                .with("database.port", "26257")
+                .with("database.user", "root")
+                .with("database.dbname", "testdb")
+                .with("database.server.name", "test")
+                .with("topic.prefix", "crdb")
+                .with("cockroachdb.changefeed.sink.type", "kafka")
+                .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
+    }
+
+    @Test
+    void appendsKafkaSinkConfigAsQuotedLiteral() {
+        Configuration config = baseConfig()
+                .with("cockroachdb.changefeed.kafka.sink.config", FLUSH_CONFIG)
+                .build();
+        String query = source(config).buildSinkChangefeedQuery(
+                List.of(new TableId("testdb", "public", "orders")), null, false);
+        assertThat(query).contains("kafka_sink_config='" + FLUSH_CONFIG + "'");
+    }
+
+    @Test
+    void omitsKafkaSinkConfigWhenUnset() {
+        String query = source(baseConfig().build()).buildSinkChangefeedQuery(
+                List.of(new TableId("testdb", "public", "orders")), null, false);
+        assertThat(query).doesNotContain("kafka_sink_config");
+    }
+
+    @Test
+    void escapesSingleQuotesInsideJsonValues() {
+        Configuration config = baseConfig()
+                .with("cockroachdb.changefeed.kafka.sink.config", "{\"Flush\": {\"Frequency\": \"1s\"}, \"note\": \"o'brien\"}")
+                .build();
+        String query = source(config).buildSinkChangefeedQuery(
+                List.of(new TableId("testdb", "public", "orders")), null, false);
+        assertThat(query).contains("o''brien");
+        assertThat(query).doesNotContain("o'brien'}");
+    }
+
+    @Test
+    void rejectsValuesThatAreNotJson() {
+        Configuration config = baseConfig()
+                .with("cockroachdb.changefeed.kafka.sink.config", "not json at all")
+                .build();
+        CockroachDBConnectorConfig connectorConfig = new CockroachDBConnectorConfig(config);
+        assertThat(connectorConfig.validateAndRecord(
+                List.of(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_SINK_CONFIG), s -> {
+                })).isFalse();
     }
 }

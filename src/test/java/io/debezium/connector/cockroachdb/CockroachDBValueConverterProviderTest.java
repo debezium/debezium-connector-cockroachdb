@@ -7,22 +7,41 @@ package io.debezium.connector.cockroachdb;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.sql.Types;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
+import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.json.JsonConverter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import io.debezium.config.CommonConnectorConfig;
+import io.debezium.config.Configuration;
 import io.debezium.data.vector.DoubleVector;
 import io.debezium.relational.Column;
+import io.debezium.relational.CustomConverterRegistry;
+import io.debezium.relational.Table;
+import io.debezium.relational.TableId;
+import io.debezium.relational.TableSchema;
+import io.debezium.relational.TableSchemaBuilder;
 import io.debezium.relational.ValueConverter;
+import io.debezium.spi.topic.TopicNamingStrategy;
 
 /**
  * Unit tests for {@link CockroachDBValueConverterProvider} verifying schema mapping
  * and value conversion for CockroachDB types, including pgvector-compatible
  * vector types.
+ *
+ * <p>Also carries the required-field regression tests (debezium/dbz#2253): changefeed events
+ * can predate the registered table schema, so every value field the provider produces must be
+ * optional regardless of column nullability, or {@code JsonConverter} fails with "Conversion
+ * error: null value for field that is required and has no default value".</p>
  *
  * @author Virag Tripathi
  */
@@ -322,5 +341,86 @@ public class CockroachDBValueConverterProviderTest {
                 .type(typeName)
                 .jdbcType(java.sql.Types.OTHER)
                 .create();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Required-field regression (debezium/dbz#2253): NOT NULL JSONB and VECTOR columns must
+    // still map to optional value fields so backlog events without those columns convert.
+    // ---------------------------------------------------------------------------------------
+
+    @Test
+    void notNullJsonbAndVectorFieldsAreOptional() {
+        TableSchema tableSchema = schemaFor(tableWithNotNullJsonbAndVector());
+        assertThat(tableSchema.valueSchema().field("doc").schema().isOptional()).isTrue();
+        assertThat(tableSchema.valueSchema().field("emb").schema().isOptional()).isTrue();
+    }
+
+    @Test
+    void eventLackingNotNullJsonbAndVectorValuesConvertsWithSchemasEnabled() throws Exception {
+        TableSchema tableSchema = schemaFor(tableWithNotNullJsonbAndVector());
+
+        // An event written before doc and emb existed carries only id; the emitter supplies null
+        // for the absent columns.
+        Struct value = tableSchema.valueFromColumnData(new Object[]{ 42L, null, null });
+
+        try (JsonConverter jsonConverter = new JsonConverter()) {
+            Map<String, Object> converterConfig = new HashMap<>();
+            converterConfig.put("schemas.enable", "true");
+            converterConfig.put("converter.type", "value");
+            jsonConverter.configure(converterConfig);
+            byte[] serialized = jsonConverter.fromConnectData("test.public.diag", tableSchema.valueSchema(), value);
+            assertThat(serialized).isNotEmpty();
+        }
+    }
+
+    private Table tableWithNotNullJsonbAndVector() {
+        return Table.editor()
+                .tableId(new TableId("defaultdb", "public", "diag"))
+                .addColumn(Column.editor()
+                        .name("id")
+                        .type("INT8")
+                        .jdbcType(Types.BIGINT)
+                        .optional(false)
+                        .create())
+                .addColumn(Column.editor()
+                        .name("doc")
+                        .type("JSONB")
+                        .jdbcType(Types.OTHER)
+                        .optional(false)
+                        .create())
+                .addColumn(Column.editor()
+                        .name("emb")
+                        .type("VECTOR")
+                        .jdbcType(Types.OTHER)
+                        .optional(false)
+                        .create())
+                .setPrimaryKeyNames("id")
+                .create();
+    }
+
+    @SuppressWarnings("unchecked")
+    private TableSchema schemaFor(Table table) {
+        Configuration config = Configuration.create()
+                .with("database.hostname", "localhost")
+                .with("database.port", "26257")
+                .with("database.user", "root")
+                .with("database.password", "")
+                .with("database.dbname", "defaultdb")
+                .with("topic.prefix", "test")
+                .build();
+        CockroachDBConnectorConfig connectorConfig = new CockroachDBConnectorConfig(config);
+        TopicNamingStrategy<TableId> topicNamingStrategy = connectorConfig.getTopicNamingStrategy(CommonConnectorConfig.TOPIC_NAMING_STRATEGY);
+        TableSchemaBuilder tableSchemaBuilder = new TableSchemaBuilder(
+                new CockroachDBValueConverterProvider(),
+                new CockroachDBDefaultValueConverter(),
+                connectorConfig.schemaNameAdjuster(),
+                new CustomConverterRegistry(Collections.emptyList()),
+                connectorConfig.getSourceInfoStructMaker().schema(),
+                connectorConfig.getFieldNamer(),
+                false,
+                connectorConfig.getEventConvertingFailureHandlingMode());
+        TableSchema tableSchema = tableSchemaBuilder.create(topicNamingStrategy, table, null, null, null);
+        assertThat(tableSchema.valueSchema().type()).isEqualTo(Schema.Type.STRUCT);
+        return tableSchema;
     }
 }
