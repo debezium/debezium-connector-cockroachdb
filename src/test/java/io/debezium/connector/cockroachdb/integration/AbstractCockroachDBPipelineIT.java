@@ -17,16 +17,14 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 
 import org.apache.kafka.common.metrics.PluginMetrics;
-import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.json.JsonConverter;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTaskContext;
 import org.apache.kafka.connect.storage.OffsetStorageReader;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeAll;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.CockroachContainer;
@@ -39,139 +37,91 @@ import org.testcontainers.utility.DockerImageName;
 import io.debezium.connector.cockroachdb.CockroachDBConnectorTask;
 
 /**
- * Integration test for DELETE events.
+ * Base class for pipeline integration tests that run the connector task in process against a
+ * CockroachDB and Kafka Testcontainers stack.
  *
- * <p>Changefeeds created without the {@code diff} option send deletes with {@code after: null}
- * and no {@code before}, so the record key must be derived from the changefeed message key.
- * Without that, delete records carry a null key against the required key schema and key
- * conversion fails with "Conversion error: null value for field that is required and has no
- * default value", stopping the task on every delete.</p>
+ * <p>The containers are started once per subclass and shared by every scenario in it, so
+ * scenario classes carry only their own schema setup and assertions instead of a private copy
+ * of the stack and the task plumbing. Scenarios isolate themselves by using distinct database
+ * names and topic prefixes. The stack is released when the class finishes so later test
+ * classes do not compete with it for container runtime resources.</p>
  *
  * @author Virag Tripathi
  */
 @Testcontainers
-public class CockroachDBDeleteEventIT {
+public abstract class AbstractCockroachDBPipelineIT {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBDeleteEventIT.class);
+    protected static final Logger LOGGER = LoggerFactory.getLogger(AbstractCockroachDBPipelineIT.class);
 
     private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.13");
-    private static final String DATABASE_NAME = "delete_testdb";
-    private static final String TABLE_NAME = "delete_events";
 
     private static final Network NETWORK = Network.newNetwork();
 
     @Container
-    private static final KafkaContainer kafka = new KafkaContainer(
+    protected static final KafkaContainer kafka = new KafkaContainer(
             DockerImageName.parse("confluentinc/cp-kafka:7.4.0"))
             .withNetwork(NETWORK)
             .withNetworkAliases("kafka");
 
     @Container
-    private static final CockroachContainer cockroachdb = new CockroachContainer(
+    protected static final CockroachContainer cockroachdb = new CockroachContainer(
             DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 
-    private Connection connection;
-    private CockroachDBConnectorTask task;
-
-    @BeforeEach
-    public void setUp() throws Exception {
-        kafka.start();
-        cockroachdb.start();
-
-        String defaultJdbcUrl = cockroachdb.getJdbcUrl().replace("/postgres", "/defaultdb");
-        try (Connection defaultConn = DriverManager.getConnection(
-                defaultJdbcUrl, cockroachdb.getUsername(), cockroachdb.getPassword())) {
-            try (Statement stmt = defaultConn.createStatement()) {
-                stmt.execute("CREATE DATABASE IF NOT EXISTS " + DATABASE_NAME);
-            }
-        }
-
-        String testJdbcUrl = cockroachdb.getJdbcUrl().replace("/postgres", "/" + DATABASE_NAME);
-        connection = DriverManager.getConnection(testJdbcUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
-
-        try (Statement stmt = connection.createStatement()) {
+    @BeforeAll
+    public static void enableRangefeeds() throws Exception {
+        try (Connection conn = DriverManager.getConnection(
+                cockroachdb.getJdbcUrl().replace("/postgres", "/defaultdb"),
+                cockroachdb.getUsername(), cockroachdb.getPassword());
+                Statement stmt = conn.createStatement()) {
             stmt.execute("SET CLUSTER SETTING kv.rangefeed.enabled = true");
-            stmt.execute("CREATE TABLE IF NOT EXISTS " + TABLE_NAME + " ("
-                    + "id INT8 PRIMARY KEY, "
-                    + "name STRING NOT NULL"
-                    + ")");
         }
     }
+
+    protected CockroachDBConnectorTask task;
 
     @AfterEach
-    public void tearDown() throws Exception {
-        if (task != null) {
-            try {
-                task.stop();
-            }
-            catch (Exception e) {
-                LOGGER.warn("Error stopping task: {}", e.getMessage());
-            }
-        }
-        if (connection != null && !connection.isClosed()) {
-            connection.close();
-        }
+    public void stopTaskAfterTest() {
+        stopTask();
     }
 
-    @Test
-    public void shouldEmitDeleteEventWithKeyFromMessageKey() throws Exception {
-        try (Statement stmt = connection.createStatement()) {
-            stmt.execute("INSERT INTO " + TABLE_NAME + " VALUES (42, 'to be deleted')");
+    /**
+     * Creates the database if it does not exist and returns a connection to it.
+     * The caller owns the connection.
+     */
+    protected Connection openDatabase(String databaseName) throws Exception {
+        try (Connection conn = DriverManager.getConnection(
+                cockroachdb.getJdbcUrl().replace("/postgres", "/defaultdb"),
+                cockroachdb.getUsername(), cockroachdb.getPassword());
+                Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE DATABASE IF NOT EXISTS " + databaseName);
         }
-
-        startTask();
-
-        List<SourceRecord> initial = pollForRecords(r -> true, 1, 45);
-        assertThat(initial).as("Should receive the inserted row").isNotEmpty();
-
-        try (Statement stmt = connection.createStatement()) {
-            stmt.execute("DELETE FROM " + TABLE_NAME + " WHERE id = 42");
-        }
-
-        List<SourceRecord> deletes = pollForRecords(this::isDelete, 1, 60);
-        assertThat(deletes).as("Should receive the delete event").isNotEmpty();
-
-        SourceRecord delete = deletes.get(0);
-        assertThat(delete.key()).as("Delete record must carry its primary key").isNotNull();
-        Struct key = (Struct) delete.key();
-        assertThat(key.getInt64("id")).isEqualTo(42L);
-
-        // The production failure point: key conversion with schemas enabled.
-        try (JsonConverter jsonConverter = new JsonConverter()) {
-            Map<String, Object> converterConfig = new HashMap<>();
-            converterConfig.put("schemas.enable", "true");
-            converterConfig.put("converter.type", "key");
-            jsonConverter.configure(converterConfig);
-            byte[] serializedKey = jsonConverter.fromConnectData(delete.topic(), delete.keySchema(), delete.key());
-            assertThat(serializedKey).isNotEmpty();
-        }
+        return DriverManager.getConnection(
+                cockroachdb.getJdbcUrl().replace("/postgres", "/" + databaseName),
+                cockroachdb.getUsername(), cockroachdb.getPassword());
     }
 
-    private boolean isDelete(SourceRecord record) {
-        if (record.value() == null) {
-            return false;
-        }
-        Struct value = (Struct) record.value();
-        return value.schema().field("op") != null && "d".equals(value.getString("op"));
-    }
-
-    private void startTask() throws Exception {
+    /**
+     * Builds the standard connector configuration every pipeline scenario uses. The scenario
+     * name doubles as the connector name, server name, and topic prefix, which keeps the
+     * intermediate topics of concurrently defined scenarios apart.
+     */
+    protected Map<String, String> baseConnectorConfig(String scenarioName, String databaseName, String tableIncludeList) {
         String hostBootstrap = kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", "");
 
         Map<String, String> config = new HashMap<>();
-        config.put("name", "delete-event-test");
+        config.put("name", scenarioName);
         config.put("connector.class", "io.debezium.connector.cockroachdb.CockroachDBConnector");
         config.put("database.hostname", cockroachdb.getHost());
         config.put("database.port", String.valueOf(cockroachdb.getMappedPort(26257)));
         config.put("database.user", cockroachdb.getUsername());
         config.put("database.password", cockroachdb.getPassword());
-        config.put("database.dbname", DATABASE_NAME);
+        config.put("database.dbname", databaseName);
         config.put("database.sslmode", "disable");
-        config.put("database.server.name", "delete-test");
-        config.put("topic.prefix", "delete-test");
-        config.put("table.include.list", "public." + TABLE_NAME);
+        config.put("database.server.name", scenarioName);
+        config.put("topic.prefix", scenarioName);
+        config.put("table.include.list", tableIncludeList);
         config.put("cockroachdb.changefeed.sink.type", "kafka");
         config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
         config.put("cockroachdb.changefeed.kafka.bootstrap.servers", hostBootstrap);
@@ -182,7 +132,13 @@ public class CockroachDBDeleteEventIT {
         config.put("snapshot.mode", "initial");
         config.put("heartbeat.interval.ms", "1000");
         config.put("offset.storage", "org.apache.kafka.connect.storage.MemoryOffsetBackingStore");
+        return config;
+    }
 
+    /**
+     * Starts the connector task on a daemon thread and asserts that startup succeeds.
+     */
+    protected void startTask(Map<String, String> config) throws Exception {
         task = new CockroachDBConnectorTask();
         task.initialize(createMockContext());
 
@@ -206,11 +162,23 @@ public class CockroachDBDeleteEventIT {
         assertThat(taskError.get()).as("Task should start without error").isNull();
     }
 
-    private interface RecordFilter {
-        boolean test(SourceRecord record);
+    protected void stopTask() {
+        if (task != null) {
+            try {
+                task.stop();
+            }
+            catch (Exception e) {
+                LOGGER.warn("Error stopping task: {}", e.getMessage());
+            }
+            task = null;
+        }
     }
 
-    private List<SourceRecord> pollForRecords(RecordFilter filter, int minimum, int attempts) throws Exception {
+    /**
+     * Polls the running task until at least {@code minimum} non-heartbeat records matching the
+     * filter arrive, or the attempts are exhausted. One attempt is roughly one second.
+     */
+    protected List<SourceRecord> pollForRecords(Predicate<SourceRecord> filter, int minimum, int attempts) throws Exception {
         List<SourceRecord> collected = new ArrayList<>();
         for (int i = 0; i < attempts; i++) {
             try {
@@ -234,7 +202,11 @@ public class CockroachDBDeleteEventIT {
         return collected;
     }
 
-    private SourceTaskContext createMockContext() {
+    protected List<SourceRecord> pollForRecords(int minimum, int attempts) throws Exception {
+        return pollForRecords(r -> true, minimum, attempts);
+    }
+
+    protected SourceTaskContext createMockContext() {
         return new SourceTaskContext() {
             @Override
             public Map<String, String> configs() {

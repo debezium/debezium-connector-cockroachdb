@@ -7,6 +7,7 @@ package io.debezium.connector.cockroachdb;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.sql.Types;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
@@ -14,12 +15,23 @@ import org.junit.jupiter.api.Test;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import io.debezium.config.Configuration;
+import io.debezium.connector.cockroachdb.serialization.ChangefeedJsonMapper;
+import io.debezium.data.Envelope;
 import io.debezium.relational.Column;
+import io.debezium.relational.Table;
+import io.debezium.relational.TableId;
+import io.debezium.util.Clock;
 
 /**
  * Unit tests for {@link CockroachDBChangeRecordEmitter#extractColumnValues(JsonNode, List)}, the
  * mapping from an enriched changefeed row to Java values aligned with the column schema types.
  * Temporal value/normalization rules are covered by {@link CockroachDBTemporalConversionsTest}.
+ *
+ * <p>Also carries the emitter-level regression tests: DECIMAL values must retain the exact
+ * source digits instead of being double-rounded (debezium/dbz#2256), and deletes without a
+ * before image must derive the record key from the changefeed message key so key conversion
+ * does not fail on the required key schema (debezium/dbz#2267).</p>
  *
  * @author Virag Tripathi
  */
@@ -65,5 +77,129 @@ public class CockroachDBChangeRecordEmitterTest {
 
         assertThat(values[0]).isNull();
         assertThat(values[1]).isNull();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // DECIMAL precision regression (debezium/dbz#2256): changefeed JSON carries DECIMAL values
+    // as JSON numbers with full precision; parsing them into a Java double silently rounds
+    // anything above roughly 15 to 17 significant digits. The payloads below are exactly what
+    // a CockroachDB v25.4 changefeed emits for DECIMAL(28,18), DECIMAL(16,6), and DECIMAL(14,4).
+    // ---------------------------------------------------------------------------------------
+
+    private static final String CHANGEFEED_AFTER = "{"
+            + "\"id\": 1, "
+            + "\"trade_dt_qty\": 9999999999.999999999000000000, "
+            + "\"cost_basis\": 9999999999.999999, "
+            + "\"seg_memo_qty\": 9999.9999"
+            + "}";
+
+    @Test
+    public void decimalValuesRetainSourcePrecision() throws Exception {
+        JsonNode after = ChangefeedJsonMapper.create().readTree(CHANGEFEED_AFTER);
+        List<Column> columns = List.of(
+                column("id", "INT8", Types.BIGINT),
+                column("trade_dt_qty", "DECIMAL", Types.NUMERIC),
+                column("cost_basis", "DECIMAL", Types.NUMERIC),
+                column("seg_memo_qty", "DECIMAL", Types.NUMERIC));
+
+        Object[] values = CockroachDBChangeRecordEmitter.extractColumnValues(after, columns);
+
+        assertThat(values[0]).isEqualTo(1L);
+        assertThat(values[1]).isEqualTo("9999999999.999999999000000000");
+        assertThat(values[2]).isEqualTo("9999999999.999999");
+        assertThat(values[3]).isEqualTo("9999.9999");
+    }
+
+    @Test
+    public void decAliasRetainsSourcePrecision() throws Exception {
+        JsonNode node = ChangefeedJsonMapper.create().readTree("{\"v\": 9999999999.999999999}");
+        Object[] values = CockroachDBChangeRecordEmitter.extractColumnValues(
+                node, List.of(column("v", "DEC", Types.NUMERIC)));
+        assertThat(values[0]).isEqualTo("9999999999.999999999");
+    }
+
+    @Test
+    public void decimalValuesAvoidScientificNotation() throws Exception {
+        JsonNode node = ChangefeedJsonMapper.create().readTree(
+                "{\"tiny\": 0.000000000000000001, \"large\": 12345678901234567890.123456789}");
+        Object[] values = CockroachDBChangeRecordEmitter.extractColumnValues(
+                node, List.of(
+                        column("tiny", "DECIMAL", Types.NUMERIC),
+                        column("large", "NUMERIC", Types.NUMERIC)));
+        assertThat(values[0]).isEqualTo("0.000000000000000001");
+        assertThat(values[1]).isEqualTo("12345678901234567890.123456789");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Delete key regression (debezium/dbz#2267): changefeeds created without the diff option
+    // send deletes with after: null and no before, so the old column values used to build the
+    // record key must fall back to the changefeed message key.
+    // ---------------------------------------------------------------------------------------
+
+    @Test
+    public void deleteWithoutBeforeImageDerivesOldValuesFromMessageKey() throws Exception {
+        Table table = table();
+        JsonNode keyNode = ChangefeedJsonMapper.create()
+                .readTree("{\"id\": \"eb646131-90f5-4788-a8f6-8698fb6431fd\"}");
+
+        CockroachDBChangeRecordEmitter emitter = emitter(table, keyNode);
+
+        Object[] oldValues = emitter.getOldColumnValues();
+        assertThat(oldValues).isNotNull();
+        assertThat(oldValues[0]).isEqualTo("eb646131-90f5-4788-a8f6-8698fb6431fd");
+        assertThat(oldValues[1]).isNull();
+    }
+
+    @Test
+    public void deleteWithoutBeforeImageDerivesOldValuesFromArrayMessageKey() throws Exception {
+        // Sinkless changefeeds deliver the key as a JSON array in primary key column order.
+        JsonNode keyNode = ChangefeedJsonMapper.create()
+                .readTree("[\"a0604d58-e0e8-419a-a2d7-1cb8c94ac4ee\"]");
+        CockroachDBChangeRecordEmitter emitter = emitter(table(), keyNode);
+
+        Object[] oldValues = emitter.getOldColumnValues();
+        assertThat(oldValues).isNotNull();
+        assertThat(oldValues[0]).isEqualTo("a0604d58-e0e8-419a-a2d7-1cb8c94ac4ee");
+        assertThat(oldValues[1]).isNull();
+    }
+
+    @Test
+    public void deleteWithoutBeforeImageAndWithoutMessageKeyStaysNull() {
+        CockroachDBChangeRecordEmitter emitter = emitter(table(), null);
+        assertThat(emitter.getOldColumnValues()).isNull();
+    }
+
+    private static Column column(String name, String typeName, int jdbcType) {
+        return Column.editor()
+                .name(name)
+                .type(typeName)
+                .jdbcType(jdbcType)
+                .optional(true)
+                .create();
+    }
+
+    private static Table table() {
+        return Table.editor()
+                .tableId(new TableId("demodb", "public", "orders"))
+                .addColumn(Column.editor().name("id").type("UUID").jdbcType(Types.OTHER).optional(false).create())
+                .addColumn(Column.editor().name("name").type("STRING").jdbcType(Types.VARCHAR).optional(true).create())
+                .setPrimaryKeyNames("id")
+                .create();
+    }
+
+    private static CockroachDBChangeRecordEmitter emitter(Table table, JsonNode keyNode) {
+        Configuration config = Configuration.create()
+                .with("database.hostname", "localhost")
+                .with("database.port", "26257")
+                .with("database.user", "root")
+                .with("database.password", "")
+                .with("database.dbname", "demodb")
+                .with("topic.prefix", "test")
+                .build();
+        CockroachDBConnectorConfig connectorConfig = new CockroachDBConnectorConfig(config);
+        CockroachDBOffsetContext offsetContext = new CockroachDBOffsetContext(connectorConfig);
+        return new CockroachDBChangeRecordEmitter(
+                new CockroachDBPartition("test"), offsetContext, Clock.system(),
+                connectorConfig, table, Envelope.Operation.DELETE, null, null, keyNode);
     }
 }
