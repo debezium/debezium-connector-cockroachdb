@@ -551,4 +551,25 @@ public class CockroachDBConnectorConfigTest {
             return new CockroachDBConnectorConfig(delegate.build());
         }
     }
+
+    @Test
+    public void shouldExposeEveryDeclaredFieldInConfigDef() throws Exception {
+        // Every Field constant declared on this connector's config class must be registered in
+        // the ConfigDef the connector reports to Kafka Connect; an unregistered field still
+        // works at runtime but is invisible to REST validation and configuration UIs
+        // (debezium/dbz#2303). Inherited core fields are excluded: core owns which of its
+        // fields the shared ConfigDefinition exposes, and peer connectors match that.
+        ConfigDef configDef = new CockroachDBConnector().config();
+        for (java.lang.reflect.Field member : CockroachDBConnectorConfig.class.getDeclaredFields()) {
+            if (member.getType() == io.debezium.config.Field.class
+                    && java.lang.reflect.Modifier.isPublic(member.getModifiers())
+                    && java.lang.reflect.Modifier.isStatic(member.getModifiers())) {
+                io.debezium.config.Field field = (io.debezium.config.Field) member.get(null);
+                assertThat(configDef.names())
+                        .as("Field constant %s (%s) must be registered in the ConfigDef",
+                                member.getName(), field.name())
+                        .contains(field.name());
+            }
+        }
+    }
 }

@@ -526,6 +526,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     CHANGEFEED_SINK_URI,
                     CHANGEFEED_SINK_TOPIC_PREFIX,
                     CHANGEFEED_SINK_OPTIONS,
+                    CHANGEFEED_KAFKA_SINK_CONFIG,
                     CHANGEFEED_KAFKA_CONSUMER_GROUP_PREFIX,
                     CHANGEFEED_KAFKA_POLL_TIMEOUT_MS,
                     CHANGEFEED_KAFKA_AUTO_OFFSET_RESET,
