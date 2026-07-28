@@ -202,4 +202,48 @@ public class CockroachDBChangeRecordEmitterTest {
                 new CockroachDBPartition("test"), offsetContext, Clock.system(),
                 connectorConfig, table, Envelope.Operation.DELETE, null, null, keyNode);
     }
+
+    // ---------------------------------------------------------------------------------------
+    // BYTES regression (debezium/dbz#2310): enriched changefeeds encode BYTES as the bytea
+    // hex literal ("\\x01ff", captured from v25.4.13). The extracted value must be the
+    // decoded bytes, or Connect rejects the String against the BYTES schema and the field
+    // is emitted as null.
+    // ---------------------------------------------------------------------------------------
+
+    @Test
+    public void bytesValuesDecodeFromChangefeedHexLiteral() throws Exception {
+        JsonNode node = new ObjectMapper().readTree(
+                "{\"taxlot_id\": \"\\\\xf925e84ec3444ce383785556b60dd048\", \"parent_id\": \"\\\\x01ff\", \"empty\": \"\\\\x\"}");
+        List<Column> columns = List.of(
+                column("taxlot_id", "BYTES", Types.BINARY),
+                column("parent_id", "BYTEA", Types.BINARY),
+                column("empty", "BYTES", Types.BINARY));
+
+        Object[] values = CockroachDBChangeRecordEmitter.extractColumnValues(node, columns);
+
+        assertThat(values[0]).isInstanceOf(byte[].class);
+        assertThat((byte[]) values[0]).containsExactly(
+                0xf9, 0x25, 0xe8, 0x4e, 0xc3, 0x44, 0x4c, 0xe3, 0x83, 0x78, 0x55, 0x56, 0xb6, 0x0d, 0xd0, 0x48);
+        assertThat((byte[]) values[1]).containsExactly(0x01, 0xff);
+        assertThat((byte[]) values[2]).isEmpty();
+    }
+
+    @Test
+    public void deleteKeyWithBytesPrimaryKeyDecodesToBytes() throws Exception {
+        Table table = Table.editor()
+                .tableId(new TableId("demodb", "public", "tax_cost_basis"))
+                .addColumn(Column.editor().name("taxlot_id").type("BYTES").jdbcType(Types.BINARY).optional(false).create())
+                .addColumn(Column.editor().name("note").type("STRING").jdbcType(Types.VARCHAR).optional(true).create())
+                .setPrimaryKeyNames("taxlot_id")
+                .create();
+        JsonNode keyNode = ChangefeedJsonMapper.create()
+                .readTree("{\"taxlot_id\": \"\\\\x01ff\"}");
+
+        CockroachDBChangeRecordEmitter emitter = emitter(table, keyNode);
+
+        Object[] oldValues = emitter.getOldColumnValues();
+        assertThat(oldValues).isNotNull();
+        assertThat(oldValues[0]).isInstanceOf(byte[].class);
+        assertThat((byte[]) oldValues[0]).containsExactly(0x01, 0xff);
+    }
 }
