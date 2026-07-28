@@ -5,8 +5,10 @@
  */
 package io.debezium.connector.cockroachdb;
 
+import java.nio.ByteBuffer;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
+import java.util.Base64;
 import java.util.Locale;
 
 import org.apache.kafka.connect.data.Field;
@@ -15,6 +17,7 @@ import org.apache.kafka.connect.data.SchemaBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.config.CommonConnectorConfig.BinaryHandlingMode;
 import io.debezium.data.Json;
 import io.debezium.data.vector.DoubleVector;
 import io.debezium.relational.Column;
@@ -42,6 +45,16 @@ import io.debezium.time.ZonedTimestamp;
 public class CockroachDBValueConverterProvider implements ValueConverterProvider {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBValueConverterProvider.class);
+
+    private final BinaryHandlingMode binaryMode;
+
+    public CockroachDBValueConverterProvider() {
+        this(BinaryHandlingMode.BYTES);
+    }
+
+    public CockroachDBValueConverterProvider(BinaryHandlingMode binaryMode) {
+        this.binaryMode = binaryMode == null ? BinaryHandlingMode.BYTES : binaryMode;
+    }
 
     @Override
     public SchemaBuilder schemaBuilder(Column column) {
@@ -100,11 +113,12 @@ public class CockroachDBValueConverterProvider implements ValueConverterProvider
             case "NAME":
                 return SchemaBuilder.string().optional();
 
-            // Binary
+            // Binary: the schema type follows binary.handling.mode, matching the other
+            // Debezium relational connectors (bytes, or a base64/hex string).
             case "BYTEA":
             case "BYTES":
             case "BLOB":
-                return SchemaBuilder.bytes().optional();
+                return binaryMode.getSchema().optional();
 
             // Date/time types -- schema names match the Debezium time logical types so downstream
             // consumers (and the JDBC sink) interpret them the same as other Debezium connectors.
@@ -290,6 +304,41 @@ public class CockroachDBValueConverterProvider implements ValueConverterProvider
                     }
                 };
 
+            // Binary types: accept decoded bytes from the emitter or the raw changefeed hex
+            // literal, and emit per binary.handling.mode.
+            case "BYTEA":
+            case "BYTES":
+            case "BLOB":
+                return value -> {
+                    if (value == null) {
+                        return null;
+                    }
+                    byte[] bytes;
+                    if (value instanceof byte[]) {
+                        bytes = (byte[]) value;
+                    }
+                    else if (value instanceof ByteBuffer) {
+                        bytes = ((ByteBuffer) value).array();
+                    }
+                    else {
+                        bytes = decodeBytesLiteral(value.toString());
+                        if (bytes == null) {
+                            return null;
+                        }
+                    }
+                    switch (binaryMode) {
+                        case BASE64:
+                            return Base64.getEncoder().encodeToString(bytes);
+                        case BASE64_URL_SAFE:
+                            return Base64.getUrlEncoder().encodeToString(bytes);
+                        case HEX:
+                            return toHex(bytes);
+                        case BYTES:
+                        default:
+                            return ByteBuffer.wrap(bytes);
+                    }
+                };
+
             // JSON types -- pass through as string
             case "JSON":
             case "JSONB":
@@ -298,5 +347,51 @@ public class CockroachDBValueConverterProvider implements ValueConverterProvider
             default:
                 return value -> value != null ? value.toString() : null;
         }
+    }
+
+    /**
+     * Decodes the bytea literal that CockroachDB changefeeds use for BYTES values
+     * ({@code \x} followed by hex digits). Returns null for values that do not parse,
+     * after logging them, so a malformed value degrades to a null field instead of
+     * failing the event.
+     */
+    public static byte[] decodeBytesLiteral(String text) {
+        if (text == null) {
+            return null;
+        }
+        if (text.startsWith("\\x") || text.startsWith("\\X")) {
+            String hex = text.substring(2);
+            if (hex.length() % 2 != 0) {
+                LOGGER.warn("Cannot decode bytes literal with odd hex length: {} characters", hex.length());
+                return null;
+            }
+            byte[] bytes = new byte[hex.length() / 2];
+            try {
+                for (int i = 0; i < bytes.length; i++) {
+                    bytes[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+                }
+            }
+            catch (NumberFormatException e) {
+                LOGGER.warn("Cannot decode bytes literal: {}", e.getMessage());
+                return null;
+            }
+            return bytes;
+        }
+        try {
+            // Fallback for base64-encoded payloads produced by non-enriched encoders.
+            return Base64.getDecoder().decode(text);
+        }
+        catch (IllegalArgumentException e) {
+            LOGGER.warn("Cannot decode bytes value as hex literal or base64: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private static String toHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
     }
 }

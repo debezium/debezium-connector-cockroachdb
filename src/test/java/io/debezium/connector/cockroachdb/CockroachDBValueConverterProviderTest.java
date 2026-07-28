@@ -423,4 +423,48 @@ public class CockroachDBValueConverterProviderTest {
         assertThat(tableSchema.valueSchema().type()).isEqualTo(Schema.Type.STRUCT);
         return tableSchema;
     }
+
+    // ---------------------------------------------------------------------------------------
+    // Binary handling (debezium/dbz#2310): BYTES columns honor binary.handling.mode in both
+    // the schema mapping and the value conversion. Input can be decoded bytes from the
+    // emitter or the raw changefeed hex literal.
+    // ---------------------------------------------------------------------------------------
+
+    @Test
+    void bytesSchemaAndConverterFollowBinaryHandlingMode() {
+        Column col = Column.editor().name("b").type("BYTES").jdbcType(Types.BINARY).optional(true).create();
+        byte[] raw = new byte[]{ 0x01, (byte) 0xff };
+
+        CockroachDBValueConverterProvider bytesMode = new CockroachDBValueConverterProvider(
+                io.debezium.config.CommonConnectorConfig.BinaryHandlingMode.BYTES);
+        assertThat(bytesMode.schemaBuilder(col).build().type()).isEqualTo(Schema.Type.BYTES);
+        Object asBytes = bytesMode.converter(col, field(col, bytesMode)).convert(raw);
+        assertThat(asBytes).isInstanceOf(java.nio.ByteBuffer.class);
+        assertThat(((java.nio.ByteBuffer) asBytes).array()).containsExactly(0x01, 0xff);
+
+        CockroachDBValueConverterProvider hexMode = new CockroachDBValueConverterProvider(
+                io.debezium.config.CommonConnectorConfig.BinaryHandlingMode.HEX);
+        assertThat(hexMode.schemaBuilder(col).build().type()).isEqualTo(Schema.Type.STRING);
+        assertThat(hexMode.converter(col, field(col, hexMode)).convert(raw)).isEqualTo("01ff");
+
+        CockroachDBValueConverterProvider base64Mode = new CockroachDBValueConverterProvider(
+                io.debezium.config.CommonConnectorConfig.BinaryHandlingMode.BASE64);
+        assertThat(base64Mode.schemaBuilder(col).build().type()).isEqualTo(Schema.Type.STRING);
+        assertThat(base64Mode.converter(col, field(col, base64Mode)).convert(raw)).isEqualTo("Af8=");
+    }
+
+    @Test
+    void bytesConverterDecodesRawChangefeedLiteral() {
+        // Defensive path: if the raw hex literal reaches the converter, it decodes it too.
+        Column col = Column.editor().name("b").type("BYTES").jdbcType(Types.BINARY).optional(true).create();
+        CockroachDBValueConverterProvider bytesMode = new CockroachDBValueConverterProvider(
+                io.debezium.config.CommonConnectorConfig.BinaryHandlingMode.BYTES);
+        Object converted = bytesMode.converter(col, field(col, bytesMode)).convert("\\x01ff");
+        assertThat(converted).isInstanceOf(java.nio.ByteBuffer.class);
+        assertThat(((java.nio.ByteBuffer) converted).array()).containsExactly(0x01, 0xff);
+    }
+
+    private org.apache.kafka.connect.data.Field field(Column col, CockroachDBValueConverterProvider p) {
+        return new org.apache.kafka.connect.data.Field(col.name(), 0, p.schemaBuilder(col).build());
+    }
 }

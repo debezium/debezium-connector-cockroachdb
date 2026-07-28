@@ -198,7 +198,10 @@ public class CockroachDBChangeRecordEmitter extends RelationalChangeRecordEmitte
                 return node.isNumber() ? node.decimalValue().toPlainString() : node.asText();
             case "BYTEA":
             case "BYTES":
-                return node.asText();
+            case "BLOB":
+                // Changefeeds encode bytes as the bytea hex literal ("\x01ff"); decode so the
+                // value satisfies the Connect BYTES schema instead of failing validation.
+                return CockroachDBValueConverterProvider.decodeBytesLiteral(node.asText());
             case "TIMESTAMP":
             case "TIMESTAMP WITHOUT TIME ZONE":
                 return CockroachDBTemporalConversions.parseTimestampMicros(node.asText());

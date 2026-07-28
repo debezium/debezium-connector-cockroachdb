@@ -86,7 +86,7 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
         // Service providers
         registerServiceProviders(connectorConfig.getServiceRegistry());
 
-        CockroachDBValueConverterProvider valueConverter = new CockroachDBValueConverterProvider();
+        CockroachDBValueConverterProvider valueConverter = new CockroachDBValueConverterProvider(connectorConfig.binaryHandlingMode());
         schema = new CockroachDBSchema(taskContext, topicNamingStrategy, valueConverter);
         try {
             schema.initialize(connectorConfig);
