@@ -293,7 +293,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         for (List<TableId> group : groups) {
             boolean alreadyRunning = false;
             for (TableId table : group) {
-                if (changefeedExists(connection, table)) {
+                if (changefeedExists(connection, table, tables)) {
                     alreadyRunning = true;
                     break;
                 }
@@ -367,16 +367,17 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * changefeed job description to avoid false positives from changefeeds created by
      * other connector instances targeting the same tables with different topic prefixes.
      */
-    private boolean changefeedExists(CockroachDBConnection connection, TableId table) throws SQLException {
+    private boolean changefeedExists(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables) throws SQLException {
         String fqTableName = sanitizeIdentifier(table.toString());
         String topicPrefix = resolveTopicPrefix();
         String sinkMarker = "topic_prefix=" + topicPrefix;
 
         try (Statement stmt = connection.connection().createStatement()) {
-            String query = "SELECT description FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running'";
+            String query = "SELECT job_id, description FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running'";
             try (var rs = stmt.executeQuery(query)) {
                 while (rs.next()) {
-                    String description = rs.getString(1);
+                    String jobId = rs.getString(1);
+                    String description = rs.getString(2);
                     if (description != null && description.contains(fqTableName) && description.contains(sinkMarker)) {
                         // A changefeed with our topic prefix already covers this table. The connector
                         // can only consume the enriched envelope, so refuse to reuse one created with a
@@ -403,6 +404,21 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                             LOGGER.warn("Reusing changefeed for table {} that was created with the diff option while "
                                     + "cockroachdb.changefeed.include.diff is disabled; update events will carry before images.",
                                     table);
+                        }
+                        // The captured table set is frozen at job creation. If tables were removed
+                        // from table.include.list since, the reused job keeps streaming them at full
+                        // volume into intermediate topics that nothing consumes.
+                        Set<String> includedIdentifiers = allIncludedTables.stream()
+                                .map(t -> sanitizeIdentifier(t.toString()))
+                                .collect(Collectors.toSet());
+                        List<String> extraTables = findExtraCapturedTables(description, includedIdentifiers);
+                        if (!extraTables.isEmpty()) {
+                            LOGGER.warn("Reused changefeed job {} also captures table(s) {} that are not in "
+                                    + "table.include.list. The job keeps streaming them into intermediate topics that "
+                                    + "this connector does not consume, wasting changefeed work, network, and broker "
+                                    + "storage. To capture only the configured tables, stop the connector, run "
+                                    + "CANCEL JOB {}, and restart the connector so it recreates the changefeed.",
+                                    jobId, extraTables, jobId);
                         }
                         return true;
                     }
@@ -1043,6 +1059,62 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * Sanitizes a SQL identifier by removing characters that are not alphanumeric,
      * underscores, periods, or hyphens.
      */
+    /**
+     * Extracts the table names a changefeed captures from its {@code SHOW CHANGEFEED JOBS}
+     * description. The description echoes the creation statement in the form
+     * {@code CREATE CHANGEFEED FOR TABLE a, TABLE b, ... INTO '...' WITH OPTIONS (...)}
+     * (format captured from a live v25.4 cluster); quotes around individual name parts are
+     * stripped.
+     */
+    static List<String> parseChangefeedTables(String description) {
+        if (description == null) {
+            return List.of();
+        }
+        int forIdx = description.indexOf(" FOR ");
+        int intoIdx = description.indexOf(" INTO ");
+        if (forIdx < 0 || intoIdx < 0 || intoIdx <= forIdx) {
+            return List.of();
+        }
+        String tableList = description.substring(forIdx + 5, intoIdx);
+        List<String> tables = new ArrayList<>();
+        for (String token : tableList.split(",")) {
+            String name = token.trim();
+            if (name.regionMatches(true, 0, "TABLE ", 0, 6)) {
+                name = name.substring(6).trim();
+            }
+            name = name.replace("\"", "");
+            if (!name.isEmpty()) {
+                tables.add(name);
+            }
+        }
+        return tables;
+    }
+
+    /**
+     * Returns the tables a changefeed captures that match none of the included identifiers.
+     * A captured name matches an included identifier when they are equal or when one is a
+     * dot-qualified suffix of the other, so a database-qualified job name matches a
+     * schema-qualified include entry.
+     */
+    static List<String> findExtraCapturedTables(String description, Set<String> includedIdentifiers) {
+        List<String> extras = new ArrayList<>();
+        for (String captured : parseChangefeedTables(description)) {
+            boolean matched = false;
+            for (String included : includedIdentifiers) {
+                if (captured.equals(included)
+                        || captured.endsWith("." + included)
+                        || included.endsWith("." + captured)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                extras.add(captured);
+            }
+        }
+        return extras;
+    }
+
     private static String sanitizeIdentifier(String identifier) {
         if (identifier == null) {
             return "";
