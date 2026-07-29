@@ -23,6 +23,12 @@ import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import io.debezium.connector.cockroachdb.CockroachDBStreamingChangeEventSource;
+
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+
 /**
  * Regression scenarios reproduced from production reports, folded into one class so they share
  * the pipeline stack from {@link AbstractCockroachDBPipelineIT} instead of each booting their
@@ -293,5 +299,40 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             Thread.sleep(1000);
         }
         return outcome;
+    }
+
+    @Test
+    public void shouldWarnWhenReusedChangefeedCapturesRemovedTables() throws Exception {
+        connection = openDatabase("reuse_extra_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS keep_t (id INT8 PRIMARY KEY, v STRING)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS drop_t (id INT8 PRIMARY KEY, v STRING)");
+            stmt.execute("UPSERT INTO keep_t VALUES (1, 'a')");
+            stmt.execute("UPSERT INTO drop_t VALUES (1, 'a')");
+        }
+
+        // First run creates one changefeed covering both tables.
+        startTask(baseConnectorConfig("reuse-extra-test", "reuse_extra_testdb", "public.keep_t,public.drop_t"));
+        assertThat(pollForRecords(1, 45)).as("First run should stream").isNotEmpty();
+        stopTask();
+
+        // Second run drops drop_t from the include list; the connector reuses the existing
+        // job and must name the table the job still captures (debezium/dbz#2319).
+        Logger sourceLogger = (Logger) org.slf4j.LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
+        ListAppender<ILoggingEvent> warnings = new ListAppender<>();
+        warnings.start();
+        sourceLogger.addAppender(warnings);
+        try {
+            startTask(baseConnectorConfig("reuse-extra-test", "reuse_extra_testdb", "public.keep_t"));
+            assertThat(pollForRecords(0, 5)).isNotNull();
+            assertThat(warnings.list)
+                    .as("Reuse with a shrunk include list must warn about the extra captured table")
+                    .anyMatch(e -> "WARN".equals(e.getLevel().toString())
+                            && e.getFormattedMessage().contains("drop_t")
+                            && e.getFormattedMessage().contains("CANCEL JOB"));
+        }
+        finally {
+            sourceLogger.detachAppender(warnings);
+        }
     }
 }

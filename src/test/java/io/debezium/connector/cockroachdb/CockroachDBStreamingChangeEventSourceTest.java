@@ -8,6 +8,7 @@ package io.debezium.connector.cockroachdb;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.List;
+import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
@@ -219,5 +220,62 @@ public class CockroachDBStreamingChangeEventSourceTest {
         assertThat(connectorConfig.validateAndRecord(
                 List.of(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_SINK_CONFIG), s -> {
                 })).isFalse();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Reused-changefeed table-set check (debezium/dbz#2319): a reused job frozen at creation
+    // can capture tables that were since removed from table.include.list; the connector must
+    // detect and name them. Description format captured from a real v25.4.13 job.
+    // ---------------------------------------------------------------------------------------
+
+    private static final String MULTI_TABLE_DESCRIPTION = "CREATE CHANGEFEED FOR TABLE fdasbookdbo_account, "
+            + "TABLE journal, TABLE tax_cost_basis INTO 'null://x?topic_prefix=gmf.' "
+            + "WITH OPTIONS (diff, enriched_properties = 'source', envelope = 'enriched', full_table_name, "
+            + "resolved = '10s', updated)";
+
+    @Test
+    public void shouldParseCapturedTablesFromJobDescription() {
+        assertThat(CockroachDBStreamingChangeEventSource.parseChangefeedTables(MULTI_TABLE_DESCRIPTION))
+                .containsExactly("fdasbookdbo_account", "journal", "tax_cost_basis");
+    }
+
+    @Test
+    public void shouldParseQualifiedAndQuotedTableNames() {
+        String description = "CREATE CHANGEFEED FOR TABLE prf1fdasbook.fdasbookdbo.account, "
+                + "TABLE prf1fdasbook.fdasbookdbo.\"order\" INTO 'kafka://k:9092?topic_prefix=x.' WITH OPTIONS (envelope = 'enriched')";
+        assertThat(CockroachDBStreamingChangeEventSource.parseChangefeedTables(description))
+                .containsExactly("prf1fdasbook.fdasbookdbo.account", "prf1fdasbook.fdasbookdbo.order");
+    }
+
+    @Test
+    public void shouldFindTablesTheJobCapturesBeyondTheIncludeList() {
+        Set<String> included = Set.of("fdasbookdbo.account", "fdasbookdbo.journal");
+        assertThat(CockroachDBStreamingChangeEventSource.findExtraCapturedTables(
+                "CREATE CHANGEFEED FOR TABLE fdasbookdbo.account, TABLE fdasbookdbo.journal, "
+                        + "TABLE fdasbookdbo.tax_cost_basis INTO 'kafka://k' WITH OPTIONS (envelope = 'enriched')",
+                included))
+                .containsExactly("fdasbookdbo.tax_cost_basis");
+    }
+
+    @Test
+    public void shouldFindNoExtrasWhenTheJobMatchesTheIncludeList() {
+        Set<String> included = Set.of("fdasbookdbo.account", "fdasbookdbo.journal");
+        assertThat(CockroachDBStreamingChangeEventSource.findExtraCapturedTables(
+                "CREATE CHANGEFEED FOR TABLE fdasbookdbo.account, TABLE fdasbookdbo.journal INTO 'kafka://k' "
+                        + "WITH OPTIONS (envelope = 'enriched')",
+                included))
+                .isEmpty();
+    }
+
+    @Test
+    public void shouldMatchIncludedTablesByQualifiedSuffix() {
+        // The job description can carry database-qualified names while the include list uses
+        // schema.table form; qualification differences are not extras.
+        Set<String> included = Set.of("fdasbookdbo.account");
+        assertThat(CockroachDBStreamingChangeEventSource.findExtraCapturedTables(
+                "CREATE CHANGEFEED FOR TABLE prf1fdasbook.fdasbookdbo.account INTO 'kafka://k' "
+                        + "WITH OPTIONS (envelope = 'enriched')",
+                included))
+                .isEmpty();
     }
 }
