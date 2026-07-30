@@ -134,7 +134,7 @@ public class CockroachDBConnection extends JdbcConnection {
         }
     }
 
-    private static String buildConnectionUrl(CockroachDBConnectorConfig config) {
+    static String buildConnectionUrl(CockroachDBConnectorConfig config) {
         StringBuilder url = new StringBuilder();
         url.append("jdbc:postgresql://");
         url.append(config.getHostname());
@@ -148,7 +148,7 @@ public class CockroachDBConnection extends JdbcConnection {
         return url.toString();
     }
 
-    private static Properties buildConnectionProperties(CockroachDBConnectorConfig config) {
+    static Properties buildConnectionProperties(CockroachDBConnectorConfig config) {
         Properties props = new Properties();
 
         String user = config.getUser();

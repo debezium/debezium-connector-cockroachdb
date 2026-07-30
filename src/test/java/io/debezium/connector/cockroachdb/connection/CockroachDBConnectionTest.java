@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Properties;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -233,5 +234,73 @@ public class CockroachDBConnectionTest {
         assertThat(CockroachDBConnection.isTransientError(new SQLException("syntax", "42601"))).isFalse();
         assertThat(CockroachDBConnection.isTransientError(new SQLException("auth", "28P01"))).isFalse();
         assertThat(CockroachDBConnection.isTransientError(new SQLException("no state", (String) null))).isFalse();
+    }
+
+    private CockroachDBConnectorConfig configWith(Map<String, String> extra) {
+        Map<String, String> props = new HashMap<>();
+        props.put("database.hostname", "db.example.com");
+        props.put("database.port", "26257");
+        props.put("database.user", "cdc_user");
+        props.put("database.password", "secret");
+        props.put("database.dbname", "appdb");
+        props.put("topic.prefix", "crdb");
+        props.putAll(extra);
+        return new CockroachDBConnectorConfig(Configuration.from(props));
+    }
+
+    @Test
+    public void shouldBuildPlainUrlWhenSslDisabled() {
+        CockroachDBConnectorConfig config = configWith(Map.of("database.sslmode", "disable"));
+        assertThat(CockroachDBConnection.buildConnectionUrl(config))
+                .isEqualTo("jdbc:postgresql://db.example.com:26257/appdb");
+    }
+
+    @Test
+    public void shouldAppendSslModeToUrlForSecureModes() {
+        assertThat(CockroachDBConnection.buildConnectionUrl(configWith(Map.of("database.sslmode", "require"))))
+                .isEqualTo("jdbc:postgresql://db.example.com:26257/appdb?sslmode=require");
+        assertThat(CockroachDBConnection.buildConnectionUrl(configWith(Map.of("database.sslmode", "verify-full"))))
+                .isEqualTo("jdbc:postgresql://db.example.com:26257/appdb?sslmode=verify-full");
+    }
+
+    @Test
+    public void shouldBuildCredentialAndTimeoutProperties() {
+        CockroachDBConnectorConfig config = configWith(Map.of(
+                "database.sslmode", "disable",
+                "connection.timeout.ms", "30000"));
+        Properties props = CockroachDBConnection.buildConnectionProperties(config);
+        assertThat(props.getProperty("user")).isEqualTo("cdc_user");
+        assertThat(props.getProperty("password")).isEqualTo("secret");
+        assertThat(props.getProperty("connectTimeout")).as("milliseconds convert to seconds").isEqualTo("30");
+        assertThat(props.getProperty("tcpKeepAlive")).as("keepalive defaults on").isEqualTo("true");
+    }
+
+    @Test
+    public void shouldMapTlsFilesOnlyForSecureModes() {
+        Map<String, String> tls = Map.of(
+                "database.sslmode", "verify-full",
+                "database.sslrootcert", "/certs/ca.crt",
+                "database.sslcert", "/certs/client.crt",
+                "database.sslkey", "/certs/client.key",
+                "database.sslpassword", "keypass");
+        Properties secure = CockroachDBConnection.buildConnectionProperties(configWith(tls));
+        assertThat(secure.getProperty("sslrootcert")).isEqualTo("/certs/ca.crt");
+        assertThat(secure.getProperty("sslcert")).isEqualTo("/certs/client.crt");
+        assertThat(secure.getProperty("sslkey")).isEqualTo("/certs/client.key");
+        assertThat(secure.getProperty("sslpassword")).isEqualTo("keypass");
+
+        Map<String, String> disabled = new HashMap<>(tls);
+        disabled.put("database.sslmode", "disable");
+        Properties plain = CockroachDBConnection.buildConnectionProperties(configWith(disabled));
+        assertThat(plain.getProperty("sslrootcert")).as("TLS files are ignored when SSL is disabled").isNull();
+        assertThat(plain.getProperty("sslcert")).isNull();
+    }
+
+    @Test
+    public void shouldOmitKeepAliveWhenDisabled() {
+        CockroachDBConnectorConfig config = configWith(Map.of(
+                "database.sslmode", "disable",
+                "database.tcpKeepAlive", "false"));
+        assertThat(CockroachDBConnection.buildConnectionProperties(config).getProperty("tcpKeepAlive")).isNull();
     }
 }
