@@ -572,4 +572,23 @@ public class CockroachDBConnectorConfigTest {
             }
         }
     }
+
+    @Test
+    public void shouldExposeChangefeedConsumerOverridesAsTypedSubset() {
+        Map<String, String> props = new HashMap<>();
+        props.put("database.hostname", "localhost");
+        props.put("database.port", "26257");
+        props.put("database.user", "root");
+        props.put("database.dbname", "testdb");
+        props.put("topic.prefix", "test");
+        props.put("cockroachdb.changefeed.kafka.consumer.override.fetch.max.bytes", "1048576");
+        props.put("cockroachdb.changefeed.kafka.consumer.override.max.poll.records", "1000");
+
+        CockroachDBConnectorConfig config = new CockroachDBConnectorConfig(Configuration.from(props));
+        io.debezium.config.Configuration overrides = config.getChangefeedKafkaConsumerOverrides();
+
+        assertThat(overrides.getString("fetch.max.bytes")).isEqualTo("1048576");
+        assertThat(overrides.getString("max.poll.records")).isEqualTo("1000");
+        assertThat(overrides.keys()).hasSize(2);
+    }
 }

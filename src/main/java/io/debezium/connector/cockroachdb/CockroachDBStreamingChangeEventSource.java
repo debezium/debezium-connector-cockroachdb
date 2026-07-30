@@ -1168,8 +1168,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * same passthrough convention Debezium uses for its schema-history and signal Kafka clients. This
      * is the escape hatch for SASL, custom trust/key stores, or overriding any auto-derived value.
      */
-    static final String CONSUMER_OVERRIDE_PREFIX = "cockroachdb.changefeed.kafka.consumer.override.";
-
     /**
      * Kafka SSL store type for inline PEM material. Kafka exposes constants for the SSL config keys
      * (see {@link SslConfigs}) but not for this store-type value, so it is named here. It lets the
@@ -1210,14 +1208,15 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             LOGGER.info("Derived SSL config for the changefeed consumer from cockroachdb.changefeed.sink.tls.* (security.protocol=SSL)");
         }
 
-        Configuration overrides = config.getConfig().subset(CONSUMER_OVERRIDE_PREFIX, true);
+        Configuration overrides = config.getChangefeedKafkaConsumerOverrides();
         int applied = 0;
         for (String key : overrides.keys()) {
             props.put(key, overrides.getString(key));
             applied++;
         }
         if (applied > 0) {
-            LOGGER.info("Applied {} '{}*' property/properties to the changefeed consumer", applied, CONSUMER_OVERRIDE_PREFIX);
+            LOGGER.info("Applied {} '{}*' property/properties to the changefeed consumer", applied,
+                    CockroachDBConnectorConfig.CHANGEFEED_KAFKA_CONSUMER_OVERRIDE_PREFIX);
         }
     }
 

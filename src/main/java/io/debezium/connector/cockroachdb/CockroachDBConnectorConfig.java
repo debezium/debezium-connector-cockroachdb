@@ -483,6 +483,22 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withImportance(Importance.LOW)
             .withDescription("Timeout in seconds for validating that an existing JDBC connection is still usable.");
 
+    /**
+     * Prefix for passthrough properties applied to the connector's internal changefeed
+     * Kafka consumer, with the prefix stripped.
+     */
+    public static final String CHANGEFEED_KAFKA_CONSUMER_OVERRIDE_PREFIX = "cockroachdb.changefeed.kafka.consumer.override.";
+
+    /**
+     * Returns the changefeed Kafka consumer passthrough properties as a configuration
+     * subset with {@link #CHANGEFEED_KAFKA_CONSUMER_OVERRIDE_PREFIX} stripped. Typed
+     * facade over the raw configuration, which core plans to stop exposing publicly.
+     */
+    @SuppressWarnings("deprecation")
+    public Configuration getChangefeedKafkaConsumerOverrides() {
+        return getConfig().subset(CHANGEFEED_KAFKA_CONSUMER_OVERRIDE_PREFIX, true);
+    }
+
     private static final ConfigDefinition CONFIG_DEFINITION = RelationalDatabaseConnectorConfig.CONFIG_DEFINITION.edit()
             .name("CockroachDB")
             .group(Field.Group.CONNECTION,
