@@ -335,4 +335,39 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             sourceLogger.detachAppender(warnings);
         }
     }
+
+    @Test
+    public void shouldNotTriggerSchemaRefreshForDeleteEvents() throws Exception {
+        connection = openDatabase("delete_drift_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS dd_events (id INT8 PRIMARY KEY, v STRING NOT NULL)");
+            stmt.execute("UPSERT INTO dd_events VALUES (7, 'x')");
+        }
+
+        // A delete without a diff image carries after: null; the drift check must not read
+        // that as missing columns and refresh the schema per delete (debezium/dbz#2322).
+        Logger sourceLogger = (Logger) org.slf4j.LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
+        ListAppender<ILoggingEvent> logs = new ListAppender<>();
+        logs.start();
+        sourceLogger.addAppender(logs);
+        try {
+            startTask(baseConnectorConfig("delete-drift-test", "delete_drift_testdb", "public.dd_events"));
+            assertThat(pollForRecords(1, 45)).as("Should receive the seed row").isNotEmpty();
+
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute("DELETE FROM dd_events WHERE id = 7");
+            }
+            List<SourceRecord> deletes = pollForRecords(
+                    r -> r.value() != null && "d".equals(((Struct) r.value()).getString("op")), 1, 60);
+            assertThat(deletes).as("The delete event must arrive").isNotEmpty();
+
+            assertThat(logs.list)
+                    .as("A delete must not trigger a schema-drift refresh")
+                    .noneMatch(e -> e.getFormattedMessage().contains("Schema change detected")
+                            && e.getFormattedMessage().contains("dd_events"));
+        }
+        finally {
+            sourceLogger.detachAppender(logs);
+        }
+    }
 }

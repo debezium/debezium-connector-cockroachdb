@@ -278,4 +278,82 @@ public class CockroachDBStreamingChangeEventSourceTest {
                 included))
                 .isEmpty();
     }
+
+    // ---------------------------------------------------------------------------------------
+    // Schema refresh robustness (debezium/dbz#2322): a failed refresh must reconnect and
+    // retry once, and a persistent failure must fail the task (retriable) instead of
+    // silently skipping the event.
+    // ---------------------------------------------------------------------------------------
+
+    private Configuration refreshTestConfig() {
+        return Configuration.create()
+                .with("database.hostname", "localhost")
+                .with("database.port", "26257")
+                .with("database.user", "root")
+                .with("database.dbname", "testdb")
+                .with("topic.prefix", "crdb")
+                .build();
+    }
+
+    @Test
+    public void shouldReconnectAndRetryWhenSchemaRefreshFails() {
+        TableId table = new TableId("testdb", "public", "orders");
+        io.debezium.relational.Table refreshed = io.debezium.relational.Table.editor()
+                .tableId(table)
+                .addColumn(io.debezium.relational.Column.editor().name("id").type("INT8").create())
+                .create();
+        java.util.concurrent.atomic.AtomicInteger attempts = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger reconnects = new java.util.concurrent.atomic.AtomicInteger();
+
+        CockroachDBStreamingChangeEventSource source = new CockroachDBStreamingChangeEventSource(
+                new CockroachDBConnectorConfig(refreshTestConfig()), null, null, null, null) {
+            @Override
+            io.debezium.relational.Table doRefreshTableSchema(TableId tableId) throws Exception {
+                if (attempts.incrementAndGet() == 1) {
+                    throw new java.sql.SQLException("An I/O error occurred while sending to the backend.", "08006");
+                }
+                return refreshed;
+            }
+
+            @Override
+            void reconnectSchemaRefreshConnection() {
+                reconnects.incrementAndGet();
+            }
+        };
+
+        assertThat(source.refreshTableSchema(table)).isSameAs(refreshed);
+        assertThat(attempts.get()).isEqualTo(2);
+        assertThat(reconnects.get()).isEqualTo(1);
+    }
+
+    @Test
+    public void shouldFailRetriablyWhenSchemaRefreshFailsAfterReconnect() {
+        TableId table = new TableId("testdb", "public", "orders");
+        CockroachDBStreamingChangeEventSource source = new CockroachDBStreamingChangeEventSource(
+                new CockroachDBConnectorConfig(refreshTestConfig()), null, null, null, null) {
+            @Override
+            io.debezium.relational.Table doRefreshTableSchema(TableId tableId) throws Exception {
+                throw new java.sql.SQLException("An I/O error occurred while sending to the backend.", "08006");
+            }
+
+            @Override
+            void reconnectSchemaRefreshConnection() {
+            }
+        };
+
+        // The failure must propagate (with the SQLException in the cause chain so the error
+        // handler classifies it retriable) rather than being swallowed into a skipped event.
+        Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(() -> source.refreshTableSchema(table));
+        assertThat(thrown).isNotNull();
+        Throwable cause = thrown;
+        boolean sqlInChain = false;
+        while (cause != null) {
+            if (cause instanceof java.sql.SQLException) {
+                sqlInChain = true;
+                break;
+            }
+            cause = cause.getCause();
+        }
+        assertThat(sqlInChain).as("SQLException must stay in the cause chain for retriable classification").isTrue();
+    }
 }

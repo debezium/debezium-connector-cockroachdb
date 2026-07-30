@@ -48,6 +48,7 @@ import org.slf4j.LoggerFactory;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import io.debezium.DebeziumException;
 import io.debezium.config.Configuration;
 import io.debezium.connector.SnapshotRecord;
 import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
@@ -237,6 +238,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             throw new RuntimeException("Failed to stream changes from CockroachDB: " + e.getMessage(), e);
         }
         finally {
+            if (this.schemaRefreshConnection != null) {
+                try {
+                    this.schemaRefreshConnection.close();
+                }
+                catch (Exception e) {
+                    LOGGER.debug("Closing the schema refresh connection failed: {}", e.getMessage());
+                }
+            }
             this.schemaRefreshConnection = null;
             running.set(false);
             LOGGER.info("Stopped CockroachDB streaming change event source");
@@ -816,14 +825,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 return;
             }
 
-            // Detect schema changes by comparing event fields against registered columns
-            JsonNode dataNode = !afterNode.isMissingNode() ? afterNode : beforeNode;
-            if (dataNode != null && !dataNode.isMissingNode() && hasSchemaChanged(dataNode, tableObj)) {
+            // Detect schema changes by comparing event fields against registered columns.
+            // Deletes carry {@code after: null} (and no before without the diff option), and
+            // a null row image says nothing about the schema, so it must not be read as
+            // "every column absent" and trigger a refresh per delete (debezium/dbz#2322).
+            JsonNode dataNode = !afterNode.isMissingNode() && !afterNode.isNull() ? afterNode : beforeNode;
+            if (dataNode != null && !dataNode.isMissingNode() && !dataNode.isNull() && hasSchemaChanged(dataNode, tableObj)) {
                 tableObj = refreshTableSchema(table);
-                if (tableObj == null) {
-                    LOGGER.error("Schema refresh failed for table {}, skipping event", table);
-                    return;
-                }
             }
 
             // The changefeed message key carries the primary key columns for every event,
@@ -842,6 +850,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
             LOGGER.debug("Dispatching {} event for table {}", operation, table);
             dispatcher.dispatchDataChangeEvent(currentPartition, table, emitter);
+        }
+        catch (DebeziumException e) {
+            // Deliberate failure (for example a schema refresh that failed after reconnect):
+            // propagate so the task restarts and replays the event instead of skipping it.
+            throw e;
         }
         catch (Exception e) {
             LOGGER.error("Error processing changefeed event for table {}: {}",
@@ -1317,18 +1330,54 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * Refreshes the schema for a table by re-querying {@code information_schema}
      * through the persistent connection kept alive during streaming.
      */
-    private io.debezium.relational.Table refreshTableSchema(TableId tableId) {
-        if (schemaRefreshConnection == null) {
-            LOGGER.error("No connection available for schema refresh of table {}", tableId);
-            return null;
-        }
+    io.debezium.relational.Table refreshTableSchema(TableId tableId) {
         try {
-            return schema.refreshTable(schemaRefreshConnection, tableId);
+            return doRefreshTableSchema(tableId);
         }
-        catch (Exception e) {
-            LOGGER.error("Failed to refresh schema for table {}: {}", tableId, e.getMessage(), e);
-            return null;
+        catch (Exception first) {
+            LOGGER.warn("Schema refresh for table {} failed ({}); reconnecting and retrying",
+                    tableId, first.getMessage());
+            try {
+                reconnectSchemaRefreshConnection();
+                return doRefreshTableSchema(tableId);
+            }
+            catch (Exception second) {
+                // Never skip the event: fail the task so the error handler classifies the
+                // SQLException in the cause chain as retriable and the restart replays the
+                // event from the stored consumer position (debezium/dbz#2322).
+                throw new DebeziumException("Schema refresh for table " + tableId
+                        + " failed after reconnecting; failing the task so the event is replayed "
+                        + "instead of skipped", second);
+            }
         }
+    }
+
+    io.debezium.relational.Table doRefreshTableSchema(TableId tableId) throws Exception {
+        if (schemaRefreshConnection == null) {
+            throw new IllegalStateException("No connection available for schema refresh");
+        }
+        return schema.refreshTable(schemaRefreshConnection, tableId);
+    }
+
+    /**
+     * Replaces the long-lived schema refresh connection. Load balancers and proxies close
+     * idle connections underneath the connector, and a schema refresh may be the first use
+     * in minutes, so a failed refresh reconnects before retrying.
+     */
+    void reconnectSchemaRefreshConnection() throws SQLException {
+        CockroachDBConnection old = schemaRefreshConnection;
+        if (old != null) {
+            try {
+                old.close();
+            }
+            catch (Exception e) {
+                LOGGER.debug("Closing the stale schema refresh connection failed: {}", e.getMessage());
+            }
+        }
+        CockroachDBConnection fresh = new CockroachDBConnection(config);
+        fresh.connect();
+        schemaRefreshConnection = fresh;
+        LOGGER.info("Reconnected the schema refresh connection");
     }
 
     @Override
