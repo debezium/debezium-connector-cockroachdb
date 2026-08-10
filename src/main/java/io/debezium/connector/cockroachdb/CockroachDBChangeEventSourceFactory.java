@@ -6,6 +6,7 @@
 package io.debezium.connector.cockroachdb;
 
 import java.util.Optional;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,6 +38,7 @@ public class CockroachDBChangeEventSourceFactory implements ChangeEventSourceFac
     private final EventDispatcher<CockroachDBPartition, TableId> dispatcher;
     private final CockroachDBSchema schema;
     private final Clock clock;
+    private final Set<TableId> capturedTables;
 
     /**
      * Captured from {@link #getSnapshotChangeEventSource} (the coordinator builds the snapshot source
@@ -54,6 +56,7 @@ public class CockroachDBChangeEventSourceFactory implements ChangeEventSourceFac
         this.dispatcher = dispatcher;
         this.schema = schema;
         this.clock = clock;
+        this.capturedTables = Set.copyOf(schema.getDiscoveredTables());
     }
 
     @Override
@@ -90,7 +93,8 @@ public class CockroachDBChangeEventSourceFactory implements ChangeEventSourceFac
                 clock,
                 snapshotProgressListener,
                 dataChangeEventListener,
-                notificationService));
+                notificationService,
+                capturedTables));
     }
 
 }

@@ -8,8 +8,10 @@ package io.debezium.connector.cockroachdb;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
@@ -91,5 +93,28 @@ public class CockroachDBIncrementalSnapshotTest {
         Optional<Boolean> nullsSortLast = conn.nullsSortLast();
         assertThat(nullsSortLast).isPresent();
         assertThat(nullsSortLast.get()).isTrue();
+    }
+
+    @Test
+    public void shouldIdentifySnapshotRequestsOutsideFrozenChangefeedSet() {
+        Set<TableId> captured = Set.of(
+                new TableId("testdb", "public", "orders"),
+                new TableId("testdb", "inventory", "products"));
+
+        assertThat(CockroachDBSignalBasedIncrementalSnapshotChangeEventSource.findUncapturedDataCollections(
+                captured,
+                List.of("testdb\\.public\\.orders", "inventory\\.products", "testdb\\.public\\.late_.*")))
+                .containsExactly("testdb\\.public\\.late_.*");
+    }
+
+    @Test
+    public void shouldAcceptSnapshotRegexMatchingAtLeastOneCapturedTable() {
+        Set<TableId> captured = Set.of(
+                new TableId("testdb", "public", "orders_2025"),
+                new TableId("testdb", "public", "orders_2026"));
+
+        assertThat(CockroachDBSignalBasedIncrementalSnapshotChangeEventSource.findUncapturedDataCollections(
+                captured, List.of("testdb\\.public\\.orders_.*")))
+                .isEmpty();
     }
 }
