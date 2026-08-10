@@ -49,6 +49,8 @@ import ch.qos.logback.core.read.ListAppender;
  * <li>{@link #shouldCreateChangefeedWithKafkaSinkConfig} (debezium/dbz#2278): the
  * {@code cockroachdb.changefeed.kafka.sink.config} JSON must reach CockroachDB as the
  * {@code kafka_sink_config} changefeed option.</li>
+ * <li>DBZ-2390: generated changefeed SQL must quote a hyphenated schema and a reserved-word
+ * table in both Kafka and sinkless delivery modes.</li>
  * </ul>
  *
  * @author Virag Tripathi
@@ -252,6 +254,48 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             assertThat(found)
                     .as("The running changefeed must carry the kafka_sink_config option")
                     .isTrue();
+        }
+    }
+
+    @Test
+    public void shouldStreamQuotedIdentifiersInKafkaMode() throws Exception {
+        connection = openDatabase("quoted_kafka_testdb");
+        createQuotedIdentifierTable(connection);
+
+        Map<String, String> config = baseConnectorConfig(
+                "quoted-kafka-test", "quoted_kafka_testdb", "stock-trading\\.order");
+        startTask(config);
+
+        List<SourceRecord> records = pollForRecords(1, 45);
+        assertThat(records).as("Kafka mode should stream the table whose identifiers require quoting").isNotEmpty();
+        assertThat(((Struct) records.get(0).value()).getStruct("after").getInt64("id")).isEqualTo(1L);
+    }
+
+    @Test
+    public void shouldStreamQuotedIdentifiersInSinklessMode() throws Exception {
+        connection = openDatabase("quoted_sinkless_testdb");
+        createQuotedIdentifierTable(connection);
+
+        Map<String, String> config = baseConnectorConfig(
+                "quoted-sinkless-test", "quoted_sinkless_testdb", "stock-trading\\.order");
+        config.put("cockroachdb.changefeed.sink.type", "sinkless");
+        config.remove("cockroachdb.changefeed.sink.uri");
+        config.remove("cockroachdb.changefeed.kafka.bootstrap.servers");
+        config.remove("cockroachdb.changefeed.kafka.auto.offset.reset");
+        config.remove("cockroachdb.changefeed.kafka.poll.timeout.ms");
+        startTask(config);
+
+        List<SourceRecord> records = pollForRecords(1, 45);
+        assertThat(records).as("Sinkless mode should stream the table whose identifiers require quoting").isNotEmpty();
+        assertThat(((Struct) records.get(0).value()).getStruct("after").getInt64("id")).isEqualTo(1L);
+    }
+
+    private static void createQuotedIdentifierTable(Connection connection) throws Exception {
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE SCHEMA IF NOT EXISTS \"stock-trading\"");
+            stmt.execute("CREATE TABLE IF NOT EXISTS \"stock-trading\".\"order\" "
+                    + "(id INT8 PRIMARY KEY, qty INT8 NOT NULL)");
+            stmt.execute("UPSERT INTO \"stock-trading\".\"order\" VALUES (1, 10)");
         }
     }
 

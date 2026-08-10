@@ -56,7 +56,7 @@ public class CockroachDBMultiTableTest {
         String query = source.buildSinkChangefeedQuery(tables, null, false);
 
         assertThat(query).startsWith("CREATE CHANGEFEED FOR TABLE ");
-        assertThat(query).contains("testdb.public.orders");
+        assertThat(query).contains("\"testdb\".\"public\".\"orders\"");
         assertThat(query).contains("INTO 'kafka://kafka:9092?topic_prefix=cockroachdb.'");
         assertThat(query).contains("full_table_name");
         assertThat(query).contains("envelope = 'enriched'");
@@ -79,9 +79,9 @@ public class CockroachDBMultiTableTest {
         String query = source.buildSinkChangefeedQuery(tables, null, false);
 
         assertThat(query).startsWith("CREATE CHANGEFEED FOR TABLE ");
-        assertThat(query).contains("testdb.public.orders");
-        assertThat(query).contains("testdb.public.customers");
-        assertThat(query).contains("testdb.public.products");
+        assertThat(query).contains("\"testdb\".\"public\".\"orders\"");
+        assertThat(query).contains("\"testdb\".\"public\".\"customers\"");
+        assertThat(query).contains("\"testdb\".\"public\".\"products\"");
         // All three tables should be in a single FOR clause separated by commas
         String tablesPart = query.substring(
                 query.indexOf("FOR TABLE ") + "FOR TABLE ".length(),

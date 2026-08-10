@@ -72,8 +72,17 @@ public class CockroachDBSinklessTest {
                 List.of(new TableId("testdb", "public", "orders"),
                         new TableId("testdb", "inventory", "warehouse_items")),
                 null, false);
-        assertThat(query).contains("public.orders");
-        assertThat(query).contains("inventory.warehouse_items");
+        assertThat(query).contains("\"public\".\"orders\"");
+        assertThat(query).contains("\"inventory\".\"warehouse_items\"");
+    }
+
+    @Test
+    public void shouldQuoteIdentifiersThatRequireQuoting() {
+        CockroachDBStreamingChangeEventSource source = createSource(sinklessConfig().build());
+        String query = source.buildSinklessChangefeedQuery(
+                List.of(new TableId("test.db", "stock-trading", "ord\"er")), null, false);
+
+        assertThat(query).contains("FOR TABLE \"test.db\".\"stock-trading\".\"ord\"\"er\" WITH");
     }
 
     @Test

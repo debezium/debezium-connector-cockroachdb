@@ -377,7 +377,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * other connector instances targeting the same tables with different topic prefixes.
      */
     private boolean changefeedExists(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables) throws SQLException {
-        String fqTableName = sanitizeIdentifier(table.toString());
         String topicPrefix = resolveTopicPrefix();
         String sinkMarker = "topic_prefix=" + topicPrefix;
 
@@ -387,7 +386,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 while (rs.next()) {
                     String jobId = rs.getString(1);
                     String description = rs.getString(2);
-                    if (description != null && description.contains(fqTableName) && description.contains(sinkMarker)) {
+                    if (description != null && descriptionCapturesTable(description, table) && description.contains(sinkMarker)) {
                         // A changefeed with our topic prefix already covers this table. The connector
                         // can only consume the enriched envelope, so refuse to reuse one created with a
                         // different envelope rather than consuming it and failing to parse events. We
@@ -417,10 +416,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                         // The captured table set is frozen at job creation. If tables were removed
                         // from table.include.list since, the reused job keeps streaming them at full
                         // volume into intermediate topics that nothing consumes.
-                        Set<String> includedIdentifiers = allIncludedTables.stream()
-                                .map(t -> sanitizeIdentifier(t.toString()))
-                                .collect(Collectors.toSet());
-                        List<String> extraTables = findExtraCapturedTables(description, includedIdentifiers);
+                        List<String> extraTables = findExtraCapturedTablesForTableIds(description, allIncludedTables);
                         if (!extraTables.isEmpty()) {
                             LOGGER.warn("Reused changefeed job {} also captures table(s) {} that are not in "
                                     + "table.include.list. The job keeps streaming them into intermediate topics that "
@@ -953,7 +949,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         StringBuilder query = new StringBuilder();
         query.append("CREATE CHANGEFEED FOR TABLE ");
         query.append(tables.stream()
-                .map(t -> sanitizeIdentifier(t.toString()))
+                .map(CockroachDBStreamingChangeEventSource::quoteTableId)
                 .collect(Collectors.joining(", ")));
 
         String sinkUri = config.getChangefeedSinkUri();
@@ -980,7 +976,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         StringBuilder query = new StringBuilder();
         query.append("CREATE CHANGEFEED FOR TABLE ");
         query.append(tables.stream()
-                .map(t -> sanitizeIdentifier(t.toString()))
+                .map(CockroachDBStreamingChangeEventSource::quoteTableId)
                 .collect(Collectors.joining(", ")));
         query.append(" WITH ").append(buildChangefeedWithOptions(cursor, hasPriorOffset));
         return query.toString();
@@ -1069,17 +1065,35 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
-     * Sanitizes a SQL identifier by removing characters that are not alphanumeric,
-     * underscores, periods, or hyphens.
+     * Quotes each structured table identifier component independently. Using the {@link TableId}
+     * parts avoids ambiguity when a legal component itself contains a dot, and doubling embedded
+     * quotes follows the PostgreSQL/CockroachDB identifier escaping rules.
      */
+    static String quoteTableId(TableId tableId) {
+        List<String> components = tableIdComponents(tableId);
+        return components.stream()
+                .map(CockroachDBStreamingChangeEventSource::quoteIdentifier)
+                .collect(Collectors.joining("."));
+    }
+
+    private static String quoteIdentifier(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
     /**
      * Extracts the table names a changefeed captures from its {@code SHOW CHANGEFEED JOBS}
      * description. The description echoes the creation statement in the form
      * {@code CREATE CHANGEFEED FOR TABLE a, TABLE b, ... INTO '...' WITH OPTIONS (...)}
-     * (format captured from a live v25.4 cluster); quotes around individual name parts are
-     * stripped.
+     * (format captured from a live v25.4 cluster). SQL quotes are parsed rather than blindly
+     * stripped so dots, commas, and escaped quotes inside a component remain intact.
      */
     static List<String> parseChangefeedTables(String description) {
+        return parseChangefeedTableComponents(description).stream()
+                .map(parts -> String.join(".", parts))
+                .collect(Collectors.toList());
+    }
+
+    private static List<List<String>> parseChangefeedTableComponents(String description) {
         if (description == null) {
             return List.of();
         }
@@ -1089,18 +1103,100 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             return List.of();
         }
         String tableList = description.substring(forIdx + 5, intoIdx);
-        List<String> tables = new ArrayList<>();
-        for (String token : tableList.split(",")) {
+        List<List<String>> tables = new ArrayList<>();
+        for (String token : splitOutsideQuotes(tableList, ',')) {
             String name = token.trim();
             if (name.regionMatches(true, 0, "TABLE ", 0, 6)) {
                 name = name.substring(6).trim();
             }
-            name = name.replace("\"", "");
             if (!name.isEmpty()) {
-                tables.add(name);
+                tables.add(parseQualifiedIdentifier(name));
             }
         }
         return tables;
+    }
+
+    private static List<String> splitOutsideQuotes(String value, char delimiter) {
+        List<String> tokens = new ArrayList<>();
+        StringBuilder token = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < value.length(); i++) {
+            char current = value.charAt(i);
+            if (current == '"') {
+                token.append(current);
+                if (quoted && i + 1 < value.length() && value.charAt(i + 1) == '"') {
+                    token.append(value.charAt(++i));
+                }
+                else {
+                    quoted = !quoted;
+                }
+            }
+            else if (current == delimiter && !quoted) {
+                tokens.add(token.toString());
+                token.setLength(0);
+            }
+            else {
+                token.append(current);
+            }
+        }
+        tokens.add(token.toString());
+        return tokens;
+    }
+
+    private static List<String> parseQualifiedIdentifier(String identifier) {
+        List<String> components = new ArrayList<>();
+        for (String token : splitOutsideQuotes(identifier, '.')) {
+            String component = token.trim();
+            if (component.length() >= 2 && component.charAt(0) == '"'
+                    && component.charAt(component.length() - 1) == '"') {
+                component = component.substring(1, component.length() - 1).replace("\"\"", "\"");
+            }
+            components.add(component);
+        }
+        return components;
+    }
+
+    static boolean descriptionCapturesTable(String description, TableId table) {
+        List<String> expected = tableIdComponents(table);
+        return parseChangefeedTableComponents(description).stream()
+                .anyMatch(captured -> qualifiedSuffixMatches(captured, expected));
+    }
+
+    private static List<String> findExtraCapturedTablesForTableIds(String description, Collection<TableId> includedTables) {
+        List<List<String>> included = includedTables.stream()
+                .map(CockroachDBStreamingChangeEventSource::tableIdComponents)
+                .collect(Collectors.toList());
+        List<String> extras = new ArrayList<>();
+        for (List<String> captured : parseChangefeedTableComponents(description)) {
+            if (included.stream().noneMatch(candidate -> qualifiedSuffixMatches(captured, candidate))) {
+                extras.add(String.join(".", captured));
+            }
+        }
+        return extras;
+    }
+
+    private static List<String> tableIdComponents(TableId tableId) {
+        List<String> components = new ArrayList<>(3);
+        if (tableId.catalog() != null && !tableId.catalog().isEmpty()) {
+            components.add(tableId.catalog());
+        }
+        if (tableId.schema() != null && !tableId.schema().isEmpty()) {
+            components.add(tableId.schema());
+        }
+        if (tableId.table() != null && !tableId.table().isEmpty()) {
+            components.add(tableId.table());
+        }
+        return components;
+    }
+
+    private static boolean qualifiedSuffixMatches(List<String> first, List<String> second) {
+        int shared = Math.min(first.size(), second.size());
+        for (int offset = 1; offset <= shared; offset++) {
+            if (!first.get(first.size() - offset).equals(second.get(second.size() - offset))) {
+                return false;
+            }
+        }
+        return shared > 0;
     }
 
     /**
@@ -1126,13 +1222,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             }
         }
         return extras;
-    }
-
-    private static String sanitizeIdentifier(String identifier) {
-        if (identifier == null) {
-            return "";
-        }
-        return identifier.replaceAll("[^a-zA-Z0-9_.\\-]", "");
     }
 
     /**
