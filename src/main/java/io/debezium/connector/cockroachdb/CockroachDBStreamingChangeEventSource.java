@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
@@ -208,22 +209,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             // this is a no-op; the changefeed is created and streamed during consumption.
             createChangefeeds(connection, tables, offsetContext, hasPriorOffset);
 
-            // Drive the snapshot lifecycle for the changefeed initial scan so snapshot_completed,
-            // source.snapshot, and the JMX snapshot metrics reflect reality, matching the convention
-            // the PostgreSQL and other connectors follow. Completion is signalled on the first
-            // resolved timestamp (see processChangefeedEvent).
-            if (initialScanInProgress) {
-                offsetContext.markSnapshotRecord(SnapshotRecord.TRUE);
-                if (snapshotProgressListener != null) {
-                    snapshotProgressListener.snapshotStarted(partition);
-                }
-                LOGGER.info("Initial scan started for {} table(s)", tables.size());
-            }
-            else {
-                // No initial scan (snapshot.mode no_data/never, or restart with a prior cursor):
-                // there is nothing to backfill, so mark the snapshot already completed.
-                offsetContext.markSnapshotRecord(SnapshotRecord.FALSE);
-                offsetContext.preSnapshotCompletion();
+            // A sinkless query can discover that a saved cursor is stale only when executeQuery is
+            // called. Its snapshot lifecycle is therefore initialized in consumeSinkless, after a
+            // possible when_needed fallback has selected the actual initial_scan mode.
+            if (!config.isSinklessChangefeed()) {
+                initializeSnapshotLifecycle(tables, offsetContext);
             }
 
             // Consume events: from the intermediate Kafka topics (kafka mode) or directly from a
@@ -299,6 +289,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     tables.size(), groups.size(), maxPerChangefeed);
         }
 
+        boolean recoveredFromInvalidCursor = false;
         for (List<TableId> group : groups) {
             boolean alreadyRunning = false;
             for (TableId table : group) {
@@ -312,21 +303,65 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 continue;
             }
 
-            String changefeedQuery = buildSinkChangefeedQuery(group, offsetContext.getCursor(), hasPriorOffset);
             LOGGER.info("Creating changefeed for {} table(s)", group.size());
-            LOGGER.debug("Changefeed query: {}", changefeedQuery);
 
             try (Statement stmt = connection.connection().createStatement()) {
-                stmt.execute(changefeedQuery);
+                recoveredFromInvalidCursor |= executeSinkChangefeed(
+                        stmt, group, offsetContext.getCursor(), hasPriorOffset);
                 LOGGER.info("Created changefeed for tables: {}", group);
             }
         }
 
         String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
-        initialScanInProgress = "yes".equals(initialScan);
+        initialScanInProgress = recoveredFromInvalidCursor || "yes".equals(initialScan);
         if (initialScanInProgress) {
             LOGGER.info("Initial scan in progress (snapshot.mode={})",
                     config.getSnapshotMode().getValue());
+        }
+    }
+
+    /**
+     * Executes a sink changefeed creation and, for {@code snapshot.mode=when_needed} only, retries
+     * once with a new initial scan when CockroachDB specifically rejects the stored cursor.
+     *
+     * @return {@code true} when the invalid-cursor recovery path was used
+     */
+    boolean executeSinkChangefeed(Statement stmt, List<TableId> tables, String cursor, boolean hasPriorOffset)
+            throws SQLException {
+        String query = buildSinkChangefeedQuery(tables, cursor, hasPriorOffset);
+        LOGGER.debug("Changefeed query: {}", query);
+        try {
+            stmt.execute(query);
+            return false;
+        }
+        catch (SQLException e) {
+            if (!shouldRecoverFromInvalidCursor(e, hasPriorOffset)) {
+                throw e;
+            }
+            logInvalidCursorRecovery(e);
+            String recoveryQuery = buildSinkChangefeedQuery(tables, null, false);
+            LOGGER.debug("Invalid-cursor recovery changefeed query: {}", recoveryQuery);
+            stmt.execute(recoveryQuery);
+            return true;
+        }
+    }
+
+    private void initializeSnapshotLifecycle(List<TableId> tables, CockroachDBOffsetContext offsetContext) {
+        // Drive the snapshot lifecycle for the changefeed initial scan so snapshot_completed,
+        // source.snapshot, and the JMX snapshot metrics reflect reality. Completion is signalled on
+        // the first resolved timestamp (see processChangefeedEvent).
+        if (initialScanInProgress) {
+            offsetContext.markSnapshotRecord(SnapshotRecord.TRUE);
+            if (snapshotProgressListener != null) {
+                snapshotProgressListener.snapshotStarted(currentPartition);
+            }
+            LOGGER.info("Initial scan started for {} table(s)", tables.size());
+        }
+        else {
+            // No initial scan (snapshot.mode no_data/never, or a valid prior cursor): there is
+            // nothing to backfill, so mark the snapshot already completed.
+            offsetContext.markSnapshotRecord(SnapshotRecord.FALSE);
+            offsetContext.preSnapshotCompletion();
         }
     }
 
@@ -652,7 +687,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 // CockroachDB emits it. This is independent of cockroachdb.changefeed.batch.size,
                 // which governs the kafka-mode consumer poll, not the SQL cursor.
                 stmt.setFetchSize(1);
-                try (ResultSet rs = stmt.executeQuery(changefeedQuery)) {
+                try (ResultSet rs = executeSinklessChangefeed(
+                        stmt, jdbc, tables, offsetContext.getCursor(), hasPriorOffset)) {
+                    initializeSnapshotLifecycle(tables, offsetContext);
                     while (context.isRunning() && running.get() && rs.next()) {
                         String valueJson = readChangefeedValue(rs);
                         if (valueJson == null || valueJson.trim().isEmpty()) {
@@ -687,6 +724,71 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             LOGGER.error("Error in sinkless changefeed consumption: {}", e.getMessage(), e);
             throw new RuntimeException("Failed to stream sinkless changefeed from CockroachDB: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Executes the sinkless streaming query and retries it once from a fresh initial scan when a
+     * stored cursor is rejected under {@code snapshot.mode=when_needed}. The failed statement
+     * aborts pgjdbc's explicit transaction, so it must be rolled back before the retry.
+     */
+    ResultSet executeSinklessChangefeed(Statement stmt, Connection connection, List<TableId> tables,
+                                        String cursor, boolean hasPriorOffset)
+            throws SQLException {
+        String query = buildSinklessChangefeedQuery(tables, cursor, hasPriorOffset);
+        try {
+            return stmt.executeQuery(query);
+        }
+        catch (SQLException e) {
+            if (!shouldRecoverFromInvalidCursor(e, hasPriorOffset)) {
+                throw e;
+            }
+            logInvalidCursorRecovery(e);
+            connection.rollback();
+            initialScanInProgress = true;
+            String recoveryQuery = buildSinklessChangefeedQuery(tables, null, false);
+            LOGGER.debug("Invalid-cursor recovery sinkless query: {}", recoveryQuery);
+            return stmt.executeQuery(recoveryQuery);
+        }
+    }
+
+    private boolean shouldRecoverFromInvalidCursor(SQLException exception, boolean hasPriorOffset) {
+        return hasPriorOffset
+                && config.getSnapshotMode() == CockroachDBConnectorConfig.SnapshotMode.WHEN_NEEDED
+                && isInvalidCursorRejection(exception);
+    }
+
+    private void logInvalidCursorRecovery(SQLException exception) {
+        LOGGER.warn("CockroachDB rejected the stored changefeed cursor while snapshot.mode=when_needed is configured. "
+                + "Retrying once without the cursor and with an initial scan. Existing rows will be re-read and "
+                + "duplicate events can be emitted. Deletes that occurred while the connector was offline cannot "
+                + "be recovered by this snapshot and will be lost. CockroachDB error: {}", exception.getMessage());
+    }
+
+    /**
+     * Recognizes only CockroachDB's specific historical-cursor failures. General undefined-table,
+     * connectivity, authorization, and syntax failures deliberately do not match.
+     */
+    static boolean isInvalidCursorRejection(SQLException exception) {
+        for (SQLException current = exception; current != null; current = current.getNextException()) {
+            if (isInvalidCursorMessage(current.getMessage())) {
+                return true;
+            }
+        }
+        for (Throwable current = exception.getCause(); current != null; current = current.getCause()) {
+            if (isInvalidCursorMessage(current.getMessage())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isInvalidCursorMessage(String message) {
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("do the targets exist at the specified cursor time")
+                || normalized.contains("must be after replica gc threshold");
     }
 
     /**

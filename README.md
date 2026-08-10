@@ -65,6 +65,14 @@ intermediate Kafka. See the
 [connector documentation](https://debezium.io/documentation/reference/stable/connectors/cockroachdb.html)
 for the trade-offs.
 
+### Snapshot recovery
+
+With `snapshot.mode=when_needed`, the connector normally resumes from its stored cursor. If
+CockroachDB specifically rejects that historical cursor because the required history is no longer
+available, the connector retries once without the cursor and performs a new initial scan. That scan
+re-reads rows that still exist and can therefore emit duplicates. It cannot reconstruct rows that
+were deleted while the connector was offline, so those delete events are permanently lost.
+
 ## Building
 
 Requirements: JDK 17+, Docker (for integration tests).

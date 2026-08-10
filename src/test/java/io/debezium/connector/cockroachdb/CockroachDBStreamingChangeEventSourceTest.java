@@ -6,11 +6,20 @@
 package io.debezium.connector.cockroachdb;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.List;
 import java.util.Set;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -181,6 +190,77 @@ public class CockroachDBStreamingChangeEventSourceTest {
                 .with("topic.prefix", "crdb")
                 .with("cockroachdb.changefeed.sink.type", "kafka")
                 .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
+    }
+
+    @Test
+    void recognizesOnlyCockroachDbHistoricalCursorFailures() {
+        SQLException missingAtCursor = new SQLException(
+                "failed to resolve targets in the CHANGEFEED stmt: table does not exist "
+                        + "HINT: do the targets exist at the specified cursor time 1?",
+                "42P01");
+        SQLException belowGcThreshold = new SQLException(
+                "batch timestamp 1 must be after replica GC threshold 2", "XXUUU");
+
+        assertThat(CockroachDBStreamingChangeEventSource.isInvalidCursorRejection(missingAtCursor)).isTrue();
+        assertThat(CockroachDBStreamingChangeEventSource.isInvalidCursorRejection(belowGcThreshold)).isTrue();
+        assertThat(CockroachDBStreamingChangeEventSource.isInvalidCursorRejection(
+                new SQLException("table orders does not exist", "42P01"))).isFalse();
+        assertThat(CockroachDBStreamingChangeEventSource.isInvalidCursorRejection(
+                new SQLException("connection refused", "08001"))).isFalse();
+    }
+
+    @Test
+    void retriesSinkChangefeedOnceWithoutCursorForWhenNeeded() throws Exception {
+        CockroachDBStreamingChangeEventSource source = source(baseConfig()
+                .with("snapshot.mode", "when_needed")
+                .build());
+        Statement statement = mock(Statement.class);
+        SQLException staleCursor = new SQLException(
+                "HINT: do the targets exist at the specified cursor time 1?", "42P01");
+        doThrow(staleCursor).doReturn(false).when(statement).execute(anyString());
+
+        boolean recovered = source.executeSinkChangefeed(
+                statement, List.of(new TableId("testdb", "public", "orders")), "1.0000000000", true);
+
+        assertThat(recovered).isTrue();
+        ArgumentCaptor<String> queries = ArgumentCaptor.forClass(String.class);
+        verify(statement, times(2)).execute(queries.capture());
+        assertThat(queries.getAllValues().get(0))
+                .contains("cursor = '1.0000000000'", "initial_scan = 'no'");
+        assertThat(queries.getAllValues().get(1))
+                .contains("initial_scan = 'yes'")
+                .doesNotContain("cursor =");
+    }
+
+    @Test
+    void doesNotRetryInvalidCursorOutsideWhenNeededMode() throws Exception {
+        CockroachDBStreamingChangeEventSource source = source(baseConfig()
+                .with("snapshot.mode", "initial")
+                .build());
+        Statement statement = mock(Statement.class);
+        SQLException staleCursor = new SQLException(
+                "HINT: do the targets exist at the specified cursor time 1?", "42P01");
+        doThrow(staleCursor).when(statement).execute(anyString());
+
+        assertThatThrownBy(() -> source.executeSinkChangefeed(
+                statement, List.of(new TableId("testdb", "public", "orders")), "1.0000000000", true))
+                .isSameAs(staleCursor);
+        verify(statement, times(1)).execute(anyString());
+    }
+
+    @Test
+    void doesNotRetryUnrelatedSqlFailuresInWhenNeededMode() throws Exception {
+        CockroachDBStreamingChangeEventSource source = source(baseConfig()
+                .with("snapshot.mode", "when_needed")
+                .build());
+        Statement statement = mock(Statement.class);
+        SQLException permissionDenied = new SQLException("user does not have CHANGEFEED privilege", "42501");
+        doThrow(permissionDenied).when(statement).execute(anyString());
+
+        assertThatThrownBy(() -> source.executeSinkChangefeed(
+                statement, List.of(new TableId("testdb", "public", "orders")), "1.0000000000", true))
+                .isSameAs(permissionDenied);
+        verify(statement, times(1)).execute(anyString());
     }
 
     @Test

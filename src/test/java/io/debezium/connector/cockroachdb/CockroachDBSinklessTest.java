@@ -6,7 +6,16 @@
 package io.debezium.connector.cockroachdb;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -74,6 +83,31 @@ public class CockroachDBSinklessTest {
                 null, false);
         assertThat(query).contains("public.orders");
         assertThat(query).contains("inventory.warehouse_items");
+    }
+
+    @Test
+    public void shouldRollbackAndRetrySinklessQueryForWhenNeeded() throws Exception {
+        CockroachDBStreamingChangeEventSource source = createSource(sinklessConfig()
+                .with("snapshot.mode", "when_needed")
+                .build());
+        Statement statement = mock(Statement.class);
+        Connection connection = mock(Connection.class);
+        ResultSet recoveredResult = mock(ResultSet.class);
+        SQLException staleCursor = new SQLException(
+                "batch timestamp 1 must be after replica GC threshold 2", "XXUUU");
+        when(statement.executeQuery(anyString())).thenThrow(staleCursor).thenReturn(recoveredResult);
+
+        ResultSet result = source.executeSinklessChangefeed(
+                statement, connection, List.of(new TableId("testdb", "public", "orders")), "1.0000000000", true);
+
+        assertThat(result).isSameAs(recoveredResult);
+        verify(connection).rollback();
+        org.mockito.ArgumentCaptor<String> queries = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(statement, times(2)).executeQuery(queries.capture());
+        assertThat(queries.getAllValues().get(0)).contains("cursor = '1.0000000000'");
+        assertThat(queries.getAllValues().get(1))
+                .contains("initial_scan = 'yes'")
+                .doesNotContain("cursor =");
     }
 
     @Test
