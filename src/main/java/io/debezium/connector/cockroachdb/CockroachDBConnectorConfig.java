@@ -142,7 +142,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     + "'initial' (default): On first start (no prior offset), the changefeed is created with initial_scan='yes'. On restart with an existing offset, it resumes streaming with cursor=<offset>.; "
                     + "'initial_only': The changefeed is created with initial_scan='only'. All existing rows are backfilled, then the connector stops.; "
                     + "'no_data'/'never': The changefeed is created with initial_scan='no'. Only ongoing changes are streamed.; "
-                    + "'when_needed': Like 'initial', but also re-snapshots if the stored offset is no longer valid.; "
+                    + "'when_needed': Like 'initial'. If CockroachDB rejects a stored cursor because its history is no longer available, the connector retries once with an initial scan. Existing rows are re-read, but deletes from the unavailable interval cannot be recovered.; "
                     + "'configuration_based': Delegates to snapshot.mode.configuration.based.* properties.; "
                     + "'custom': Loads a custom snapshotter class.");
 
