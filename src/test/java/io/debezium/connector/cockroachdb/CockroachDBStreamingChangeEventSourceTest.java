@@ -248,6 +248,37 @@ public class CockroachDBStreamingChangeEventSourceTest {
     }
 
     @Test
+    void quotesStructuredIdentifierComponentsAndEscapesEmbeddedQuotes() {
+        TableId table = new TableId("test.db", "stock-trading", "ord\"er");
+
+        assertThat(CockroachDBStreamingChangeEventSource.quoteTableId(table))
+                .isEqualTo("\"test.db\".\"stock-trading\".\"ord\"\"er\"");
+
+        String query = source(baseConfig().build()).buildSinkChangefeedQuery(List.of(table), null, false);
+        assertThat(query).contains("FOR TABLE \"test.db\".\"stock-trading\".\"ord\"\"er\" INTO");
+    }
+
+    @Test
+    void parsesQuotedChangefeedDescriptionWithoutLosingIdentifierCharacters() {
+        String description = "CREATE CHANGEFEED FOR TABLE \"test.db\".\"stock-trading\".\"ord\"\"er\", "
+                + "TABLE \"test.db\".\"audit,log\".\"events\" INTO 'kafka://k' WITH OPTIONS (envelope = 'enriched')";
+
+        assertThat(CockroachDBStreamingChangeEventSource.parseChangefeedTables(description))
+                .containsExactly("test.db.stock-trading.ord\"er", "test.db.audit,log.events");
+    }
+
+    @Test
+    void matchesQuotedChangefeedDescriptionToStructuredTableId() {
+        String description = "CREATE CHANGEFEED FOR TABLE \"test.db\".\"stock-trading\".\"ord\"\"er\" "
+                + "INTO 'kafka://k?topic_prefix=crdb.' WITH OPTIONS (envelope = 'enriched')";
+
+        assertThat(CockroachDBStreamingChangeEventSource.descriptionCapturesTable(
+                description, new TableId("test.db", "stock-trading", "ord\"er"))).isTrue();
+        assertThat(CockroachDBStreamingChangeEventSource.descriptionCapturesTable(
+                description, new TableId("test.db", "stock-trading", "other"))).isFalse();
+    }
+
+    @Test
     public void shouldFindTablesTheJobCapturesBeyondTheIncludeList() {
         Set<String> included = Set.of("fdasbookdbo.account", "fdasbookdbo.journal");
         assertThat(CockroachDBStreamingChangeEventSource.findExtraCapturedTables(
