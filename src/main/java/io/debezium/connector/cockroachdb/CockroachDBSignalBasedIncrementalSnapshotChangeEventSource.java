@@ -10,6 +10,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
@@ -90,8 +91,15 @@ public class CockroachDBSignalBasedIncrementalSnapshotChangeEventSource
     static List<String> findUncapturedDataCollections(Collection<TableId> capturedTables, List<String> requestedPatterns) {
         return requestedPatterns.stream()
                 .filter(requested -> {
-                    Pattern pattern = Pattern.compile(requested);
-                    return capturedTables.stream().noneMatch(table -> matches(pattern, table));
+                    try {
+                        Pattern pattern = Pattern.compile(requested);
+                        return capturedTables.stream().noneMatch(table -> matches(pattern, table));
+                    }
+                    catch (PatternSyntaxException e) {
+                        LOGGER.warn("Incremental snapshot signal contains malformed data collection pattern '{}'; "
+                                + "treating it as uncaptured: {}", requested, e.getDescription());
+                        return true;
+                    }
                 })
                 .collect(Collectors.toList());
     }
