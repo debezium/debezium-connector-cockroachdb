@@ -27,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -55,6 +56,8 @@ import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
 import io.debezium.connector.cockroachdb.serialization.ChangefeedJsonMapper;
 import io.debezium.data.Envelope;
 import io.debezium.pipeline.EventDispatcher;
+import io.debezium.pipeline.monitor.OffsetActivityMonitor;
+import io.debezium.pipeline.monitor.OffsetActivityMonitorService;
 import io.debezium.pipeline.source.spi.SnapshotProgressListener;
 import io.debezium.pipeline.source.spi.StreamingChangeEventSource;
 import io.debezium.relational.TableId;
@@ -131,6 +134,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     private volatile CockroachDBOffsetContext currentOffsetContext;
 
+    private final OffsetActivityMonitorService offsetActivityMonitorService;
+    private OffsetActivityMonitor<CockroachDBPartition, CockroachDBOffsetContext> offsetActivityMonitor;
+
     /**
      * Drives the JMX snapshot metrics (SnapshotRunning/SnapshotCompleted) for the changefeed
      * initial scan. May be null when the connector is constructed without a snapshot phase.
@@ -148,6 +154,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         this.schema = schema;
         this.clock = clock;
         this.snapshotProgressListener = snapshotProgressListener;
+        this.offsetActivityMonitorService = OffsetActivityMonitorService.lookup(config.getServiceRegistry());
     }
 
     @Override
@@ -581,6 +588,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     }
                 }
 
+                offsetActivityMonitorService.pulse(currentPartition, offsetContext);
+
                 if (config.getSnapshotMode() == CockroachDBConnectorConfig.SnapshotMode.INITIAL_ONLY
                         && !initialScanInProgress) {
                     LOGGER.info("Initial scan completed and snapshot.mode=initial_only, stopping connector");
@@ -663,6 +672,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                         // Resolved-timestamp rows carry no table; processChangefeedEvent handles
                         // them by their "resolved" field regardless of the table argument.
                         processChangefeedEvent(keyJson, valueJson, table, offsetContext);
+
+                        offsetActivityMonitorService.pulse(currentPartition, offsetContext);
 
                         if (config.getSnapshotMode() == CockroachDBConnectorConfig.SnapshotMode.INITIAL_ONLY
                                 && !initialScanInProgress) {
@@ -1382,6 +1393,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     @Override
     public CockroachDBOffsetContext getOffsetContext() {
         return currentOffsetContext;
+    }
+
+    @Override
+    public Optional<OffsetActivityMonitor<CockroachDBPartition, CockroachDBOffsetContext>> getOffsetActivityMonitor() {
+        if (offsetActivityMonitor == null) {
+            offsetActivityMonitor = new CockroachDBOffsetActivityMonitor(config.getOffsetActivityMonitorInterval());
+        }
+        return Optional.of(offsetActivityMonitor);
     }
 
     public void stop() {
