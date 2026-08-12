@@ -29,15 +29,6 @@ Runnable end-to-end examples (CockroachDB to CockroachDB, Oracle, Iceberg, sinkl
 embedded engine, and workload-based verification) live in the
 [examples repository](https://github.com/viragtripathi/debezium-cockroachdb-examples).
 
-## Table discovery
-
-The connector resolves `table.include.list` and `table.exclude.list` patterns when the task starts
-and freezes the discovered tables into the running CockroachDB changefeed. A table created later is
-not captured automatically, even when its name matches an include-list regular expression. Restart
-the connector to rediscover and add it. An `execute-snapshot` signal that requests a table outside
-the running capture set logs a warning; restart the connector before snapshotting that table so its
-subsequent changes are also streamed. This behavior is the same for `kafka` and `sinkless` delivery.
-
 ## Quick start
 
 Install the plugin from Maven Central

@@ -14,11 +14,17 @@ import java.util.Optional;
 import java.util.Set;
 
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import io.debezium.config.Configuration;
 import io.debezium.pipeline.source.snapshot.incremental.IncrementalSnapshotContext;
 import io.debezium.pipeline.source.snapshot.incremental.SignalBasedIncrementalSnapshotContext;
 import io.debezium.relational.TableId;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 
 /**
  * Unit tests for CockroachDB incremental snapshot support.
@@ -116,5 +122,29 @@ public class CockroachDBIncrementalSnapshotTest {
         assertThat(CockroachDBSignalBasedIncrementalSnapshotChangeEventSource.findUncapturedDataCollections(
                 captured, List.of("testdb\\.public\\.orders_.*")))
                 .isEmpty();
+    }
+
+    @Test
+    public void shouldTreatMalformedSnapshotRegexAsUncapturedAndWarn() {
+        Logger logger = (Logger) LoggerFactory.getLogger(CockroachDBSignalBasedIncrementalSnapshotChangeEventSource.class);
+        ListAppender<ILoggingEvent> warnings = new ListAppender<>();
+        warnings.start();
+        logger.addAppender(warnings);
+
+        try {
+            assertThat(CockroachDBSignalBasedIncrementalSnapshotChangeEventSource.findUncapturedDataCollections(
+                    Set.of(new TableId("testdb", "public", "orders")), List.of("testdb\\.public\\.[")))
+                    .containsExactly("testdb\\.public\\.[");
+            assertThat(warnings.list)
+                    .anySatisfy(event -> {
+                        assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                        assertThat(event.getFormattedMessage())
+                                .contains("malformed data collection pattern", "testdb\\.public\\.[", "treating it as uncaptured");
+                    });
+        }
+        finally {
+            logger.detachAppender(warnings);
+            warnings.stop();
+        }
     }
 }
