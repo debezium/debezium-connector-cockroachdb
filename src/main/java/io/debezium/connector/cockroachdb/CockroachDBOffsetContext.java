@@ -232,4 +232,13 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
     public void setConsumerOffset(String key, long offset) {
         consumerOffsets.put(key, offset);
     }
+
+    /**
+     * Returns an immutable snapshot of the intermediate consumer positions keyed by their
+     * sink-defined keys; empty when no position has been recorded (for example on first start,
+     * or always in the sinkless mode which has no intermediate consumer).
+     */
+    public Map<String, Long> getConsumerOffsets() {
+        return Map.copyOf(consumerOffsets);
+    }
 }
