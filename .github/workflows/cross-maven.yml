@@ -46,7 +46,7 @@ jobs:
 
           while IFS=" " read -r BRANCH;
           do
-            if grep -q "$branch_name" <<< "$BRANCH"; then
+            if [ "$BRANCH" = "$branch_name" ]; then
               echo "BRANCH_FOUND=true" >> $GITHUB_OUTPUT
             fi
           done < SORTED_PULLS.txt
