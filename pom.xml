@@ -138,6 +138,11 @@
             <artifactId>connect-api</artifactId>
             <scope>provided</scope>
         </dependency>
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>connect-json</artifactId>
+            <scope>test</scope>
+        </dependency>
 
         <!-- JSON processing -->
         <dependency>
