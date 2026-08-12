@@ -8,7 +8,6 @@ package io.debezium.connector.cockroachdb;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.List;
-import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
@@ -279,8 +278,21 @@ public class CockroachDBStreamingChangeEventSourceTest {
     }
 
     @Test
+    void matchesLiveSelectivelyQuotedDescriptionWithoutDatabaseComponent() {
+        String description = "CREATE CHANGEFEED FOR TABLE \"stock-trading\".order INTO 'null:' "
+                + "WITH OPTIONS (envelope = 'enriched')";
+
+        assertThat(CockroachDBStreamingChangeEventSource.parseChangefeedTables(description))
+                .containsExactly("stock-trading.order");
+        assertThat(CockroachDBStreamingChangeEventSource.descriptionCapturesTable(
+                description, new TableId("testdb", "stock-trading", "order"))).isTrue();
+    }
+
+    @Test
     public void shouldFindTablesTheJobCapturesBeyondTheIncludeList() {
-        Set<String> included = Set.of("fdasbookdbo.account", "fdasbookdbo.journal");
+        List<TableId> included = List.of(
+                new TableId("testdb", "fdasbookdbo", "account"),
+                new TableId("testdb", "fdasbookdbo", "journal"));
         assertThat(CockroachDBStreamingChangeEventSource.findExtraCapturedTables(
                 "CREATE CHANGEFEED FOR TABLE fdasbookdbo.account, TABLE fdasbookdbo.journal, "
                         + "TABLE fdasbookdbo.tax_cost_basis INTO 'kafka://k' WITH OPTIONS (envelope = 'enriched')",
@@ -290,7 +302,9 @@ public class CockroachDBStreamingChangeEventSourceTest {
 
     @Test
     public void shouldFindNoExtrasWhenTheJobMatchesTheIncludeList() {
-        Set<String> included = Set.of("fdasbookdbo.account", "fdasbookdbo.journal");
+        List<TableId> included = List.of(
+                new TableId("testdb", "fdasbookdbo", "account"),
+                new TableId("testdb", "fdasbookdbo", "journal"));
         assertThat(CockroachDBStreamingChangeEventSource.findExtraCapturedTables(
                 "CREATE CHANGEFEED FOR TABLE fdasbookdbo.account, TABLE fdasbookdbo.journal INTO 'kafka://k' "
                         + "WITH OPTIONS (envelope = 'enriched')",
@@ -302,7 +316,7 @@ public class CockroachDBStreamingChangeEventSourceTest {
     public void shouldMatchIncludedTablesByQualifiedSuffix() {
         // The job description can carry database-qualified names while the include list uses
         // schema.table form; qualification differences are not extras.
-        Set<String> included = Set.of("fdasbookdbo.account");
+        List<TableId> included = List.of(new TableId(null, "fdasbookdbo", "account"));
         assertThat(CockroachDBStreamingChangeEventSource.findExtraCapturedTables(
                 "CREATE CHANGEFEED FOR TABLE prf1fdasbook.fdasbookdbo.account INTO 'kafka://k' "
                         + "WITH OPTIONS (envelope = 'enriched')",
