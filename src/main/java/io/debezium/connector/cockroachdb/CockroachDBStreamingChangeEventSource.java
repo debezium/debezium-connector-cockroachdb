@@ -416,7 +416,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                         // The captured table set is frozen at job creation. If tables were removed
                         // from table.include.list since, the reused job keeps streaming them at full
                         // volume into intermediate topics that nothing consumes.
-                        List<String> extraTables = findExtraCapturedTablesForTableIds(description, allIncludedTables);
+                        List<String> extraTables = findExtraCapturedTables(description, allIncludedTables);
                         if (!extraTables.isEmpty()) {
                             LOGGER.warn("Reused changefeed job {} also captures table(s) {} that are not in "
                                     + "table.include.list. The job keeps streaming them into intermediate topics that "
@@ -1162,7 +1162,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 .anyMatch(captured -> qualifiedSuffixMatches(captured, expected));
     }
 
-    private static List<String> findExtraCapturedTablesForTableIds(String description, Collection<TableId> includedTables) {
+    static List<String> findExtraCapturedTables(String description, Collection<TableId> includedTables) {
         List<List<String>> included = includedTables.stream()
                 .map(CockroachDBStreamingChangeEventSource::tableIdComponents)
                 .collect(Collectors.toList());
@@ -1197,31 +1197,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             }
         }
         return shared > 0;
-    }
-
-    /**
-     * Returns the tables a changefeed captures that match none of the included identifiers.
-     * A captured name matches an included identifier when they are equal or when one is a
-     * dot-qualified suffix of the other, so a database-qualified job name matches a
-     * schema-qualified include entry.
-     */
-    static List<String> findExtraCapturedTables(String description, Set<String> includedIdentifiers) {
-        List<String> extras = new ArrayList<>();
-        for (String captured : parseChangefeedTables(description)) {
-            boolean matched = false;
-            for (String included : includedIdentifiers) {
-                if (captured.equals(included)
-                        || captured.endsWith("." + included)
-                        || included.endsWith("." + captured)) {
-                    matched = true;
-                    break;
-                }
-            }
-            if (!matched) {
-                extras.add(captured);
-            }
-        }
-        return extras;
     }
 
     /**
