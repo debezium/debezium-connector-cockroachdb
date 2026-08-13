@@ -9,17 +9,15 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import io.debezium.pipeline.monitor.OffsetActivityMonitor;
+import io.debezium.pipeline.monitor.StaleOffsetsResult;
 
 /**
  * An {@link OffsetActivityMonitor} that tracks state changes to the connector's offsets.
  * <p>
  * The changefeed cursor and the intermediate consumer positions are compared against the
- * values captured when the monitor was last consulted, and when neither has moved, a warning
- * is logged. The cursor is the resolved timestamp that governs where the changefeed resumes
+ * values captured when the monitor was last consulted, and when neither has moved, a stale
+ * result is reported. The cursor is the resolved timestamp that governs where the changefeed resumes
  * on restart; because CockroachDB emits resolved timestamps at the configured resolved
  * interval even when the database is idle, an unmoved cursor typically indicates the
  * changefeed job is paused or failed, or that events are no longer being received from the
@@ -35,8 +33,6 @@ import io.debezium.pipeline.monitor.OffsetActivityMonitor;
  */
 public class CockroachDBOffsetActivityMonitor implements OffsetActivityMonitor<CockroachDBPartition, CockroachDBOffsetContext> {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBOffsetActivityMonitor.class);
-
     private final Duration checkInterval;
 
     private String previousCursor;
@@ -47,25 +43,29 @@ public class CockroachDBOffsetActivityMonitor implements OffsetActivityMonitor<C
     }
 
     @Override
-    public void checkForStaleOffsets(CockroachDBPartition partition, CockroachDBOffsetContext offsetContext) {
+    public StaleOffsetsResult checkForStaleOffsets(CockroachDBPartition partition, CockroachDBOffsetContext offsetContext) {
         final String cursor = offsetContext.getCursor();
         final Map<String, Long> consumerOffsets = offsetContext.getConsumerOffsets();
 
         // Check for stale state
+        StaleOffsetsResult result = StaleOffsetsResult.fresh();
         if ((isResolvedCursor(cursor) || !consumerOffsets.isEmpty())
                 && Objects.equals(previousCursor, cursor)
                 && Objects.equals(previousConsumerOffsets, consumerOffsets)) {
-            LOGGER.warn("Offset cursor {} and intermediate consumer positions have not changed in {} milliseconds. " +
-                    "CockroachDB emits resolved timestamps at the configured resolved interval even when the " +
-                    "database is idle, so this may indicate the changefeed job is paused or failed, events are " +
-                    "no longer being received from the changefeed sink, or the resolved interval is longer than " +
-                    "the check interval.",
-                    cursor, checkInterval.toMillis());
+            result = StaleOffsetsResult.stale(
+                    ("Offset cursor %s and intermediate consumer positions have not changed in %d milliseconds. " +
+                            "CockroachDB emits resolved timestamps at the configured resolved interval even when the " +
+                            "database is idle, so this may indicate the changefeed job is paused or failed, events are " +
+                            "no longer being received from the changefeed sink, or the resolved interval is longer than " +
+                            "the check interval.")
+                            .formatted(cursor, checkInterval.toMillis()));
         }
 
         // Update tracked stats
         previousCursor = cursor;
         previousConsumerOffsets = consumerOffsets;
+
+        return result;
     }
 
     /**
