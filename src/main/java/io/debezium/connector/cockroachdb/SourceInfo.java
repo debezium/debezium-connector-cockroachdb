@@ -9,6 +9,7 @@ import java.time.Instant;
 
 import io.debezium.annotation.NotThreadSafe;
 import io.debezium.connector.common.BaseSourceInfo;
+import io.debezium.relational.TableId;
 
 /**
  * Coordinates metadata from CockroachDB changefeed events
@@ -26,11 +27,32 @@ public class SourceInfo extends BaseSourceInfo {
     private String resolvedTimestamp;
     private String hlc;
     private Long tsNanos;
+    private String schemaName;
+    private String tableName;
 
     protected SourceInfo(CockroachDBConnectorConfig connectorConfig) {
         super(connectorConfig);
         this.databaseName = connectorConfig.getDatabaseName();
         this.clusterName = connectorConfig.getLogicalName();
+    }
+
+    /**
+     * Records the collection of the event being emitted so the source block carries its
+     * schema and table, matching the PostgreSQL and SQL Server connectors.
+     */
+    public void tableEvent(TableId tableId) {
+        if (tableId != null) {
+            this.schemaName = tableId.schema();
+            this.tableName = tableId.table();
+        }
+    }
+
+    public String schemaName() {
+        return schemaName;
+    }
+
+    public String tableName() {
+        return tableName;
     }
 
     public void setSourceTime(Instant instant) {

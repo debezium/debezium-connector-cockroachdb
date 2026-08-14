@@ -951,6 +951,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 keyNode = (parsedKey != null && parsedKey.has("payload")) ? parsedKey.get("payload") : parsedKey;
             }
 
+            // Record the event's collection on the offset context so the source block carries
+            // schema and table (debezium/dbz#2432). The timestamp is passed through unchanged;
+            // it advances only on resolved timestamps, as before.
+            offsetContext.event(table, offsetContext.getTimestamp());
+
             CockroachDBChangeRecordEmitter emitter = new CockroachDBChangeRecordEmitter(
                     currentPartition, offsetContext, clock, config, tableObj, operation,
                     afterNode.isMissingNode() ? null : afterNode,

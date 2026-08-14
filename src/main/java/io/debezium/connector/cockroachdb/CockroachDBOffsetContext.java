@@ -124,6 +124,9 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
     @Override
     public void event(DataCollectionId collectionId, Instant ts) {
         setTimestamp(ts);
+        if (collectionId instanceof TableId) {
+            sourceInfo.tableEvent((TableId) collectionId);
+        }
     }
 
     @Override

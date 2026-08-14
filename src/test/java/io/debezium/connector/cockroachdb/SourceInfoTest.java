@@ -181,4 +181,25 @@ public class SourceInfoTest {
         assertThat(stringRepresentation).isNotNull();
         assertThat(stringRepresentation).isNotEmpty();
     }
+
+    @Test
+    public void shouldExposeSchemaAndTableOfTheCurrentEvent() {
+        sourceInfo.tableEvent(new io.debezium.relational.TableId("testdb", "pierbookdbo", "account"));
+
+        assertThat(sourceInfo.schemaName()).isEqualTo("pierbookdbo");
+        assertThat(sourceInfo.tableName()).isEqualTo("account");
+
+        Struct struct = sourceInfo.struct();
+        assertThat(struct.getString("schema")).isEqualTo("pierbookdbo");
+        assertThat(struct.getString("table")).isEqualTo("account");
+    }
+
+    @Test
+    public void shouldOmitSchemaAndTableUntilAnEventArrives() {
+        Struct struct = sourceInfo.struct();
+        assertThat(struct.schema().field("schema")).isNotNull();
+        assertThat(struct.schema().field("table")).isNotNull();
+        assertThat(struct.getString("schema")).isNull();
+        assertThat(struct.getString("table")).isNull();
+    }
 }

@@ -39,6 +39,8 @@ public class CockroachDBSourceInfoStructMaker extends AbstractSourceInfoStructMa
 
     // CockroachDB-specific field names
     // Note: "db" and "ts_ns" fields are already provided by the base class, so we don't duplicate them
+    private static final String FIELD_SCHEMA_NAME = "schema";
+    private static final String FIELD_TABLE_NAME = "table";
     private static final String FIELD_CLUSTER = "cluster";
     private static final String FIELD_RESOLVED_TS = "resolved_ts";
     private static final String FIELD_HLC = "ts_hlc";
@@ -53,6 +55,8 @@ public class CockroachDBSourceInfoStructMaker extends AbstractSourceInfoStructMa
         this.schema = commonSchemaBuilder()
                 .name("io.debezium.connector.cockroachdb.Source")
                 // Note: "db" and "ts_ns" fields are already included by commonSchemaBuilder()
+                .field(FIELD_SCHEMA_NAME, Schema.OPTIONAL_STRING_SCHEMA) // schema of the event's table
+                .field(FIELD_TABLE_NAME, Schema.OPTIONAL_STRING_SCHEMA) // table of the event
                 .field(FIELD_CLUSTER, Schema.OPTIONAL_STRING_SCHEMA) // CockroachDB cluster name
                 .field(FIELD_RESOLVED_TS, Schema.OPTIONAL_STRING_SCHEMA) // Resolved timestamp for consistency
                 .field(FIELD_HLC, Schema.OPTIONAL_STRING_SCHEMA) // Hybrid Logical Clock timestamp
@@ -72,6 +76,12 @@ public class CockroachDBSourceInfoStructMaker extends AbstractSourceInfoStructMa
         Objects.requireNonNull(sourceInfo, "sourceInfo must not be null");
 
         Struct result = super.commonStruct(sourceInfo);
+        if (sourceInfo.schemaName() != null) {
+            result.put(FIELD_SCHEMA_NAME, sourceInfo.schemaName());
+        }
+        if (sourceInfo.tableName() != null) {
+            result.put(FIELD_TABLE_NAME, sourceInfo.tableName());
+        }
         result.put(FIELD_CLUSTER, sourceInfo.cluster());
         result.put(FIELD_RESOLVED_TS, sourceInfo.resolvedTimestamp());
 

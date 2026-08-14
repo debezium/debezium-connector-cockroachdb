@@ -299,6 +299,27 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
         }
     }
 
+    @Test
+    public void shouldCarrySchemaAndTableInTheSourceBlock() throws Exception {
+        connection = openDatabase("srcblock_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS accounts (id INT8 PRIMARY KEY, balance INT8 NOT NULL)");
+            stmt.execute("UPSERT INTO accounts VALUES (1, 100)");
+        }
+
+        Map<String, String> config = baseConnectorConfig(
+                "srcblock-test", "srcblock_testdb", "public\\.accounts");
+        startTask(config);
+
+        List<SourceRecord> records = pollForRecords(1, 45);
+        assertThat(records).isNotEmpty();
+        Struct source = ((Struct) records.get(0).value()).getStruct("source");
+        assertThat(source.getString("schema"))
+                .as("source.schema enables JDBC sink routing via ${source.schema} (debezium/dbz#2432)")
+                .isEqualTo("public");
+        assertThat(source.getString("table")).isEqualTo("accounts");
+    }
+
     private boolean isDelete(SourceRecord record) {
         if (record.value() == null) {
             return false;
