@@ -227,6 +227,63 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
     }
 
     @Test
+    public void shouldFailFastWhenMatchingChangefeedIsPaused() throws Exception {
+        connection = openDatabase("reuse_paused_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS paused_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO paused_events VALUES (1, 'Alice')");
+        }
+
+        // First run creates the changefeed.
+        startTask(baseConnectorConfig("paused-test", "reuse_paused_testdb", "public.paused_events"));
+        assertThat(pollUntilRecordsOrError(30).records).as("First run should stream the seed row").isNotEmpty();
+        stopTask();
+
+        // Pause the job, as an operator doing maintenance would. The job is now invisible to a
+        // running-only reuse check; without the guard the connector creates an identical twin
+        // that double-produces once the paused job resumes (debezium/dbz#2462).
+        String jobId = null;
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery(
+                        "SELECT job_id FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' AND description LIKE '%paused_events%'")) {
+            if (rs.next()) {
+                jobId = rs.getString(1);
+            }
+        }
+        assertThat(jobId).as("The first run's changefeed job must exist").isNotNull();
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("PAUSE JOB " + jobId);
+        }
+        // PAUSE is asynchronous: wait for the job to leave the running state.
+        for (int i = 0; i < 30; i++) {
+            try (Statement stmt = connection.createStatement();
+                    ResultSet rs = stmt.executeQuery(
+                            "SELECT status FROM [SHOW CHANGEFEED JOBS] WHERE job_id = " + jobId)) {
+                if (rs.next() && "paused".equals(rs.getString(1))) {
+                    break;
+                }
+            }
+            Thread.sleep(1000);
+        }
+
+        // Second run must fail fast instead of creating a duplicate changefeed.
+        startTask(baseConnectorConfig("paused-test", "reuse_paused_testdb", "public.paused_events"));
+        PollOutcome outcome = pollUntilRecordsOrError(45);
+        assertThat(outcome.error)
+                .as("Startup with a matching paused changefeed should fail fast, not create a twin")
+                .isNotNull();
+        assertThat(outcome.error.getMessage() + " " + rootCauseMessage(outcome.error))
+                .contains("paused");
+
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery(
+                        "SELECT count(*) FROM [SHOW CHANGEFEED JOBS] WHERE status IN ('running', 'paused') AND description LIKE '%paused_events%'")) {
+            rs.next();
+            assertThat(rs.getInt(1)).as("No duplicate changefeed job may be created").isEqualTo(1);
+        }
+    }
+
+    @Test
     public void shouldCreateChangefeedWithKafkaSinkConfig() throws Exception {
         connection = openDatabase("sinkcfg_testdb");
         try (Statement stmt = connection.createStatement()) {
