@@ -423,12 +423,24 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         String sinkMarker = "topic_prefix=" + topicPrefix;
 
         try (Statement stmt = connection.connection().createStatement()) {
-            String query = "SELECT job_id, description FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running'";
+            // Paused jobs are matched too: a paused job is invisible to a running-only check,
+            // so a restart would create an identical twin that double-produces once the paused
+            // job resumes (debezium/dbz#2462). Canceled and failed jobs are correctly ignored.
+            String query = "SELECT job_id, status, description FROM [SHOW CHANGEFEED JOBS] "
+                    + "WHERE status IN ('running', 'paused', 'pause-requested')";
             try (var rs = stmt.executeQuery(query)) {
                 while (rs.next()) {
                     String jobId = rs.getString(1);
-                    String description = rs.getString(2);
+                    String status = rs.getString(2);
+                    String description = rs.getString(3);
                     if (description != null && descriptionCapturesTable(description, table) && description.contains(sinkMarker)) {
+                        if (!"running".equals(status)) {
+                            throw new IllegalStateException("Found changefeed job " + jobId + " covering table " + table
+                                    + " with topic prefix '" + topicPrefix + "' in status '" + status + "'. Starting anyway would "
+                                    + "create a duplicate changefeed that double-produces into the same intermediate topics once "
+                                    + "the paused job resumes. Resume it (RESUME JOB " + jobId + ") or cancel it (CANCEL JOB "
+                                    + jobId + ") before starting the connector.");
+                        }
                         // A changefeed with our topic prefix already covers this table. The connector
                         // can only consume the enriched envelope, so refuse to reuse one created with a
                         // different envelope rather than consuming it and failing to parse events. We
