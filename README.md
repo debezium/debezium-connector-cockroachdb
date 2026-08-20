@@ -1,6 +1,6 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Maven Central](https://img.shields.io/maven-central/v/io.debezium/debezium-connector-cockroachdb.svg?label=Maven%20Central)](https://search.maven.org/search?q=g:io.debezium%20AND%20a:debezium-connector-cockroachdb)
-[![Build Status](https://github.com/debezium/debezium-connector-cockroachdb/workflows/CI/badge.svg)](https://github.com/debezium/debezium-connector-cockroachdb/actions)
+[![Build Status](https://github.com/debezium/debezium-connector-cockroachdb/actions/workflows/maven.yml/badge.svg)](https://github.com/debezium/debezium-connector-cockroachdb/actions/workflows/maven.yml)
 [![Community](https://img.shields.io/badge/Community-Zulip-blue.svg)](https://debezium.zulipchat.com/#narrow/channel/510960-community-cockroachdb)
 
 Copyright Debezium Authors.
