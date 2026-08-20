@@ -367,6 +367,20 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDescription("What to do when there is no initial offset in Kafka. "
                     + "Options: 'earliest' (start from beginning), 'latest' (start from end).");
 
+    public static final Field CHANGEFEED_KAFKA_CONSUMER_OFFSET_COMMIT_ENABLED = Field.create("cockroachdb.changefeed.kafka.consumer.offset.commit.enabled")
+            .withDisplayName("Kafka consumer offset commit enabled")
+            .withType(Type.BOOLEAN)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
+            .withDefault(false)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDescription("Whether the connector also commits its consumed positions to the Kafka consumer "
+                    + "group after each processed batch, so that external lag tooling such as "
+                    + "kafka-consumer-groups reflects the connector's progress on the intermediate topics. "
+                    + "Disabled by default. The connector always resumes from the positions stored in the "
+                    + "Debezium offsets, never from the group, so this option has no effect on delivery "
+                    + "semantics.");
+
     public static final Field CHANGEFEED_SINK_OPTIONS = Field.create("cockroachdb.changefeed.sink.options")
             .withDisplayName("Changefeed sink options")
             .withType(Type.STRING)
@@ -546,6 +560,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     CHANGEFEED_KAFKA_CONSUMER_GROUP_PREFIX,
                     CHANGEFEED_KAFKA_POLL_TIMEOUT_MS,
                     CHANGEFEED_KAFKA_AUTO_OFFSET_RESET,
+                    CHANGEFEED_KAFKA_CONSUMER_OFFSET_COMMIT_ENABLED,
                     CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS,
                     CHANGEFEED_SINK_TLS_CA_CERT_FILE,
                     CHANGEFEED_SINK_TLS_CLIENT_CERT_FILE,
@@ -1177,6 +1192,10 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public String getChangefeedKafkaAutoOffsetReset() {
         return config.getString(CHANGEFEED_KAFKA_AUTO_OFFSET_RESET);
+    }
+
+    public boolean isChangefeedKafkaConsumerOffsetCommitEnabled() {
+        return config.getBoolean(CHANGEFEED_KAFKA_CONSUMER_OFFSET_COMMIT_ENABLED);
     }
 
     public String getChangefeedSinkTlsCaCertFile() {

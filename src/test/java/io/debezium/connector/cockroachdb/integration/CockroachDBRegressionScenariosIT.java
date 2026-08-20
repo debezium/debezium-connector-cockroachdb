@@ -15,7 +15,13 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.TimeUnit;
 
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.json.JsonConverter;
@@ -51,6 +57,10 @@ import ch.qos.logback.core.read.ListAppender;
  * {@code kafka_sink_config} changefeed option.</li>
  * <li>DBZ-2390: generated changefeed SQL must quote a hyphenated schema and a reserved-word
  * table in both Kafka and sinkless delivery modes.</li>
+ * <li>{@link #shouldMirrorConsumerPositionsToTheKafkaGroupWhenEnabled} (debezium/dbz#2472):
+ * with {@code cockroachdb.changefeed.kafka.consumer.offset.commit.enabled} the connector
+ * mirrors its consumed positions to the Kafka consumer group so external lag tooling works;
+ * {@link #shouldNotCommitGroupOffsetsByDefault} guards that the default stays commit-free.</li>
  * </ul>
  *
  * @author Virag Tripathi
@@ -280,6 +290,81 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
                         "SELECT count(*) FROM [SHOW CHANGEFEED JOBS] WHERE status IN ('running', 'paused') AND description LIKE '%paused_events%'")) {
             rs.next();
             assertThat(rs.getInt(1)).as("No duplicate changefeed job may be created").isEqualTo(1);
+        }
+    }
+
+    @Test
+    public void shouldMirrorConsumerPositionsToTheKafkaGroupWhenEnabled() throws Exception {
+        connection = openDatabase("offsetmirror_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS mirror_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO mirror_events VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')");
+        }
+
+        Map<String, String> config = baseConnectorConfig("offsetmirror-test", "offsetmirror_testdb", "public.mirror_events");
+        config.put("cockroachdb.changefeed.kafka.consumer.group.prefix", "offsetmirror-group");
+        config.put("cockroachdb.changefeed.kafka.consumer.offset.commit.enabled", "true");
+        startTask(config);
+
+        List<SourceRecord> records = pollForRecords(3, 45);
+        assertThat(records).as("Should receive the seed rows").hasSizeGreaterThanOrEqualTo(3);
+
+        // The mirror commit is asynchronous and only exists for external lag tooling, so poll the
+        // group offsets the way kafka-consumer-groups would until they appear.
+        Map<TopicPartition, OffsetAndMetadata> committed = new HashMap<>();
+        for (int i = 0; i < 30 && committed.isEmpty(); i++) {
+            committed = committedGroupOffsets("offsetmirror-group");
+            if (committed.isEmpty()) {
+                task.poll();
+                Thread.sleep(1000);
+            }
+        }
+
+        assertThat(committed)
+                .as("The consumer group should carry committed offsets for the intermediate topic")
+                .isNotEmpty();
+        assertThat(committed.keySet())
+                .anyMatch(tp -> tp.topic().contains("mirror_events"));
+        long mirroredPositions = committed.values().stream().mapToLong(OffsetAndMetadata::offset).sum();
+        assertThat(mirroredPositions)
+                .as("The mirrored position should cover the consumed events")
+                .isGreaterThanOrEqualTo(3);
+    }
+
+    @Test
+    public void shouldNotCommitGroupOffsetsByDefault() throws Exception {
+        connection = openDatabase("offsetdefault_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS default_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO default_events VALUES (1, 'Alice')");
+        }
+
+        Map<String, String> config = baseConnectorConfig("offsetdefault-test", "offsetdefault_testdb", "public.default_events");
+        config.put("cockroachdb.changefeed.kafka.consumer.group.prefix", "offsetdefault-group");
+        startTask(config);
+
+        List<SourceRecord> records = pollForRecords(1, 45);
+        assertThat(records).as("Should receive the seed row").isNotEmpty();
+
+        // Give the consumer a few more poll cycles; without the option no commit may ever happen.
+        for (int i = 0; i < 3; i++) {
+            task.poll();
+            Thread.sleep(1000);
+        }
+
+        assertThat(committedGroupOffsets("offsetdefault-group"))
+                .as("Without the option the connector must never commit group offsets")
+                .isEmpty();
+    }
+
+    private Map<TopicPartition, OffsetAndMetadata> committedGroupOffsets(String groupId) throws Exception {
+        Properties props = new Properties();
+        props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG,
+                kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", ""));
+        try (Admin admin = Admin.create(props)) {
+            return admin.listConsumerGroupOffsets(groupId)
+                    .partitionsToOffsetAndMetadata()
+                    .get(30, TimeUnit.SECONDS);
         }
     }
 

@@ -591,4 +591,33 @@ public class CockroachDBConnectorConfigTest {
         assertThat(overrides.getString("max.poll.records")).isEqualTo("1000");
         assertThat(overrides.keys()).hasSize(2);
     }
+
+    @Test
+    public void shouldDefaultConsumerOffsetCommitToDisabled() {
+        Map<String, String> props = new HashMap<>();
+        props.put("database.hostname", "localhost");
+        props.put("database.port", "26257");
+        props.put("database.user", "root");
+        props.put("database.dbname", "testdb");
+        props.put("topic.prefix", "test");
+
+        CockroachDBConnectorConfig config = new CockroachDBConnectorConfig(Configuration.from(props));
+
+        assertThat(config.isChangefeedKafkaConsumerOffsetCommitEnabled()).isFalse();
+    }
+
+    @Test
+    public void shouldEnableConsumerOffsetCommitWhenConfigured() {
+        Map<String, String> props = new HashMap<>();
+        props.put("database.hostname", "localhost");
+        props.put("database.port", "26257");
+        props.put("database.user", "root");
+        props.put("database.dbname", "testdb");
+        props.put("topic.prefix", "test");
+        props.put("cockroachdb.changefeed.kafka.consumer.offset.commit.enabled", "true");
+
+        CockroachDBConnectorConfig config = new CockroachDBConnectorConfig(Configuration.from(props));
+
+        assertThat(config.isChangefeedKafkaConsumerOffsetCommitEnabled()).isTrue();
+    }
 }

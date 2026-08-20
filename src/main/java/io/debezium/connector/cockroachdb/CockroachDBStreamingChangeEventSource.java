@@ -40,6 +40,7 @@ import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.SslConfigs;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
@@ -595,6 +596,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             Duration pollInterval = Duration.ofMillis(config.getChangefeedPollIntervalMs());
             Metronome metronome = Metronome.sleeper(pollInterval, clock);
             int emptyPollCount = 0;
+            boolean commitOffsetsToGroup = config.isChangefeedKafkaConsumerOffsetCommitEnabled();
 
             while (context.isRunning() && running.get()) {
                 ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(config.getChangefeedKafkaPollTimeoutMs()));
@@ -612,6 +614,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     LOGGER.trace("Polled {} records from {} topic(s)", records.count(), topicNames.size());
                 }
 
+                Map<TopicPartition, OffsetAndMetadata> positionsToMirror = commitOffsetsToGroup ? new HashMap<>() : null;
                 for (ConsumerRecord<String, String> record : records) {
                     if (!context.isRunning()) {
                         break;
@@ -619,6 +622,10 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     // Record the consumed position so it is persisted in the Debezium offset (flushed
                     // by Connect after the dispatched events are produced) and a restart can resume here.
                     offsetContext.setConsumerOffset(kafkaConsumerOffsetKey(record.topic(), record.partition()), record.offset());
+                    if (positionsToMirror != null) {
+                        positionsToMirror.put(new TopicPartition(record.topic(), record.partition()),
+                                new OffsetAndMetadata(record.offset() + 1));
+                    }
                     String valueJson = record.value();
                     if (valueJson != null && !valueJson.trim().isEmpty()) {
                         TableId table = resolveTableFromTopic(record.topic());
@@ -629,6 +636,17 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                             LOGGER.warn("Cannot resolve table for topic '{}', skipping event", record.topic());
                         }
                     }
+                }
+
+                if (positionsToMirror != null && !positionsToMirror.isEmpty()) {
+                    // Observability mirror only: the connector resumes from the Debezium offsets via the
+                    // explicit seeks above, never from the group, so a failed commit must never fail the
+                    // pipeline.
+                    consumer.commitAsync(positionsToMirror, (offsets, exception) -> {
+                        if (exception != null) {
+                            LOGGER.debug("Failed to mirror consumer positions to the Kafka group: {}", exception.getMessage());
+                        }
+                    });
                 }
 
                 offsetActivityMonitorService.pulse(currentPartition, offsetContext);
