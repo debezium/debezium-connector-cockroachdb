@@ -97,9 +97,8 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
 
         final CockroachDBPartitionProvider partitionProvider = new CockroachDBPartitionProvider(connectorConfig.getLogicalName());
         final CockroachDBOffsetContext.Loader offsetLoader = new CockroachDBOffsetContext.Loader(connectorConfig);
-        final Offsets<CockroachDBPartition, CockroachDBOffsetContext> previousOffsets = getPreviousOffsets(
+        final Offsets<CockroachDBPartition, CockroachDBOffsetContext> previousOffsets = getSinglePartitionPreviousOffsets(
                 partitionProvider, offsetLoader);
-        final CockroachDBOffsetContext previousOffset = previousOffsets.getTheOnlyOffset();
 
         final MainConnectionProvidingConnectionFactory<CockroachDBConnection> connectionFactory = new DefaultMainConnectionProvidingConnectionFactory<>(
                 () -> new CockroachDBConnection(connectorConfig));
@@ -113,13 +112,6 @@ public class CockroachDBConnectorTask extends BaseSourceTask<CockroachDBPartitio
         connectorConfig.getBeanRegistry().add(StandardBeanNames.VALUE_CONVERTER, valueConverter);
         connectorConfig.getBeanRegistry().add(StandardBeanNames.OFFSETS, previousOffsets);
         connectorConfig.getBeanRegistry().add(StandardBeanNames.CDC_SOURCE_TASK_CONTEXT, taskContext);
-
-        if (previousOffset == null) {
-            LOGGER.info("No previous offset found");
-        }
-        else {
-            LOGGER.info("Found previous offset {}", previousOffset);
-        }
 
         this.queue = new ChangeEventQueue.Builder<DataChangeEvent>()
                 .pollInterval(connectorConfig.getPollInterval())
