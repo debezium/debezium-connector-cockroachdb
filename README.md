@@ -14,8 +14,6 @@ A [Debezium](https://debezium.io/) connector for capturing changes from
 infrastructure. Row-level changes are emitted as standard Debezium change events, so any
 Debezium-compatible consumer or sink connector works unchanged.
 
-This connector is currently in an **incubating** state; details are subject to change.
-
 ## Documentation
 
 The connector documentation lives on the Debezium site and is the authoritative reference
