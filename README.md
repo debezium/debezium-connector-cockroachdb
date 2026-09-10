@@ -31,7 +31,11 @@ embedded engine, and workload-based verification) live in the
 
 Install the plugin from Maven Central
 ([`io.debezium:debezium-connector-cockroachdb`](https://search.maven.org/search?q=g:io.debezium%20AND%20a:debezium-connector-cockroachdb))
-into your Kafka Connect `plugin.path`, enable rangefeeds on the source cluster, and
+into your Kafka Connect `plugin.path`, or from
+[Confluent Hub](https://www.confluent.io/hub/cockroachdb/debezium-connector-cockroachdb)
+(`confluent-hub install cockroachdb/debezium-connector-cockroachdb:latest`; the
+[Debezium JDBC sink](https://www.confluent.io/hub/cockroachdb/debezium-connector-jdbc)
+is published there as well). Enable rangefeeds on the source cluster and
 register a connector:
 
 ```sql
