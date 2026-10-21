@@ -211,6 +211,17 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withImportance(Importance.LOW)
             .withDescription("Whether to include information about which columns were updated in UPDATE events.");
 
+    public static final Field CHANGEFEED_INCLUDE_MVCC_TIMESTAMP = Field.create("cockroachdb.changefeed.include.mvcc.timestamp")
+            .withDisplayName("Include MVCC timestamp")
+            .withType(Type.BOOLEAN)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
+            .withDefault(false)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDescription("Whether to create the changefeed with the mvcc_timestamp option, so that each change event, "
+                    + "including initial scan events, carries the MVCC commit timestamp of the row. The value is "
+                    + "emitted as source.ts_hlc. Requires 'source' in cockroachdb.changefeed.enriched.properties.");
+
     public static final Field CHANGEFEED_INCLUDE_DIFF = Field.create("cockroachdb.changefeed.include.diff")
             .withDisplayName("Include diff information")
             .withType(Type.BOOLEAN)
@@ -548,6 +559,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     CHANGEFEED_RESOLVED_INTERVAL,
                     CHANGEFEED_INCLUDE_UPDATED,
                     CHANGEFEED_INCLUDE_DIFF,
+                    CHANGEFEED_INCLUDE_MVCC_TIMESTAMP,
                     CHANGEFEED_ENRICHED_PROPERTIES,
                     CHANGEFEED_CURSOR,
                     CHANGEFEED_BATCH_SIZE,
@@ -1109,6 +1121,10 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public boolean isChangefeedIncludeDiff() {
         return config.getBoolean(CHANGEFEED_INCLUDE_DIFF);
+    }
+
+    public boolean isChangefeedIncludeMvccTimestamp() {
+        return config.getBoolean(CHANGEFEED_INCLUDE_MVCC_TIMESTAMP);
     }
 
     public String getChangefeedEnrichedProperties() {

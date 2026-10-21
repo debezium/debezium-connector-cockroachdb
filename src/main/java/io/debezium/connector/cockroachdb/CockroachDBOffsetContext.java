@@ -129,6 +129,14 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
         }
     }
 
+    /**
+     * Sets the hybrid logical clock commit timestamp of the event being emitted, emitted as
+     * {@code source.ts_hlc}. Pass {@code null} when the event carries none.
+     */
+    public void setHlc(String hlc) {
+        sourceInfo.setHlc(hlc);
+    }
+
     @Override
     public TransactionContext getTransactionContext() {
         return transactionContext;

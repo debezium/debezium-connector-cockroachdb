@@ -169,4 +169,13 @@ public class CockroachDBOffsetContextTest {
         assertThat(offset.get(CockroachDBOffsetContext.CURSOR))
                 .isEqualTo(CockroachDBOffsetContext.CURSOR_INITIAL);
     }
+
+    @Test
+    public void shouldEmitAndClearHlcInSourceInfo() {
+        offsetContext.setHlc("1747243394200039000.0000000000");
+        assertThat(offsetContext.getSourceInfo().getString("ts_hlc")).isEqualTo("1747243394200039000.0000000000");
+
+        offsetContext.setHlc(null);
+        assertThat(offsetContext.getSourceInfo().getString("ts_hlc")).isNull();
+    }
 }
