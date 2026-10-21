@@ -47,4 +47,12 @@ public class CockroachDBChangefeedReuseTest {
         assertThat(CockroachDBStreamingChangeEventSource.changefeedHasDiffOption(null)).isFalse();
         assertThat(CockroachDBStreamingChangeEventSource.changefeedHasDiffOption("not a changefeed description")).isFalse();
     }
+
+    @Test
+    void detectsMvccTimestampOptionInJobDescription() {
+        String with = "CREATE CHANGEFEED FOR TABLE reprodb.public.acct INTO 'kafka://kafka:9092?topic_prefix=repro.' "
+                + "WITH OPTIONS (enriched_properties = 'source', envelope = 'enriched', mvcc_timestamp, resolved = '3s')";
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedHasOption(with, "mvcc_timestamp")).isTrue();
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedHasOption(WITH_DIFF, "mvcc_timestamp")).isFalse();
+    }
 }

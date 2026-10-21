@@ -481,4 +481,57 @@ public class CockroachDBStreamingChangeEventSourceTest {
         }
         assertThat(sqlInChain).as("SQLException must stay in the cause chain for retriable classification").isTrue();
     }
+
+    // ---------------------------------------------------------------------------------------
+    // Per-row commit timestamp emitted as source.ts_hlc (debezium/dbz#2919)
+    // ---------------------------------------------------------------------------------------
+
+    private static final String MVCC = "1747243394200039000.0000000000";
+
+    private static String extractHlc(String payloadJson) throws Exception {
+        return CockroachDBStreamingChangeEventSource.extractHlc(MAPPER.readTree(payloadJson));
+    }
+
+    @Test
+    void extractsMvccTimestampFromSourceForCreateUpdateAndDelete() throws Exception {
+        assertThat(extractHlc("{\"op\": \"c\", \"after\": {\"id\": 1}, "
+                + "\"source\": {\"mvcc_timestamp\": \"" + MVCC + "\"}, \"ts_ns\": 1}")).isEqualTo(MVCC);
+        assertThat(extractHlc("{\"op\": \"u\", \"after\": {\"id\": 1}, "
+                + "\"source\": {\"mvcc_timestamp\": \"" + MVCC + "\"}, \"ts_ns\": 1}")).isEqualTo(MVCC);
+        // Deletes carry after: null and, without diff, no before image.
+        assertThat(extractHlc("{\"op\": \"d\", \"after\": null, "
+                + "\"source\": {\"mvcc_timestamp\": \"" + MVCC + "\"}, \"ts_ns\": 1}")).isEqualTo(MVCC);
+    }
+
+    @Test
+    void extractsMvccTimestampFromInitialScanRows() throws Exception {
+        // Initial scan rows carry the row's MVCC timestamp, while ts_hlc from the updated option is the
+        // scan time; mvcc_timestamp must win.
+        assertThat(extractHlc("{\"op\": \"r\", \"after\": {\"id\": 1}, \"source\": {"
+                + "\"mvcc_timestamp\": \"" + MVCC + "\", \"ts_hlc\": \"1747243399999999999.0000000000\"}}"))
+                .isEqualTo(MVCC);
+    }
+
+    @Test
+    void fallsBackToTsHlcFromUpdatedOption() throws Exception {
+        assertThat(extractHlc("{\"op\": \"c\", \"after\": {\"id\": 1}, "
+                + "\"source\": {\"ts_hlc\": \"" + MVCC + "\", \"ts_ns\": 1747243394200039000}}")).isEqualTo(MVCC);
+    }
+
+    @Test
+    void returnsNullWhenNoCommitTimestampIsPresent() throws Exception {
+        assertThat(extractHlc("{\"op\": \"c\", \"after\": {\"id\": 1}, \"source\": {\"table_name\": \"orders\"}}")).isNull();
+        assertThat(extractHlc("{\"op\": \"c\", \"after\": {\"id\": 1}}")).isNull();
+        assertThat(extractHlc("{\"op\": \"c\", \"source\": {\"mvcc_timestamp\": null}}")).isNull();
+    }
+
+    @Test
+    void addsMvccTimestampOptionOnlyWhenEnabled() {
+        List<TableId> tables = List.of(new TableId("testdb", "public", "orders"));
+        assertThat(source(baseConfig().build()).buildSinkChangefeedQuery(tables, null, false))
+                .doesNotContain("mvcc_timestamp");
+        assertThat(source(baseConfig().with("cockroachdb.changefeed.include.mvcc.timestamp", "true").build())
+                .buildSinkChangefeedQuery(tables, null, false))
+                .contains(", mvcc_timestamp,");
+    }
 }
