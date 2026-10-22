@@ -26,11 +26,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.testcontainers.containers.CockroachContainer;
-import org.testcontainers.containers.KafkaContainer;
+import org.testcontainers.cockroachdb.CockroachContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.kafka.ConfluentKafkaContainer;
 import org.testcontainers.utility.DockerImageName;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -55,10 +55,11 @@ public class CockroachDBStreamingIT {
     private static final Network NETWORK = Network.newNetwork();
 
     @Container
-    private static final KafkaContainer kafka = new KafkaContainer(
+    private static final ConfluentKafkaContainer kafka = new ConfluentKafkaContainer(
             DockerImageName.parse("confluentinc/cp-kafka:7.4.0"))
             .withNetwork(NETWORK)
-            .withNetworkAliases("kafka");
+            .withNetworkAliases("kafka")
+            .withListener("kafka:19092");
 
     @Container
     private static final CockroachContainer cockroachdb = new CockroachContainer(
@@ -608,7 +609,7 @@ public class CockroachDBStreamingIT {
 
         // Create changefeed for the vector table
         try (Statement stmt = connection.createStatement()) {
-            stmt.execute("CREATE CHANGEFEED FOR TABLE " + vectorTable + " INTO 'kafka://kafka:9092' " +
+            stmt.execute("CREATE CHANGEFEED FOR TABLE " + vectorTable + " INTO 'kafka://kafka:19092' " +
                     "WITH envelope = 'enriched', " +
                     "enriched_properties = 'source,schema', " +
                     "diff, " +
@@ -705,7 +706,7 @@ public class CockroachDBStreamingIT {
     private void createChangefeedWithResolved(String resolvedInterval) throws Exception {
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(String.format(
-                    "CREATE CHANGEFEED FOR TABLE %s INTO 'kafka://kafka:9092' " +
+                    "CREATE CHANGEFEED FOR TABLE %s INTO 'kafka://kafka:19092' " +
                             "WITH envelope = 'enriched', " +
                             "enriched_properties = 'source,schema', " +
                             "diff, " +

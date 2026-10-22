@@ -17,11 +17,11 @@ import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.testcontainers.containers.CockroachContainer;
-import org.testcontainers.containers.KafkaContainer;
+import org.testcontainers.cockroachdb.CockroachContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.kafka.ConfluentKafkaContainer;
 import org.testcontainers.utility.DockerImageName;
 
 import io.debezium.connector.cockroachdb.CockroachDBConnector;
@@ -39,10 +39,11 @@ public class CockroachDBConnectionIT {
     private static final Network NETWORK = Network.newNetwork();
 
     @Container
-    private static final KafkaContainer kafka = new KafkaContainer(
+    private static final ConfluentKafkaContainer kafka = new ConfluentKafkaContainer(
             DockerImageName.parse("confluentinc/cp-kafka:7.4.0"))
             .withNetwork(NETWORK)
-            .withNetworkAliases("kafka");
+            .withNetworkAliases("kafka")
+            .withListener("kafka:19092");
 
     @Container
     private static final CockroachContainer cockroachdb = new CockroachContainer(
