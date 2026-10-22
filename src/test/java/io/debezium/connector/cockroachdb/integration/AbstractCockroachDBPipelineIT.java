@@ -53,7 +53,7 @@ public abstract class AbstractCockroachDBPipelineIT {
 
     protected static final Logger LOGGER = LoggerFactory.getLogger(AbstractCockroachDBPipelineIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.13");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.18");
 
     private static final Network NETWORK = Network.newNetwork();
 
