@@ -30,11 +30,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.testcontainers.containers.CockroachContainer;
-import org.testcontainers.containers.KafkaContainer;
+import org.testcontainers.cockroachdb.CockroachContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.kafka.ConfluentKafkaContainer;
 import org.testcontainers.utility.DockerImageName;
 
 import io.debezium.connector.cockroachdb.CockroachDBConnectorTask;
@@ -63,10 +63,11 @@ public class CockroachDBMultiTableIT {
     private static final Network NETWORK = Network.newNetwork();
 
     @Container
-    private static final KafkaContainer kafka = new KafkaContainer(
+    private static final ConfluentKafkaContainer kafka = new ConfluentKafkaContainer(
             DockerImageName.parse("confluentinc/cp-kafka:7.4.0"))
             .withNetwork(NETWORK)
-            .withNetworkAliases("kafka");
+            .withNetworkAliases("kafka")
+            .withListener("kafka:19092");
 
     @Container
     private static final CockroachContainer cockroachdb = new CockroachContainer(
@@ -166,7 +167,7 @@ public class CockroachDBMultiTableIT {
         config.put("table.include.list", "public." + ORDERS_TABLE + ",public." + CUSTOMERS_TABLE);
 
         config.put("cockroachdb.changefeed.sink.type", "kafka");
-        config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
+        config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:19092");
         config.put("cockroachdb.changefeed.kafka.bootstrap.servers", hostBootstrap);
         config.put("cockroachdb.changefeed.enriched.properties", "source,schema");
         config.put("cockroachdb.changefeed.include.diff", "true");
@@ -271,7 +272,7 @@ public class CockroachDBMultiTableIT {
         config.put("table.include.list", "public." + ORDERS_TABLE + ",public." + CUSTOMERS_TABLE);
 
         config.put("cockroachdb.changefeed.sink.type", "kafka");
-        config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
+        config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:19092");
         config.put("cockroachdb.changefeed.kafka.bootstrap.servers", hostBootstrap);
         config.put("cockroachdb.changefeed.enriched.properties", "source,schema");
         config.put("cockroachdb.changefeed.include.diff", "true");
@@ -386,7 +387,7 @@ public class CockroachDBMultiTableIT {
                 "public." + ORDERS_TABLE + "," + INVENTORY_SCHEMA + "." + INVENTORY_TABLE);
 
         config.put("cockroachdb.changefeed.sink.type", "kafka");
-        config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
+        config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:19092");
         config.put("cockroachdb.changefeed.kafka.bootstrap.servers", hostBootstrap);
         config.put("cockroachdb.changefeed.enriched.properties", "source,schema");
         config.put("cockroachdb.changefeed.include.diff", "true");

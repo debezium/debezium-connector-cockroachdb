@@ -22,11 +22,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.testcontainers.containers.CockroachContainer;
-import org.testcontainers.containers.KafkaContainer;
+import org.testcontainers.cockroachdb.CockroachContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.kafka.ConfluentKafkaContainer;
 import org.testcontainers.utility.DockerImageName;
 
 /**
@@ -48,10 +48,11 @@ public class CockroachDBConnectorIT {
     private static final Network NETWORK = Network.newNetwork();
 
     @Container
-    private static final KafkaContainer kafka = new KafkaContainer(
+    private static final ConfluentKafkaContainer kafka = new ConfluentKafkaContainer(
             DockerImageName.parse("confluentinc/cp-kafka:7.4.0"))
             .withNetwork(NETWORK)
-            .withNetworkAliases("kafka");
+            .withNetworkAliases("kafka")
+            .withListener("kafka:19092");
 
     @Container
     private static final CockroachContainer cockroachdb = new CockroachContainer(
@@ -119,7 +120,7 @@ public class CockroachDBConnectorIT {
         try (Statement stmt = connection.createStatement()) {
             // Create a changefeed with enriched envelope (required for Debezium compatibility)
             stmt.execute(String.format(
-                    "CREATE CHANGEFEED FOR TABLE %s INTO 'kafka://kafka:9092' " +
+                    "CREATE CHANGEFEED FOR TABLE %s INTO 'kafka://kafka:19092' " +
                             "WITH envelope = 'enriched', " +
                             "enriched_properties = 'source,schema', " +
                             "diff, " +
@@ -147,7 +148,7 @@ public class CockroachDBConnectorIT {
         // Create changefeed first
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(String.format(
-                    "CREATE CHANGEFEED FOR TABLE %s INTO 'kafka://kafka:9092' " +
+                    "CREATE CHANGEFEED FOR TABLE %s INTO 'kafka://kafka:19092' " +
                             "WITH envelope = 'enriched', " +
                             "enriched_properties = 'source,schema', " +
                             "diff, " +
