@@ -28,7 +28,7 @@ import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.testcontainers.containers.CockroachContainer;
+import org.testcontainers.cockroachdb.CockroachContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
@@ -45,11 +45,14 @@ import io.debezium.engine.format.Json;
  * commit timestamp as {@code source.ts_hlc} on initial scan, create, update and delete events
  * (debezium/dbz#2919). Uses a sinkless changefeed under the embedded engine, so only a CockroachDB
  * container is needed.
+ * <p>
+ * The {@code source.mvcc_timestamp} and {@code source.ts_hlc} fields this relies on were verified
+ * against CockroachDB v25.2 (the minimum supported version) and v25.4.
  */
 @Testcontainers
 public class CockroachDBMvccTimestampIT {
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.13");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.18");
     private static final String DATABASE_NAME = "mvcc_ts_db";
     private static final String TABLE_NAME = "mvcc_orders";
     private static final ObjectMapper MAPPER = new ObjectMapper();

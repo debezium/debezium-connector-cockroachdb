@@ -465,7 +465,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                         }
                         // Likewise, a reused changefeed without mvcc_timestamp cannot deliver the
                         // per-row commit timestamp emitted as source.ts_hlc.
-                        if (config.isChangefeedIncludeMvccTimestamp() && !changefeedHasOption(description, "mvcc_timestamp")) {
+                        if (isMvccTimestampRequested() && !changefeedHasOption(description, "mvcc_timestamp")) {
                             throw new IllegalStateException("Found an existing running changefeed for table " + table
                                     + " using topic prefix '" + topicPrefix + "' that was created without the mvcc_timestamp "
                                     + "option, but cockroachdb.changefeed.include.mvcc.timestamp is enabled. Events from that "
@@ -515,6 +515,16 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     static boolean changefeedHasDiffOption(String description) {
         return changefeedHasOption(description, "diff");
+    }
+
+    /**
+     * Returns {@code true} if the changefeed should be created with {@code mvcc_timestamp}. CockroachDB
+     * rejects {@code mvcc_timestamp} together with {@code initial_scan='only'}, which is what
+     * {@code snapshot.mode=initial_only} maps to, so the option is skipped in that mode.
+     */
+    boolean isMvccTimestampRequested() {
+        return config.isChangefeedIncludeMvccTimestamp()
+                && config.getSnapshotMode() != CockroachDBConnectorConfig.SnapshotMode.INITIAL_ONLY;
     }
 
     /**
@@ -1193,8 +1203,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         if (config.isChangefeedIncludeDiff()) {
             options.add("diff");
         }
-        if (config.isChangefeedIncludeMvccTimestamp()) {
+        if (isMvccTimestampRequested()) {
             options.add("mvcc_timestamp");
+        }
+        else if (config.isChangefeedIncludeMvccTimestamp()) {
+            LOGGER.warn("Ignoring cockroachdb.changefeed.include.mvcc.timestamp because snapshot.mode=initial_only maps to "
+                    + "initial_scan='only', which CockroachDB does not allow together with mvcc_timestamp. "
+                    + "Events will not carry a per-row source.ts_hlc.");
         }
         options.add("resolved = '" + sanitizeLiteral(config.getChangefeedResolvedInterval()) + "'");
 
