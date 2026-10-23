@@ -463,6 +463,16 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                     + "carry a before image. Cancel the changefeed job and restart the connector so it recreates "
                                     + "the changefeed with diff, or disable cockroachdb.changefeed.include.diff.");
                         }
+                        // Likewise, a reused changefeed without mvcc_timestamp cannot deliver the
+                        // per-row commit timestamp emitted as source.ts_hlc.
+                        if (isMvccTimestampRequested() && !changefeedHasOption(description, "mvcc_timestamp")) {
+                            throw new IllegalStateException("Found an existing running changefeed for table " + table
+                                    + " using topic prefix '" + topicPrefix + "' that was created without the mvcc_timestamp "
+                                    + "option, but cockroachdb.changefeed.include.mvcc.timestamp is enabled. Events from that "
+                                    + "changefeed cannot carry the row's MVCC timestamp. Cancel the changefeed job and restart "
+                                    + "the connector so it recreates the changefeed with mvcc_timestamp, or disable "
+                                    + "cockroachdb.changefeed.include.mvcc.timestamp.");
+                        }
                         if (!config.isChangefeedIncludeDiff() && changefeedHasDiffOption(description)) {
                             LOGGER.warn("Reusing changefeed for table {} that was created with the diff option while "
                                     + "cockroachdb.changefeed.include.diff is disabled; update events will carry before images.",
@@ -504,6 +514,24 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * that contain the word diff do not match.
      */
     static boolean changefeedHasDiffOption(String description) {
+        return changefeedHasOption(description, "diff");
+    }
+
+    /**
+     * Returns {@code true} if the changefeed should be created with {@code mvcc_timestamp}. CockroachDB
+     * rejects {@code mvcc_timestamp} together with {@code initial_scan='only'}, which is what
+     * {@code snapshot.mode=initial_only} maps to, so the option is skipped in that mode.
+     */
+    boolean isMvccTimestampRequested() {
+        return config.isChangefeedIncludeMvccTimestamp()
+                && config.getSnapshotMode() != CockroachDBConnectorConfig.SnapshotMode.INITIAL_ONLY;
+    }
+
+    /**
+     * Returns {@code true} if a {@code SHOW CHANGEFEED JOBS} description lists the given valueless
+     * option (for example {@code diff} or {@code mvcc_timestamp}) inside {@code WITH OPTIONS (...)}.
+     */
+    static boolean changefeedHasOption(String description, String optionName) {
         if (description == null) {
             return false;
         }
@@ -517,7 +545,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             options = options.substring(0, end);
         }
         for (String option : options.split(",")) {
-            if ("diff".equals(option.trim())) {
+            if (optionName.equals(option.trim())) {
                 return true;
             }
         }
@@ -985,6 +1013,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             // schema and table (debezium/dbz#2432). The timestamp is passed through unchanged;
             // it advances only on resolved timestamps, as before.
             offsetContext.event(table, offsetContext.getTimestamp());
+            // Carry the row's own commit timestamp as source.ts_hlc (debezium/dbz#2919). It is
+            // set, or cleared, for every event so one row's value never leaks onto the next.
+            offsetContext.setHlc(extractHlc(payloadNode));
 
             CockroachDBChangeRecordEmitter emitter = new CockroachDBChangeRecordEmitter(
                     currentPartition, offsetContext, clock, config, tableObj, operation,
@@ -1034,6 +1065,25 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * Returns the commit timestamp of a change event as a hybrid logical clock string, or
+     * {@code null} if the event carries none. With the enriched envelope and
+     * {@code enriched_properties=source}, CockroachDB puts {@code mvcc_timestamp} (from the
+     * {@code mvcc_timestamp} option, present on every event including initial scan rows) and
+     * {@code ts_hlc} (from the {@code updated} option, the scan time for initial scan rows) in the
+     * payload's {@code source} block. {@code mvcc_timestamp} is preferred.
+     */
+    static String extractHlc(JsonNode payloadNode) {
+        JsonNode source = payloadNode.path("source");
+        for (String field : new String[]{ "mvcc_timestamp", "ts_hlc" }) {
+            JsonNode value = source.path(field);
+            if (value.isValueNode() && !value.isNull() && !value.asText().isEmpty()) {
+                return value.asText();
+            }
+        }
+        return null;
     }
 
     /**
@@ -1152,6 +1202,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
         if (config.isChangefeedIncludeDiff()) {
             options.add("diff");
+        }
+        if (isMvccTimestampRequested()) {
+            options.add("mvcc_timestamp");
+        }
+        else if (config.isChangefeedIncludeMvccTimestamp()) {
+            LOGGER.warn("Ignoring cockroachdb.changefeed.include.mvcc.timestamp because snapshot.mode=initial_only maps to "
+                    + "initial_scan='only', which CockroachDB does not allow together with mvcc_timestamp. "
+                    + "Events will not carry a per-row source.ts_hlc.");
         }
         options.add("resolved = '" + sanitizeLiteral(config.getChangefeedResolvedInterval()) + "'");
 
