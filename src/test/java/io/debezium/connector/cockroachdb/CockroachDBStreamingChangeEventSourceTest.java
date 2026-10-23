@@ -534,4 +534,21 @@ public class CockroachDBStreamingChangeEventSourceTest {
                 .buildSinkChangefeedQuery(tables, null, false))
                 .contains(", mvcc_timestamp,");
     }
+
+    @Test
+    void skipsMvccTimestampOptionForInitialOnlySnapshot() {
+        // CockroachDB rejects initial_scan='only' together with mvcc_timestamp.
+        List<TableId> tables = List.of(new TableId("testdb", "public", "orders"));
+        CockroachDBStreamingChangeEventSource source = source(baseConfig()
+                .with("cockroachdb.changefeed.include.mvcc.timestamp", "true")
+                .with("snapshot.mode", "initial_only")
+                .build());
+        assertThat(source.isMvccTimestampRequested()).isFalse();
+        assertThat(source.buildSinkChangefeedQuery(tables, null, false))
+                .contains("initial_scan = 'only'")
+                .doesNotContain("mvcc_timestamp");
+        assertThat(source.buildSinklessChangefeedQuery(tables, null, false))
+                .contains("initial_scan = 'only'")
+                .doesNotContain("mvcc_timestamp");
+    }
 }
