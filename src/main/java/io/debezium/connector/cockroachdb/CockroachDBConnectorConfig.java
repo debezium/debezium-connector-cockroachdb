@@ -220,7 +220,9 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withImportance(Importance.LOW)
             .withDescription("Whether to create the changefeed with the mvcc_timestamp option, so that each change event, "
                     + "including initial scan events, carries the MVCC commit timestamp of the row. The value is "
-                    + "emitted as source.ts_hlc. Requires 'source' in cockroachdb.changefeed.enriched.properties.");
+                    + "emitted as source.ts_hlc. Requires 'source' in cockroachdb.changefeed.enriched.properties. "
+                    + "Ignored when snapshot.mode is initial_only, because CockroachDB does not allow mvcc_timestamp "
+                    + "together with initial_scan='only'.");
 
     public static final Field CHANGEFEED_INCLUDE_DIFF = Field.create("cockroachdb.changefeed.include.diff")
             .withDisplayName("Include diff information")
