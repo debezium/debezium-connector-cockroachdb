@@ -25,6 +25,7 @@ import io.debezium.pipeline.signal.actions.snapshotting.SnapshotConfiguration;
 import io.debezium.pipeline.source.snapshot.incremental.SignalBasedIncrementalSnapshotChangeEventSource;
 import io.debezium.pipeline.source.spi.DataChangeEventListener;
 import io.debezium.pipeline.source.spi.SnapshotProgressListener;
+import io.debezium.pipeline.spi.ChangeRecordEmitter;
 import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.relational.RelationalDatabaseConnectorConfig;
 import io.debezium.relational.Table;
@@ -112,6 +113,19 @@ public class CockroachDBSignalBasedIncrementalSnapshotChangeEventSource
                 ? table.table()
                 : table.schema() + "." + table.table();
         return pattern.matcher(schemaAndTable).matches();
+    }
+
+    /**
+     * Incremental snapshot reads are issued by the connector, not delivered by the changefeed, so
+     * they have no commit timestamp to report. Clear the value left behind by the last changefeed
+     * event before the record is built; otherwise every snapshot record repeats it as its own
+     * (debezium/dbz#2944).
+     */
+    @Override
+    protected ChangeRecordEmitter<CockroachDBPartition> getChangeRecordEmitter(CockroachDBPartition partition, TableId dataCollectionId,
+                                                                               OffsetContext offsetContext, Object[] row) {
+        ((CockroachDBOffsetContext) offsetContext).setHlc(null);
+        return super.getChangeRecordEmitter(partition, dataCollectionId, offsetContext, row);
     }
 
     @Override
