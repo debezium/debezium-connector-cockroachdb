@@ -160,6 +160,7 @@ public class CockroachDBIncrementalSnapshotIT {
         config.put("cockroachdb.changefeed.kafka.poll.timeout.ms", "1000");
         config.put("cockroachdb.changefeed.resolved.interval", "2s");
         config.put("snapshot.mode", "no_data");
+        config.put("cockroachdb.changefeed.include.mvcc.timestamp", "true");
         config.put("heartbeat.interval.ms", "1000");
         config.put("signal.data.collection", DATABASE_NAME + ".public." + SIGNAL_TABLE);
         config.put("offset.storage", "org.apache.kafka.connect.storage.MemoryOffsetBackingStore");
@@ -267,6 +268,16 @@ public class CockroachDBIncrementalSnapshotIT {
         // We should have the 3 original rows + 1 new row = 4 snapshot records
         assertThat(snapshotRecords).as("Should receive incremental snapshot records (op=r)")
                 .hasSizeGreaterThanOrEqualTo(4);
+
+        // The connector issues these reads itself, so they carry no changefeed commit timestamp.
+        // Without the fix for debezium/dbz#2944 they inherited the ts_hlc of the last changefeed
+        // event (the signal window row), the same unrelated value on every snapshot record.
+        for (SourceRecord r : snapshotRecords) {
+            Struct source = ((Struct) r.value()).getStruct("source");
+            assertThat(source.getString("ts_hlc"))
+                    .as("incremental snapshot record must not carry another row's commit timestamp")
+                    .isNull();
+        }
     }
 
     private SourceTaskContext createMockContext() {
