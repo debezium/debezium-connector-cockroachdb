@@ -237,6 +237,75 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
     }
 
     @Test
+    public void shouldReuseChangefeedAfterAlterChangefeedAddsDiff() throws Exception {
+        connection = openDatabase("reuse_alter_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS alter_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO alter_events VALUES (1, 'Alice')");
+        }
+
+        // First run creates the changefeed without the diff option.
+        startTask(baseConnectorConfig("alter-test", "reuse_alter_testdb", "public.alter_events"));
+        assertThat(pollUntilRecordsOrError(30).records).as("First run should stream the seed row").isNotEmpty();
+        stopTask();
+
+        // Apply the remedy the reuse error offers (debezium/dbz#2967): add diff to the existing changefeed.
+        String jobId = runningChangefeedJobFor("alter_events");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("PAUSE JOB " + jobId);
+        }
+        waitForChangefeedJobStatus(jobId, "paused");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("ALTER CHANGEFEED " + jobId + " SET diff");
+            stmt.execute("RESUME JOB " + jobId);
+        }
+        waitForChangefeedJobStatus(jobId, "running");
+
+        // With include.diff enabled the connector now reuses the altered changefeed, and updates carry a before image.
+        Map<String, String> diffConfig = baseConnectorConfig("alter-test", "reuse_alter_testdb", "public.alter_events");
+        diffConfig.put("cockroachdb.changefeed.include.diff", "true");
+        startTask(diffConfig);
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("UPDATE alter_events SET name = 'Alicia' WHERE id = 1");
+        }
+        List<SourceRecord> updates = pollForRecords(
+                r -> r.value() instanceof Struct v && v.schema().field("op") != null && "u".equals(v.getString("op")), 1, 60);
+        assertThat(updates).as("The update made after ALTER CHANGEFEED should be streamed").isNotEmpty();
+        Struct before = ((Struct) updates.get(0).value()).getStruct("before");
+        assertThat(before).as("The reused, altered changefeed delivers the before image").isNotNull();
+        assertThat(before.getString("name")).isEqualTo("Alice");
+
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery(
+                        "SELECT count(*) FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' AND description LIKE '%alter_events%'")) {
+            rs.next();
+            assertThat(rs.getInt(1)).as("The connector reuses the altered changefeed instead of creating another").isEqualTo(1);
+        }
+    }
+
+    private String runningChangefeedJobFor(String tableName) throws Exception {
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery(
+                        "SELECT job_id FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' AND description LIKE '%" + tableName + "%'")) {
+            assertThat(rs.next()).as("A running changefeed job for " + tableName + " must exist").isTrue();
+            return rs.getString(1);
+        }
+    }
+
+    private void waitForChangefeedJobStatus(String jobId, String status) throws Exception {
+        for (int i = 0; i < 30; i++) {
+            try (Statement stmt = connection.createStatement();
+                    ResultSet rs = stmt.executeQuery("SELECT status FROM [SHOW CHANGEFEED JOBS] WHERE job_id = " + jobId)) {
+                if (rs.next() && status.equals(rs.getString(1))) {
+                    return;
+                }
+            }
+            Thread.sleep(1000);
+        }
+        throw new AssertionError("Changefeed job " + jobId + " did not reach status " + status);
+    }
+
+    @Test
     public void shouldFailFastWhenMatchingChangefeedIsPaused() throws Exception {
         connection = openDatabase("reuse_paused_testdb");
         try (Statement stmt = connection.createStatement()) {
