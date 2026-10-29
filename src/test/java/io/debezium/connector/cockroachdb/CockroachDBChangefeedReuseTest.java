@@ -15,6 +15,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 
@@ -23,8 +24,9 @@ import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
 import io.debezium.relational.TableId;
 
 /**
- * Unit tests for the changefeed reuse option checks. CockroachDB fixes changefeed options at
- * creation time, so a reused changefeed must be validated against the connector configuration;
+ * Unit tests for the changefeed reuse option checks. A reused changefeed has the options it was
+ * created with, plus any added later with ALTER CHANGEFEED, so it must be validated against the
+ * connector configuration;
  * silently reusing a changefeed without the {@code diff} option while
  * {@code cockroachdb.changefeed.include.diff} is enabled leaves update events without a before
  * image.
@@ -96,19 +98,51 @@ public class CockroachDBChangefeedReuseTest {
                 .hasMessageContaining("initial_only");
     }
 
+    @Test
+    void diffMismatchErrorOffersAlterChangefeed() throws Exception {
+        // CockroachDB can add the option to the existing changefeed, which keeps its job and position
+        // (debezium/dbz#2967).
+        CockroachDBStreamingChangeEventSource source = sourceWith("cockroachdb.changefeed.include.diff");
+
+        assertThatThrownBy(() -> source.changefeedExists(connectionListing("1003", "running", WITHOUT_DIFF), ACCT, List.of(ACCT)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("PAUSE JOB 1003")
+                .hasMessageContaining("ALTER CHANGEFEED 1003 SET diff")
+                .hasMessageContaining("RESUME JOB 1003")
+                .hasMessageContaining("CANCEL JOB 1003");
+    }
+
+    @Test
+    void mvccTimestampMismatchErrorOffersAlterChangefeed() throws Exception {
+        CockroachDBStreamingChangeEventSource source = sourceWith("cockroachdb.changefeed.include.mvcc.timestamp");
+
+        assertThatThrownBy(() -> source.changefeedExists(connectionListing("1004", "running", WITH_DIFF), ACCT, List.of(ACCT)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("PAUSE JOB 1004")
+                .hasMessageContaining("ALTER CHANGEFEED 1004 SET mvcc_timestamp")
+                .hasMessageContaining("RESUME JOB 1004")
+                .hasMessageContaining("CANCEL JOB 1004");
+    }
+
     private static CockroachDBStreamingChangeEventSource initialOnlySource() {
-        Configuration config = Configuration.create()
+        return source(Map.of("snapshot.mode", "initial_only", "cockroachdb.changefeed.include.diff", "true"));
+    }
+
+    private static CockroachDBStreamingChangeEventSource sourceWith(String enabledOption) {
+        return source(Map.of(enabledOption, "true"));
+    }
+
+    private static CockroachDBStreamingChangeEventSource source(Map<String, String> settings) {
+        Configuration.Builder config = Configuration.create()
                 .with("database.hostname", "localhost")
                 .with("database.port", "26257")
                 .with("database.user", "root")
                 .with("database.dbname", "reprodb")
                 .with("topic.prefix", "repro")
                 .with("cockroachdb.changefeed.sink.type", "kafka")
-                .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092")
-                .with("snapshot.mode", "initial_only")
-                .with("cockroachdb.changefeed.include.diff", "true")
-                .build();
-        return new CockroachDBStreamingChangeEventSource(new CockroachDBConnectorConfig(config), null, null, null, null);
+                .with("cockroachdb.changefeed.sink.uri", "kafka://kafka:9092");
+        settings.forEach((key, value) -> config.with(key, value));
+        return new CockroachDBStreamingChangeEventSource(new CockroachDBConnectorConfig(config.build()), null, null, null, null);
     }
 
     private static CockroachDBConnection connectionListing(String jobId, String status, String description) throws Exception {
