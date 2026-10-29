@@ -419,7 +419,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * changefeed job description to avoid false positives from changefeeds created by
      * other connector instances targeting the same tables with different topic prefixes.
      */
-    private boolean changefeedExists(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables) throws SQLException {
+    boolean changefeedExists(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables) throws SQLException {
         String topicPrefix = resolveTopicPrefix();
         String sinkMarker = "topic_prefix=" + topicPrefix;
 
@@ -453,25 +453,24 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                     + "The CockroachDB connector can only consume the enriched envelope. Drop or recreate that "
                                     + "changefeed with envelope='enriched' (and full_table_name), or use a different topic prefix.");
                         }
-                        // Changefeed options are fixed at creation time, so a reused changefeed that
-                        // lacks the diff option can never deliver the before images the configuration
-                        // promises. Fail fast instead of silently emitting updates without them.
+                        // A reused changefeed has the options it was created with, plus any added later
+                        // with ALTER CHANGEFEED. One without diff cannot deliver the before images the
+                        // configuration promises, so fail fast instead of silently emitting updates
+                        // without them.
                         if (config.isChangefeedIncludeDiff() && !changefeedHasDiffOption(description)) {
-                            throw new IllegalStateException("Found an existing running changefeed for table " + table
-                                    + " using topic prefix '" + topicPrefix + "' that was created without the diff option, but "
+                            throw new IllegalStateException("Found existing running changefeed job " + jobId + " for table " + table
+                                    + " using topic prefix '" + topicPrefix + "' that does not use the diff option, but "
                                     + "cockroachdb.changefeed.include.diff is enabled. Update events from that changefeed cannot "
-                                    + "carry a before image. Cancel the changefeed job and restart the connector so it recreates "
-                                    + "the changefeed with diff, or disable cockroachdb.changefeed.include.diff.");
+                                    + "carry a before image. " + missingOptionRemedy(jobId, "diff", "cockroachdb.changefeed.include.diff"));
                         }
                         // Likewise, a reused changefeed without mvcc_timestamp cannot deliver the
                         // per-row commit timestamp emitted as source.ts_hlc.
                         if (isMvccTimestampRequested() && !changefeedHasOption(description, "mvcc_timestamp")) {
-                            throw new IllegalStateException("Found an existing running changefeed for table " + table
-                                    + " using topic prefix '" + topicPrefix + "' that was created without the mvcc_timestamp "
-                                    + "option, but cockroachdb.changefeed.include.mvcc.timestamp is enabled. Events from that "
-                                    + "changefeed cannot carry the row's MVCC timestamp. Cancel the changefeed job and restart "
-                                    + "the connector so it recreates the changefeed with mvcc_timestamp, or disable "
-                                    + "cockroachdb.changefeed.include.mvcc.timestamp.");
+                            throw new IllegalStateException("Found existing running changefeed job " + jobId + " for table " + table
+                                    + " using topic prefix '" + topicPrefix + "' that does not use the mvcc_timestamp option, but "
+                                    + "cockroachdb.changefeed.include.mvcc.timestamp is enabled. Events from that changefeed cannot "
+                                    + "carry the row's MVCC timestamp. "
+                                    + missingOptionRemedy(jobId, "mvcc_timestamp", "cockroachdb.changefeed.include.mvcc.timestamp"));
                         }
                         if (!config.isChangefeedIncludeDiff() && changefeedHasDiffOption(description)) {
                             LOGGER.warn("Reusing changefeed for table {} that was created with the diff option while "
@@ -500,6 +499,17 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             LOGGER.warn("Unable to check existing changefeed jobs: {}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Tells the operator how to resolve a reused changefeed that lacks an option the configuration
+     * needs: CockroachDB can add the option to the paused job with ALTER CHANGEFEED, or the job can be
+     * canceled so the connector creates a new changefeed (debezium/dbz#2967).
+     */
+    static String missingOptionRemedy(String jobId, String option, String property) {
+        return "Add the option to the existing changefeed (PAUSE JOB " + jobId + "; ALTER CHANGEFEED " + jobId + " SET " + option
+                + "; RESUME JOB " + jobId + ") and restart the connector, or cancel the job (CANCEL JOB " + jobId
+                + ") and restart the connector so it creates a changefeed with " + option + ", or disable " + property + ".";
     }
 
     /**
