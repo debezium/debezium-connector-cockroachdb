@@ -151,6 +151,13 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
         return this.timestamp;
     }
 
+    /**
+     * Returns {@code true} if the offset marks the initial snapshot as completed.
+     */
+    public boolean isSnapshotCompleted() {
+        return snapshotCompleted;
+    }
+
     @Override
     public void markSnapshotRecord(SnapshotRecord record) {
         sourceInfo.setSnapshot(record);
