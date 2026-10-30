@@ -16,6 +16,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -23,6 +24,11 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.OffsetSpec;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.metrics.PluginMetrics;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.source.SourceRecord;
@@ -122,8 +128,50 @@ public class CockroachDBInitialOnlyIT {
         config.put("cockroachdb.changefeed.kafka.bootstrap.servers", kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", ""));
         config.put("cockroachdb.changefeed.kafka.auto.offset.reset", "earliest");
         config.put("cockroachdb.changefeed.kafka.poll.timeout.ms", "1000");
+        config.put("cockroachdb.changefeed.kafka.consumer.group.prefix", "initial-only-kafka-group");
+        config.put("cockroachdb.changefeed.kafka.consumer.offset.commit.enabled", "true");
 
         verifyInitialOnlyLifecycle(config, table);
+
+        // The record held back until the end of the scan is dispatched last, so the mirrored group
+        // position must still reach the end of the intermediate topic.
+        TopicPartition intermediate = new TopicPartition("initial-only-kafka." + DATABASE_NAME + ".public." + table, 0);
+        Properties admin = new Properties();
+        admin.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", ""));
+        try (AdminClient client = AdminClient.create(admin)) {
+            Map<TopicPartition, OffsetAndMetadata> committed = client.listConsumerGroupOffsets("initial-only-kafka-group")
+                    .partitionsToOffsetAndMetadata().get(30, TimeUnit.SECONDS);
+            long end = client.listOffsets(Map.of(intermediate, OffsetSpec.latest())).partitionResult(intermediate)
+                    .get(30, TimeUnit.SECONDS).offset();
+            assertThat(committed.get(intermediate)).as("mirrored group position for " + intermediate).isNotNull();
+            assertThat(committed.get(intermediate).offset()).isEqualTo(end);
+        }
+    }
+
+    @Test
+    public void shouldPersistTheCompletedSnapshotOfEmptyTablesWithKafkaSink() throws Exception {
+        String table = "kafka_empty";
+        createTable(table);
+        Map<String, String> config = initialOnlyConfig("initial-only-kafka-empty", table);
+        config.put("cockroachdb.changefeed.sink.type", "kafka");
+        config.put("cockroachdb.changefeed.sink.uri", "kafka://kafka:19092");
+        config.put("cockroachdb.changefeed.kafka.bootstrap.servers", kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", ""));
+        config.put("cockroachdb.changefeed.kafka.auto.offset.reset", "earliest");
+        config.put("cockroachdb.changefeed.kafka.poll.timeout.ms", "1000");
+        config.put("heartbeat.interval.ms", "500");
+
+        verifyEmptySnapshotPersistsCompletion(config, table);
+    }
+
+    @Test
+    public void shouldPersistTheCompletedSnapshotOfEmptyTablesWithSinklessChangefeed() throws Exception {
+        String table = "sinkless_empty";
+        createTable(table);
+        Map<String, String> config = initialOnlyConfig("initial-only-sinkless-empty", table);
+        config.put("cockroachdb.changefeed.sink.type", "sinkless");
+        config.put("heartbeat.interval.ms", "500");
+
+        verifyEmptySnapshotPersistsCompletion(config, table);
     }
 
     @Test
@@ -166,6 +214,47 @@ public class CockroachDBInitialOnlyIT {
         CockroachDBConnectorTask restarted = startTask(config, lastRecord);
         assertThat(pollFor(restarted, table, records -> false, 15)).as("no events after restarting a completed initial_only run").isEmpty();
         assertThat(changefeedJobCount()).as("no changefeed is created after a completed initial_only run").isEqualTo(jobsBeforeRestart);
+    }
+
+    /**
+     * With every captured table empty no record can carry the completed snapshot, so the heartbeat sent
+     * when the scan completes must store it, and a restart from it must not scan again.
+     */
+    private void verifyEmptySnapshotPersistsCompletion(Map<String, String> config, String table) throws Exception {
+        CockroachDBConnectorTask task = startTask(config, null);
+        SourceRecord completed = pollForCompletedHeartbeat(task, 90);
+        assertThat(completed).as("a heartbeat stores the completed snapshot when every captured table is empty").isNotNull();
+        task.stop();
+        tasks.remove(task);
+
+        int jobsBeforeRestart = changefeedJobCount();
+        CockroachDBConnectorTask restarted = startTask(config, completed);
+        assertThat(pollFor(restarted, table, records -> false, 15)).as("no events after restarting a completed initial_only run").isEmpty();
+        assertThat(changefeedJobCount()).as("no changefeed is created after a completed initial_only run").isEqualTo(jobsBeforeRestart);
+    }
+
+    private static SourceRecord pollForCompletedHeartbeat(CockroachDBConnectorTask task, int maxSeconds) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(maxSeconds);
+        while (System.currentTimeMillis() < deadline) {
+            List<SourceRecord> polled = task.poll();
+            if (polled == null || polled.isEmpty()) {
+                Thread.sleep(200);
+                continue;
+            }
+            for (SourceRecord r : polled) {
+                if (r.topic() != null && r.topic().startsWith("__debezium-heartbeat")
+                        && "true".equals(String.valueOf(r.sourceOffset().get("snapshot_completed")))) {
+                    return r;
+                }
+            }
+        }
+        return null;
+    }
+
+    private void createTable(String table) throws Exception {
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS " + table + " (id INT PRIMARY KEY, name STRING)");
+        }
     }
 
     private void seed(String table) throws Exception {
