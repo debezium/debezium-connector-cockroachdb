@@ -81,6 +81,8 @@ public class CockroachDBChangefeedReuseTest {
         assertThatThrownBy(() -> source.changefeedExists(connectionListing("1003", "running", WITHOUT_DIFF), ACCT, List.of(ACCT)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("PAUSE JOB 1003")
+                .hasMessageContaining("SHOW CHANGEFEED JOB 1003")
+                .hasMessageContaining("'paused'")
                 .hasMessageContaining("ALTER CHANGEFEED 1003 SET diff")
                 .hasMessageContaining("RESUME JOB 1003")
                 .hasMessageContaining("CANCEL JOB 1003");
@@ -93,9 +95,28 @@ public class CockroachDBChangefeedReuseTest {
         assertThatThrownBy(() -> source.changefeedExists(connectionListing("1004", "running", WITH_DIFF), ACCT, List.of(ACCT)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("PAUSE JOB 1004")
+                .hasMessageContaining("SHOW CHANGEFEED JOB 1004")
+                .hasMessageContaining("'paused'")
                 .hasMessageContaining("ALTER CHANGEFEED 1004 SET mvcc_timestamp")
                 .hasMessageContaining("RESUME JOB 1004")
                 .hasMessageContaining("CANCEL JOB 1004");
+    }
+
+    @Test
+    void namesEveryChangefeedJobOfTheConnectorThatLacksTheOption() throws Exception {
+        // With cockroachdb.changefeed.max.tables.per.changefeed the connector runs several changefeeds,
+        // and all of them were created before the option was enabled.
+        TableId other = new TableId("reprodb", "public", "other");
+        String otherWithoutDiff = "CREATE CHANGEFEED FOR TABLE reprodb.public.other INTO 'kafka://kafka:9092?topic_prefix=repro.' "
+                + "WITH OPTIONS (enriched_properties = 'source,schema', envelope = 'enriched', resolved = '3s')";
+        CockroachDBStreamingChangeEventSource source = sourceWith("cockroachdb.changefeed.include.diff");
+
+        assertThatThrownBy(() -> source.changefeedExists(
+                connectionListingJobs(new String[]{ "1003", "running", WITHOUT_DIFF }, new String[]{ "1005", "running", otherWithoutDiff }),
+                ACCT, List.of(ACCT, other)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("1003")
+                .hasMessageContaining("1005");
     }
 
     private static CockroachDBStreamingChangeEventSource sourceWith(String enabledOption) {
@@ -113,11 +134,16 @@ public class CockroachDBChangefeedReuseTest {
     }
 
     private static CockroachDBConnection connectionListing(String jobId, String status, String description) throws Exception {
+        return connectionListingJobs(new String[]{ jobId, status, description });
+    }
+
+    private static CockroachDBConnection connectionListingJobs(String[]... rows) throws Exception {
         ResultSet jobs = mock(ResultSet.class);
-        when(jobs.next()).thenReturn(true, false);
-        when(jobs.getString(1)).thenReturn(jobId);
-        when(jobs.getString(2)).thenReturn(status);
-        when(jobs.getString(3)).thenReturn(description);
+        int[] row = { -1 };
+        when(jobs.next()).thenAnswer(invocation -> ++row[0] < rows.length);
+        when(jobs.getString(1)).thenAnswer(invocation -> rows[row[0]][0]);
+        when(jobs.getString(2)).thenAnswer(invocation -> rows[row[0]][1]);
+        when(jobs.getString(3)).thenAnswer(invocation -> rows[row[0]][2]);
         Statement statement = mock(Statement.class);
         when(statement.executeQuery(anyString())).thenReturn(jobs);
         Connection jdbc = mock(Connection.class);
