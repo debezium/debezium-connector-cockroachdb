@@ -237,6 +237,98 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
     }
 
     @Test
+    public void shouldReuseChangefeedAfterAlterChangefeedAddsDiff() throws Exception {
+        verifyReuseAfterAlterChangefeedAdds("diff", "cockroachdb.changefeed.include.diff");
+    }
+
+    @Test
+    public void shouldReuseChangefeedAfterAlterChangefeedAddsMvccTimestamp() throws Exception {
+        verifyReuseAfterAlterChangefeedAdds("mvcc_timestamp", "cockroachdb.changefeed.include.mvcc.timestamp");
+    }
+
+    /**
+     * Applies the remedy the reuse error offers (debezium/dbz#2967): a changefeed created without the
+     * option gets it with ALTER CHANGEFEED while paused, and the connector then reuses that job.
+     */
+    private void verifyReuseAfterAlterChangefeedAdds(String option, String property) throws Exception {
+        String database = "reuse_alter_" + option + "_testdb";
+        String table = "alter_" + option + "_events";
+        String scenario = "alter-" + option.replace('_', '-');
+        connection = openDatabase(database);
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS " + table + " (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO " + table + " VALUES (1, 'Alice')");
+        }
+
+        // First run creates the changefeed without the option.
+        startTask(baseConnectorConfig(scenario, database, "public." + table));
+        assertThat(pollUntilRecordsOrError(30).records).as("First run should stream the seed row").isNotEmpty();
+        stopTask();
+
+        // PAUSE JOB only requests the pause, and ALTER CHANGEFEED rejects a job that is not paused yet.
+        String jobId = runningChangefeedJobFor(table);
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("PAUSE JOB " + jobId);
+        }
+        waitForChangefeedJobStatus(jobId, "paused");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("ALTER CHANGEFEED " + jobId + " SET " + option);
+            stmt.execute("RESUME JOB " + jobId);
+        }
+        waitForChangefeedJobStatus(jobId, "running");
+
+        // With the property enabled the connector now reuses the altered changefeed.
+        Map<String, String> config = baseConnectorConfig(scenario, database, "public." + table);
+        config.put(property, "true");
+        startTask(config);
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("UPDATE " + table + " SET name = 'Alicia' WHERE id = 1");
+        }
+        List<SourceRecord> updates = pollForRecords(
+                r -> r.value() instanceof Struct v && v.schema().field("op") != null && "u".equals(v.getString("op")), 1, 60);
+        assertThat(updates).as("The update made after ALTER CHANGEFEED should be streamed").isNotEmpty();
+        Struct update = (Struct) updates.get(0).value();
+        if ("diff".equals(option)) {
+            Struct before = update.getStruct("before");
+            assertThat(before).as("The reused, altered changefeed delivers the before image").isNotNull();
+            assertThat(before.getString("name")).isEqualTo("Alice");
+        }
+        else {
+            assertThat(update.getStruct("source").getString("ts_hlc"))
+                    .as("The reused, altered changefeed delivers the row's MVCC timestamp").isNotNull();
+        }
+
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery(
+                        "SELECT count(*) FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' AND description LIKE '%" + table + "%'")) {
+            rs.next();
+            assertThat(rs.getInt(1)).as("The connector reuses the altered changefeed instead of creating another").isEqualTo(1);
+        }
+    }
+
+    private String runningChangefeedJobFor(String tableName) throws Exception {
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery(
+                        "SELECT job_id FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' AND description LIKE '%" + tableName + "%'")) {
+            assertThat(rs.next()).as("A running changefeed job for " + tableName + " must exist").isTrue();
+            return rs.getString(1);
+        }
+    }
+
+    private void waitForChangefeedJobStatus(String jobId, String status) throws Exception {
+        for (int i = 0; i < 30; i++) {
+            try (Statement stmt = connection.createStatement();
+                    ResultSet rs = stmt.executeQuery("SELECT status FROM [SHOW CHANGEFEED JOBS] WHERE job_id = " + jobId)) {
+                if (rs.next() && status.equals(rs.getString(1))) {
+                    return;
+                }
+            }
+            Thread.sleep(1000);
+        }
+        throw new AssertionError("Changefeed job " + jobId + " did not reach status " + status);
+    }
+
+    @Test
     public void shouldFailFastWhenMatchingChangefeedIsPaused() throws Exception {
         connection = openDatabase("reuse_paused_testdb");
         try (Statement stmt = connection.createStatement()) {

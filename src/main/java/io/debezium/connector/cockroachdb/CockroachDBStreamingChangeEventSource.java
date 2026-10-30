@@ -419,7 +419,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * changefeed job description to avoid false positives from changefeeds created by
      * other connector instances targeting the same tables with different topic prefixes.
      */
-    private boolean changefeedExists(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables) throws SQLException {
+    boolean changefeedExists(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables) throws SQLException {
         String topicPrefix = resolveTopicPrefix();
         String sinkMarker = "topic_prefix=" + topicPrefix;
 
@@ -429,77 +429,118 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             // job resumes (debezium/dbz#2462). Canceled and failed jobs are correctly ignored.
             String query = "SELECT job_id, status, description FROM [SHOW CHANGEFEED JOBS] "
                     + "WHERE status IN ('running', 'paused', 'pause-requested')";
+            // Read every job first, so a missing-option error can name all of this connector's jobs that
+            // lack the option, not just the one that covers this table.
+            List<String[]> jobs = new ArrayList<>();
             try (var rs = stmt.executeQuery(query)) {
                 while (rs.next()) {
-                    String jobId = rs.getString(1);
-                    String status = rs.getString(2);
-                    String description = rs.getString(3);
-                    if (description != null && descriptionCapturesTable(description, table) && description.contains(sinkMarker)) {
-                        if (!"running".equals(status)) {
-                            throw new IllegalStateException("Found changefeed job " + jobId + " covering table " + table
-                                    + " with topic prefix '" + topicPrefix + "' in status '" + status + "'. Starting anyway would "
-                                    + "create a duplicate changefeed that double-produces into the same intermediate topics once "
-                                    + "the paused job resumes. Resume it (RESUME JOB " + jobId + ") or cancel it (CANCEL JOB "
-                                    + jobId + ") before starting the connector.");
-                        }
-                        // A changefeed with our topic prefix already covers this table. The connector
-                        // can only consume the enriched envelope, so refuse to reuse one created with a
-                        // different envelope rather than consuming it and failing to parse events. We
-                        // cannot fall back to creating our own here either: it would target the same
-                        // topics as the existing feed.
-                        if (!changefeedUsesEnrichedEnvelope(description)) {
-                            throw new IllegalStateException("Found an existing running changefeed for table " + table
-                                    + " using topic prefix '" + topicPrefix + "' that was not created with envelope='enriched'. "
-                                    + "The CockroachDB connector can only consume the enriched envelope. Drop or recreate that "
-                                    + "changefeed with envelope='enriched' (and full_table_name), or use a different topic prefix.");
-                        }
-                        // Changefeed options are fixed at creation time, so a reused changefeed that
-                        // lacks the diff option can never deliver the before images the configuration
-                        // promises. Fail fast instead of silently emitting updates without them.
-                        if (config.isChangefeedIncludeDiff() && !changefeedHasDiffOption(description)) {
-                            throw new IllegalStateException("Found an existing running changefeed for table " + table
-                                    + " using topic prefix '" + topicPrefix + "' that was created without the diff option, but "
-                                    + "cockroachdb.changefeed.include.diff is enabled. Update events from that changefeed cannot "
-                                    + "carry a before image. Cancel the changefeed job and restart the connector so it recreates "
-                                    + "the changefeed with diff, or disable cockroachdb.changefeed.include.diff.");
-                        }
-                        // Likewise, a reused changefeed without mvcc_timestamp cannot deliver the
-                        // per-row commit timestamp emitted as source.ts_hlc.
-                        if (isMvccTimestampRequested() && !changefeedHasOption(description, "mvcc_timestamp")) {
-                            throw new IllegalStateException("Found an existing running changefeed for table " + table
-                                    + " using topic prefix '" + topicPrefix + "' that was created without the mvcc_timestamp "
-                                    + "option, but cockroachdb.changefeed.include.mvcc.timestamp is enabled. Events from that "
-                                    + "changefeed cannot carry the row's MVCC timestamp. Cancel the changefeed job and restart "
-                                    + "the connector so it recreates the changefeed with mvcc_timestamp, or disable "
-                                    + "cockroachdb.changefeed.include.mvcc.timestamp.");
-                        }
-                        if (!config.isChangefeedIncludeDiff() && changefeedHasDiffOption(description)) {
-                            LOGGER.warn("Reusing changefeed for table {} that was created with the diff option while "
-                                    + "cockroachdb.changefeed.include.diff is disabled; update events will carry before images.",
-                                    table);
-                        }
-                        // The captured table set is frozen at job creation. If tables were removed
-                        // from table.include.list since, the reused job keeps streaming them at full
-                        // volume into intermediate topics that nothing consumes.
-                        List<String> extraTables = findExtraCapturedTables(description, allIncludedTables);
-                        if (!extraTables.isEmpty()) {
-                            LOGGER.warn("Reused changefeed job {} also captures table(s) {} that are not in "
-                                    + "table.include.list. The job keeps streaming them into intermediate topics that "
-                                    + "this connector does not consume, wasting changefeed work, network, and broker "
-                                    + "storage. To capture only the configured tables, stop the connector, run "
-                                    + "CANCEL JOB {}, and restart the connector so it recreates the changefeed.",
-                                    jobId, extraTables, jobId);
-                        }
-                        return true;
-                    }
+                    jobs.add(new String[]{ rs.getString(1), rs.getString(2), rs.getString(3) });
                 }
-                return false;
             }
+            for (String[] job : jobs) {
+                String jobId = job[0];
+                String status = job[1];
+                String description = job[2];
+                if (description != null && descriptionCapturesTable(description, table) && description.contains(sinkMarker)) {
+                    if (!"running".equals(status)) {
+                        throw new IllegalStateException("Found changefeed job " + jobId + " covering table " + table
+                                + " with topic prefix '" + topicPrefix + "' in status '" + status + "'. Starting anyway would "
+                                + "create a duplicate changefeed that double-produces into the same intermediate topics once "
+                                + "the paused job resumes. Resume it (RESUME JOB " + jobId + ") or cancel it (CANCEL JOB "
+                                + jobId + ") before starting the connector.");
+                    }
+                    // A changefeed with our topic prefix already covers this table. The connector
+                    // can only consume the enriched envelope, so refuse to reuse one created with a
+                    // different envelope rather than consuming it and failing to parse events. We
+                    // cannot fall back to creating our own here either: it would target the same
+                    // topics as the existing feed.
+                    if (!changefeedUsesEnrichedEnvelope(description)) {
+                        throw new IllegalStateException("Found an existing running changefeed for table " + table
+                                + " using topic prefix '" + topicPrefix + "' that was not created with envelope='enriched'. "
+                                + "The CockroachDB connector can only consume the enriched envelope. Drop or recreate that "
+                                + "changefeed with envelope='enriched' (and full_table_name), or use a different topic prefix.");
+                    }
+                    // A reused changefeed has the options it was created with, plus any added later
+                    // with ALTER CHANGEFEED. One without diff cannot deliver the before images the
+                    // configuration promises, so fail fast instead of silently emitting updates
+                    // without them.
+                    if (config.isChangefeedIncludeDiff() && !changefeedHasDiffOption(description)) {
+                        throw new IllegalStateException(missingOptionError(runningJobsWithout(jobs, sinkMarker, "diff"), jobId, table,
+                                topicPrefix, "diff", "cockroachdb.changefeed.include.diff",
+                                "Update events from such a changefeed cannot carry a before image."));
+                    }
+                    // Likewise, a reused changefeed without mvcc_timestamp cannot deliver the
+                    // per-row commit timestamp emitted as source.ts_hlc.
+                    if (isMvccTimestampRequested() && !changefeedHasOption(description, "mvcc_timestamp")) {
+                        throw new IllegalStateException(missingOptionError(runningJobsWithout(jobs, sinkMarker, "mvcc_timestamp"), jobId,
+                                table, topicPrefix, "mvcc_timestamp", "cockroachdb.changefeed.include.mvcc.timestamp",
+                                "Events from such a changefeed cannot carry the row's MVCC timestamp."));
+                    }
+                    if (!config.isChangefeedIncludeDiff() && changefeedHasDiffOption(description)) {
+                        LOGGER.warn("Reusing changefeed for table {} that was created with the diff option while "
+                                + "cockroachdb.changefeed.include.diff is disabled; update events will carry before images.",
+                                table);
+                    }
+                    // The captured table set is frozen at job creation. If tables were removed
+                    // from table.include.list since, the reused job keeps streaming them at full
+                    // volume into intermediate topics that nothing consumes.
+                    List<String> extraTables = findExtraCapturedTables(description, allIncludedTables);
+                    if (!extraTables.isEmpty()) {
+                        LOGGER.warn("Reused changefeed job {} also captures table(s) {} that are not in "
+                                + "table.include.list. The job keeps streaming them into intermediate topics that "
+                                + "this connector does not consume, wasting changefeed work, network, and broker "
+                                + "storage. To capture only the configured tables, stop the connector, run "
+                                + "CANCEL JOB {}, and restart the connector so it recreates the changefeed.",
+                                jobId, extraTables, jobId);
+                    }
+                    return true;
+                }
+            }
+            return false;
         }
         catch (SQLException e) {
             LOGGER.warn("Unable to check existing changefeed jobs: {}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Returns the ids of the running changefeed jobs with this connector's topic prefix and the
+     * enriched envelope that do not use the given option.
+     */
+    private static List<String> runningJobsWithout(List<String[]> jobs, String sinkMarker, String option) {
+        return jobs.stream()
+                .filter(job -> "running".equals(job[1]) && job[2] != null && job[2].contains(sinkMarker)
+                        && changefeedUsesEnrichedEnvelope(job[2]) && !changefeedHasOption(job[2], option))
+                .map(job -> job[0])
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Builds the error for reused changefeeds that lack an option the configuration needs, naming every
+     * affected job. CockroachDB can add the option with ALTER CHANGEFEED once the job is paused; PAUSE
+     * JOB only requests the pause, so the operator has to wait for the paused status first
+     * (debezium/dbz#2967). Alternatively, the jobs can be canceled so the connector creates new ones.
+     */
+    static String missingOptionError(List<String> jobIds, String matchedJobId, TableId table, String topicPrefix, String option,
+                                     String property, String consequence) {
+        String waitForPause = "reports the status 'paused' (ALTER CHANGEFEED rejects a job that is not paused yet), run ";
+        if (jobIds.size() <= 1) {
+            String id = matchedJobId;
+            return "Found existing running changefeed job " + id + " for table " + table + " using topic prefix '" + topicPrefix
+                    + "' that does not use the " + option + " option, but " + property + " is enabled. " + consequence
+                    + " To add the option to the existing changefeed, run PAUSE JOB " + id + ", wait until SHOW CHANGEFEED JOB " + id + " "
+                    + waitForPause + "ALTER CHANGEFEED " + id + " SET " + option + " and RESUME JOB " + id + ", and then restart the "
+                    + "connector. Alternatively, cancel the job (CANCEL JOB " + id + ") and restart the connector so that it creates a "
+                    + "changefeed with " + option + ", or disable " + property + ".";
+        }
+        return "Found existing running changefeed jobs " + String.join(", ", jobIds) + " using topic prefix '" + topicPrefix
+                + "' that do not use the " + option + " option, including job " + matchedJobId + " for table " + table + ", but "
+                + property + " is enabled. " + consequence + " To add the option to each existing changefeed, run PAUSE JOB <job_id>, "
+                + "wait until SHOW CHANGEFEED JOB <job_id> " + waitForPause + "ALTER CHANGEFEED <job_id> SET " + option
+                + " and RESUME JOB <job_id>, and then restart the connector. Alternatively, cancel the jobs (CANCEL JOB <job_id>) and "
+                + "restart the connector so that it creates changefeeds with " + option + ", or disable " + property + ".";
     }
 
     /**
