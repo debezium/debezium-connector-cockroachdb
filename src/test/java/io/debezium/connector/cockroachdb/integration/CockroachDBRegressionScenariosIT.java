@@ -238,46 +238,69 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
 
     @Test
     public void shouldReuseChangefeedAfterAlterChangefeedAddsDiff() throws Exception {
-        connection = openDatabase("reuse_alter_testdb");
+        verifyReuseAfterAlterChangefeedAdds("diff", "cockroachdb.changefeed.include.diff");
+    }
+
+    @Test
+    public void shouldReuseChangefeedAfterAlterChangefeedAddsMvccTimestamp() throws Exception {
+        verifyReuseAfterAlterChangefeedAdds("mvcc_timestamp", "cockroachdb.changefeed.include.mvcc.timestamp");
+    }
+
+    /**
+     * Applies the remedy the reuse error offers (debezium/dbz#2967): a changefeed created without the
+     * option gets it with ALTER CHANGEFEED while paused, and the connector then reuses that job.
+     */
+    private void verifyReuseAfterAlterChangefeedAdds(String option, String property) throws Exception {
+        String database = "reuse_alter_" + option + "_testdb";
+        String table = "alter_" + option + "_events";
+        String scenario = "alter-" + option.replace('_', '-');
+        connection = openDatabase(database);
         try (Statement stmt = connection.createStatement()) {
-            stmt.execute("CREATE TABLE IF NOT EXISTS alter_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
-            stmt.execute("UPSERT INTO alter_events VALUES (1, 'Alice')");
+            stmt.execute("CREATE TABLE IF NOT EXISTS " + table + " (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO " + table + " VALUES (1, 'Alice')");
         }
 
-        // First run creates the changefeed without the diff option.
-        startTask(baseConnectorConfig("alter-test", "reuse_alter_testdb", "public.alter_events"));
+        // First run creates the changefeed without the option.
+        startTask(baseConnectorConfig(scenario, database, "public." + table));
         assertThat(pollUntilRecordsOrError(30).records).as("First run should stream the seed row").isNotEmpty();
         stopTask();
 
-        // Apply the remedy the reuse error offers (debezium/dbz#2967): add diff to the existing changefeed.
-        String jobId = runningChangefeedJobFor("alter_events");
+        // PAUSE JOB only requests the pause, and ALTER CHANGEFEED rejects a job that is not paused yet.
+        String jobId = runningChangefeedJobFor(table);
         try (Statement stmt = connection.createStatement()) {
             stmt.execute("PAUSE JOB " + jobId);
         }
         waitForChangefeedJobStatus(jobId, "paused");
         try (Statement stmt = connection.createStatement()) {
-            stmt.execute("ALTER CHANGEFEED " + jobId + " SET diff");
+            stmt.execute("ALTER CHANGEFEED " + jobId + " SET " + option);
             stmt.execute("RESUME JOB " + jobId);
         }
         waitForChangefeedJobStatus(jobId, "running");
 
-        // With include.diff enabled the connector now reuses the altered changefeed, and updates carry a before image.
-        Map<String, String> diffConfig = baseConnectorConfig("alter-test", "reuse_alter_testdb", "public.alter_events");
-        diffConfig.put("cockroachdb.changefeed.include.diff", "true");
-        startTask(diffConfig);
+        // With the property enabled the connector now reuses the altered changefeed.
+        Map<String, String> config = baseConnectorConfig(scenario, database, "public." + table);
+        config.put(property, "true");
+        startTask(config);
         try (Statement stmt = connection.createStatement()) {
-            stmt.execute("UPDATE alter_events SET name = 'Alicia' WHERE id = 1");
+            stmt.execute("UPDATE " + table + " SET name = 'Alicia' WHERE id = 1");
         }
         List<SourceRecord> updates = pollForRecords(
                 r -> r.value() instanceof Struct v && v.schema().field("op") != null && "u".equals(v.getString("op")), 1, 60);
         assertThat(updates).as("The update made after ALTER CHANGEFEED should be streamed").isNotEmpty();
-        Struct before = ((Struct) updates.get(0).value()).getStruct("before");
-        assertThat(before).as("The reused, altered changefeed delivers the before image").isNotNull();
-        assertThat(before.getString("name")).isEqualTo("Alice");
+        Struct update = (Struct) updates.get(0).value();
+        if ("diff".equals(option)) {
+            Struct before = update.getStruct("before");
+            assertThat(before).as("The reused, altered changefeed delivers the before image").isNotNull();
+            assertThat(before.getString("name")).isEqualTo("Alice");
+        }
+        else {
+            assertThat(update.getStruct("source").getString("ts_hlc"))
+                    .as("The reused, altered changefeed delivers the row's MVCC timestamp").isNotNull();
+        }
 
         try (Statement stmt = connection.createStatement();
                 ResultSet rs = stmt.executeQuery(
-                        "SELECT count(*) FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' AND description LIKE '%alter_events%'")) {
+                        "SELECT count(*) FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' AND description LIKE '%" + table + "%'")) {
             rs.next();
             assertThat(rs.getInt(1)).as("The connector reuses the altered changefeed instead of creating another").isEqualTo(1);
         }
