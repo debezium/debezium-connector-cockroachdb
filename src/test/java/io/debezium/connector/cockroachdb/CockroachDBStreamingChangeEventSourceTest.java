@@ -15,7 +15,9 @@ import static org.mockito.Mockito.verify;
 
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -550,5 +552,43 @@ public class CockroachDBStreamingChangeEventSourceTest {
         assertThat(source.buildSinklessChangefeedQuery(tables, null, false))
                 .contains("initial_scan = 'only'")
                 .doesNotContain("mvcc_timestamp");
+    }
+
+    @Test
+    void initialOnlyLeavesOutOptionsThatCockroachDbRejectsWithInitialScanOnly() {
+        // CockroachDB rejects resolved, updated, diff, and mvcc_timestamp together with
+        // initial_scan='only' (debezium/dbz#2966).
+        List<TableId> tables = List.of(new TableId("testdb", "public", "orders"));
+        CockroachDBStreamingChangeEventSource source = source(baseConfig()
+                .with("snapshot.mode", "initial_only")
+                .with("cockroachdb.changefeed.include.updated", "true")
+                .with("cockroachdb.changefeed.include.diff", "true")
+                .with("cockroachdb.changefeed.include.mvcc.timestamp", "true")
+                .build());
+        assertThat(withOptionNames(source.buildSinkChangefeedQuery(tables, null, false)))
+                .containsExactly("full_table_name", "envelope", "enriched_properties", "initial_scan");
+        assertThat(withOptionNames(source.buildSinklessChangefeedQuery(tables, null, false)))
+                .containsExactly("envelope", "enriched_properties", "initial_scan");
+    }
+
+    @Test
+    void otherSnapshotModesKeepResolvedUpdatedDiffAndMvccTimestamp() {
+        List<TableId> tables = List.of(new TableId("testdb", "public", "orders"));
+        CockroachDBStreamingChangeEventSource source = source(baseConfig()
+                .with("snapshot.mode", "initial")
+                .with("cockroachdb.changefeed.include.updated", "true")
+                .with("cockroachdb.changefeed.include.diff", "true")
+                .with("cockroachdb.changefeed.include.mvcc.timestamp", "true")
+                .build());
+        assertThat(withOptionNames(source.buildSinkChangefeedQuery(tables, null, false)))
+                .containsExactly("full_table_name", "envelope", "enriched_properties", "updated", "diff", "mvcc_timestamp", "resolved",
+                        "initial_scan");
+    }
+
+    private static List<String> withOptionNames(String query) {
+        String options = query.substring(query.indexOf(" WITH ") + " WITH ".length());
+        return Arrays.stream(options.split(", "))
+                .map(option -> option.split("=", 2)[0].trim())
+                .collect(Collectors.toList());
     }
 }

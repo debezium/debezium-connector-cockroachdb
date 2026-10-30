@@ -22,6 +22,7 @@ import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -41,6 +42,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.SslConfigs;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
@@ -121,6 +123,30 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * that the initial scan phase has completed.
      */
     private volatile boolean initialScanInProgress = false;
+
+    /**
+     * How often an initial_only run in kafka mode asks CockroachDB whether its changefeed jobs have
+     * finished the scan.
+     */
+    private static final long INITIAL_ONLY_JOB_CHECK_INTERVAL_MS = 1000;
+
+    /** Changefeed job statuses that end an initial_only run with an error. */
+    private static final Set<String> FAILED_CHANGEFEED_JOB_STATUSES = Set.of("failed", "canceled", "cancel-requested", "reverting", "revert-failed");
+
+    /** How often an initial_only run logs the changefeed jobs it is still waiting for. */
+    private static final long INITIAL_ONLY_WAIT_LOG_INTERVAL_MS = 30_000;
+
+    /** Changefeed jobs this run created or reused in kafka mode; initial_only waits for them to succeed. */
+    private final List<Long> changefeedJobIds = new ArrayList<>();
+    /**
+     * In initial_only mode the latest changefeed event is held back, so the final event of the scan can
+     * carry the completed snapshot in its offset (see {@link #completeInitialOnlySnapshot}).
+     */
+    private PendingChangefeedEvent pendingInitialOnlyEvent;
+    /** End offsets of the intermediate topics, taken once the initial_only changefeed jobs succeeded. */
+    private Map<TopicPartition, Long> initialOnlyEndOffsets;
+    private long nextInitialOnlyJobCheck;
+    private long nextInitialOnlyWaitLog;
 
     /**
      * Partition instance from {@link #execute}, stored for heartbeat dispatch
@@ -205,6 +231,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             LOGGER.info("Snapshot mode: {}, hasPriorOffset: {}, cursor: '{}'",
                     config.getSnapshotMode().getValue(), hasPriorOffset, cursor);
 
+            // Like initial_only in the other connectors: once the snapshot has completed, a restart
+            // neither scans again nor streams (debezium/dbz#2966).
+            if (isInitialOnly() && offsetContext.isSnapshotCompleted()) {
+                LOGGER.info("snapshot.mode=initial_only and the initial snapshot already completed, so no changefeed is created");
+                return;
+            }
+
             // Build topic-to-table mapping for all tables
             topicToTableMap.clear();
             for (TableId table : tables) {
@@ -278,10 +311,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         if (config.isSinklessChangefeed()) {
             // A sinkless changefeed is created and streamed in a single executeQuery during
             // consumption (see consumeSinkless), so there is nothing to pre-create here.
-            initialScanInProgress = "yes".equals(config.getInitialScanForSnapshotMode(hasPriorOffset));
+            initialScanInProgress = isInitialScan(config.getInitialScanForSnapshotMode(hasPriorOffset));
             return;
         }
 
+        changefeedJobIds.clear();
         int maxPerChangefeed = config.getChangefeedMaxTablesPerChangefeed();
         List<List<TableId>> groups = partitionTables(tables, maxPerChangefeed);
 
@@ -321,7 +355,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
 
         String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
-        initialScanInProgress = recoveredFromInvalidCursor || "yes".equals(initialScan);
+        initialScanInProgress = recoveredFromInvalidCursor || isInitialScan(initialScan);
         if (initialScanInProgress) {
             LOGGER.info("Initial scan in progress (snapshot.mode={})",
                     config.getSnapshotMode().getValue());
@@ -340,6 +374,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         LOGGER.debug("Changefeed query: {}", query);
         try {
             stmt.execute(query);
+            recordCreatedJobId(stmt);
             return false;
         }
         catch (SQLException e) {
@@ -350,6 +385,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             String recoveryQuery = buildSinkChangefeedQuery(tables, null, false);
             LOGGER.debug("Invalid-cursor recovery changefeed query: {}", recoveryQuery);
             stmt.execute(recoveryQuery);
+            recordCreatedJobId(stmt);
             return true;
         }
     }
@@ -357,7 +393,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     private void initializeSnapshotLifecycle(List<TableId> tables, CockroachDBOffsetContext offsetContext) {
         // Drive the snapshot lifecycle for the changefeed initial scan so snapshot_completed,
         // source.snapshot, and the JMX snapshot metrics reflect reality. Completion is signalled on
-        // the first resolved timestamp (see processChangefeedEvent).
+        // the first resolved timestamp (see processChangefeedEvent), or for initial_only when the
+        // scan ends (see completeInitialOnlySnapshot).
         if (initialScanInProgress) {
             offsetContext.markSnapshotRecord(SnapshotRecord.TRUE);
             if (snapshotProgressListener != null) {
@@ -419,7 +456,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * changefeed job description to avoid false positives from changefeeds created by
      * other connector instances targeting the same tables with different topic prefixes.
      */
-    private boolean changefeedExists(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables) throws SQLException {
+    boolean changefeedExists(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables) throws SQLException {
         String topicPrefix = resolveTopicPrefix();
         String sinkMarker = "topic_prefix=" + topicPrefix;
 
@@ -453,10 +490,19 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                     + "The CockroachDB connector can only consume the enriched envelope. Drop or recreate that "
                                     + "changefeed with envelope='enriched' (and full_table_name), or use a different topic prefix.");
                         }
+                        // A streaming changefeed never finishes, so an initial_only run attached to it
+                        // would never complete its snapshot.
+                        if (isInitialOnly() && !changefeedScansOnly(description)) {
+                            throw new IllegalStateException("Found running changefeed job " + jobId + " covering table " + table
+                                    + " with topic prefix '" + topicPrefix + "' that keeps streaming after its initial scan. "
+                                    + "snapshot.mode=initial_only needs a changefeed created with initial_scan='only', which ends "
+                                    + "once the scan completes. Cancel that job (CANCEL JOB " + jobId + ") or use a different "
+                                    + "topic prefix.");
+                        }
                         // Changefeed options are fixed at creation time, so a reused changefeed that
                         // lacks the diff option can never deliver the before images the configuration
                         // promises. Fail fast instead of silently emitting updates without them.
-                        if (config.isChangefeedIncludeDiff() && !changefeedHasDiffOption(description)) {
+                        if (isDiffRequested() && !changefeedHasDiffOption(description)) {
                             throw new IllegalStateException("Found an existing running changefeed for table " + table
                                     + " using topic prefix '" + topicPrefix + "' that was created without the diff option, but "
                                     + "cockroachdb.changefeed.include.diff is enabled. Update events from that changefeed cannot "
@@ -490,6 +536,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                     + "CANCEL JOB {}, and restart the connector so it recreates the changefeed.",
                                     jobId, extraTables, jobId);
                         }
+                        changefeedJobIds.add(Long.parseLong(jobId));
                         return true;
                     }
                 }
@@ -525,6 +572,252 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     boolean isMvccTimestampRequested() {
         return config.isChangefeedIncludeMvccTimestamp()
                 && config.getSnapshotMode() != CockroachDBConnectorConfig.SnapshotMode.INITIAL_ONLY;
+    }
+
+    private boolean isInitialOnly() {
+        return config.getSnapshotMode() == CockroachDBConnectorConfig.SnapshotMode.INITIAL_ONLY;
+    }
+
+    /**
+     * Returns {@code true} if the changefeed should be created with {@code updated}. Like
+     * {@code mvcc_timestamp}, CockroachDB rejects it together with {@code initial_scan='only'}.
+     */
+    boolean isUpdatedRequested() {
+        return config.isChangefeedIncludeUpdated() && !isInitialOnly();
+    }
+
+    /**
+     * Returns {@code true} if the changefeed should be created with {@code diff}. Like
+     * {@code mvcc_timestamp}, CockroachDB rejects it together with {@code initial_scan='only'}.
+     */
+    boolean isDiffRequested() {
+        return config.isChangefeedIncludeDiff() && !isInitialOnly();
+    }
+
+    /** Both {@code initial_scan='yes'} and {@code initial_scan='only'} emit the existing rows first. */
+    private static boolean isInitialScan(String initialScan) {
+        return "yes".equals(initialScan) || "only".equals(initialScan);
+    }
+
+    /**
+     * Returns {@code true} if a {@code SHOW CHANGEFEED JOBS} description shows a changefeed created with
+     * {@code initial_scan='only'}, which ends once its scan completes.
+     */
+    static boolean changefeedScansOnly(String description) {
+        return description != null && description.replaceAll("\\s+", "").contains("initial_scan='only'");
+    }
+
+    /** Records the job id that {@code CREATE CHANGEFEED ... INTO} returns. */
+    private void recordCreatedJobId(Statement stmt) throws SQLException {
+        try (ResultSet rs = stmt.getResultSet()) {
+            if (rs != null && rs.next()) {
+                changefeedJobIds.add(rs.getLong(1));
+            }
+        }
+    }
+
+    /**
+     * Returns {@code true} once an initial_only changefeed has written its whole scan to the
+     * intermediate topics and the consumer has read all of it. CockroachDB cannot emit resolved
+     * timestamps with {@code initial_scan='only'}. Instead it marks the changefeed job succeeded after
+     * every row has been written to the sink, so the scan has been delivered when all jobs of this run
+     * have succeeded and the consumer has reached the end offsets taken after that.
+     */
+    private boolean initialOnlyScanDelivered(KafkaConsumer<String, String> consumer, List<String> topicNames) throws SQLException {
+        if (initialOnlyEndOffsets == null) {
+            long now = clock.currentTimeInMillis();
+            if (now < nextInitialOnlyJobCheck) {
+                return false;
+            }
+            nextInitialOnlyJobCheck = now + INITIAL_ONLY_JOB_CHECK_INTERVAL_MS;
+            if (!changefeedJobsSucceeded(changefeedJobIds)) {
+                return false;
+            }
+            List<TopicPartition> partitions = new ArrayList<>();
+            for (String topic : topicNames) {
+                List<PartitionInfo> infos = consumer.partitionsFor(topic);
+                if (infos != null) {
+                    for (PartitionInfo info : infos) {
+                        partitions.add(new TopicPartition(topic, info.partition()));
+                    }
+                }
+            }
+            Map<TopicPartition, Long> beginning = consumer.beginningOffsets(partitions);
+            Map<TopicPartition, Long> end = consumer.endOffsets(partitions);
+            Map<TopicPartition, Long> toRead = new HashMap<>();
+            for (TopicPartition partition : partitions) {
+                long endOffset = end.getOrDefault(partition, 0L);
+                if (endOffset > beginning.getOrDefault(partition, 0L)) {
+                    toRead.put(partition, endOffset);
+                }
+            }
+            initialOnlyEndOffsets = toRead;
+            LOGGER.info("Changefeed job(s) {} finished the initial scan, reading the intermediate topics up to {}", changefeedJobIds, toRead);
+        }
+        Set<TopicPartition> assigned = consumer.assignment();
+        for (Map.Entry<TopicPartition, Long> entry : initialOnlyEndOffsets.entrySet()) {
+            if (!assigned.contains(entry.getKey()) || consumer.position(entry.getKey()) < entry.getValue()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Returns {@code true} once every given changefeed job has succeeded, and fails the run when a job
+     * ends with a failure status. While it waits, it periodically logs the job statuses, and warns when
+     * a job is paused, because the scan does not continue until the job is resumed. A failed status
+     * query reconnects and is retried on the next check instead of failing the task.
+     */
+    boolean changefeedJobsSucceeded(List<Long> jobIds) {
+        if (jobIds.isEmpty()) {
+            throw new IllegalStateException("snapshot.mode=initial_only found no changefeed job to wait for");
+        }
+        Map<Long, String[]> statuses;
+        try {
+            statuses = queryChangefeedJobStatuses(jobIds);
+        }
+        catch (SQLException e) {
+            LOGGER.warn("Checking changefeed job(s) {} failed ({}); reconnecting and checking again", jobIds, e.getMessage());
+            try {
+                reconnectSchemaRefreshConnection();
+            }
+            catch (SQLException reconnectFailure) {
+                LOGGER.warn("Reconnecting the schema refresh connection failed: {}", reconnectFailure.getMessage());
+            }
+            return false;
+        }
+        Map<Long, String> waiting = new LinkedHashMap<>();
+        for (Long jobId : jobIds) {
+            String[] statusAndError = statuses.get(jobId);
+            String status = statusAndError == null ? "unknown" : statusAndError[0];
+            if (FAILED_CHANGEFEED_JOB_STATUSES.contains(status)) {
+                throw new IllegalStateException("Changefeed job " + jobId + " that performs the snapshot.mode=initial_only "
+                        + "scan ended with status '" + status + "': " + statusAndError[1]);
+            }
+            if (!"succeeded".equals(status)) {
+                waiting.put(jobId, status);
+            }
+        }
+        if (waiting.isEmpty()) {
+            return true;
+        }
+        logInitialOnlyWait(waiting);
+        return false;
+    }
+
+    private void logInitialOnlyWait(Map<Long, String> waiting) {
+        long now = clock.currentTimeInMillis();
+        if (now < nextInitialOnlyWaitLog) {
+            return;
+        }
+        nextInitialOnlyWaitLog = now + INITIAL_ONLY_WAIT_LOG_INTERVAL_MS;
+        String resume = waiting.entrySet().stream()
+                .filter(entry -> entry.getValue().startsWith("pause"))
+                .map(entry -> "RESUME JOB " + entry.getKey())
+                .collect(Collectors.joining("; "));
+        if (resume.isEmpty()) {
+            LOGGER.info("snapshot.mode=initial_only is waiting for changefeed job(s) {} to finish the initial scan", waiting);
+        }
+        else {
+            LOGGER.warn("snapshot.mode=initial_only is waiting for changefeed job(s) {}. A paused job does not continue the scan "
+                    + "until it is resumed: {}", waiting, resume);
+        }
+    }
+
+    /**
+     * Returns the status and error of each given changefeed job, keyed by job id.
+     */
+    Map<Long, String[]> queryChangefeedJobStatuses(List<Long> jobIds) throws SQLException {
+        String ids = jobIds.stream().map(String::valueOf).collect(Collectors.joining(", "));
+        Map<Long, String[]> statuses = new HashMap<>();
+        try (Statement stmt = schemaRefreshConnection.connection().createStatement();
+                ResultSet rs = stmt.executeQuery("SELECT job_id, status, error FROM [SHOW CHANGEFEED JOBS] WHERE job_id IN (" + ids + ")")) {
+            while (rs.next()) {
+                statuses.put(rs.getLong(1), new String[]{ rs.getString(2), rs.getString(3) });
+            }
+        }
+        return statuses;
+    }
+
+    /**
+     * Returns the position to mirror to the consumer group for each given partition: one past the
+     * position stored in the Debezium offset. In initial_only mode the record held back as the final
+     * snapshot record is not stored until it is dispatched, so the group never gets ahead of the
+     * Debezium offset.
+     */
+    static Map<TopicPartition, OffsetAndMetadata> dispatchedPositions(Collection<TopicPartition> partitions, CockroachDBOffsetContext offsetContext) {
+        Map<TopicPartition, OffsetAndMetadata> positions = new HashMap<>();
+        for (TopicPartition partition : partitions) {
+            Long stored = offsetContext.getConsumerOffset(kafkaConsumerOffsetKey(partition.topic(), partition.partition()));
+            if (stored != null) {
+                positions.put(partition, new OffsetAndMetadata(stored + 1));
+            }
+        }
+        return positions;
+    }
+
+    /**
+     * Mirrors the positions after the final snapshot record of an initial_only run, which is dispatched
+     * after the last regular mirror. The consumer closes right after this, so the commit is synchronous;
+     * as with the regular mirror, a failure is not fatal.
+     */
+    private static void mirrorFinalPositionsToGroup(KafkaConsumer<String, String> consumer, Map<TopicPartition, OffsetAndMetadata> positions) {
+        if (positions.isEmpty()) {
+            return;
+        }
+        try {
+            consumer.commitSync(positions, Duration.ofSeconds(10));
+        }
+        catch (Exception e) {
+            LOGGER.debug("Failed to mirror the final consumer positions to the Kafka group: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Ends an initial_only snapshot. The held-back final event is dispatched as the last snapshot record
+     * with {@code snapshot_completed=true} in its offset, so a restart does not scan again even when
+     * heartbeats are disabled. Then the snapshot is reported complete.
+     */
+    private void completeInitialOnlySnapshot(CockroachDBOffsetContext offsetContext) throws InterruptedException {
+        offsetContext.preSnapshotCompletion();
+        if (pendingInitialOnlyEvent != null) {
+            offsetContext.markSnapshotRecord(SnapshotRecord.LAST);
+            dispatchPendingInitialOnlyEvent(offsetContext);
+        }
+        initialScanInProgress = false;
+        offsetContext.markSnapshotRecord(SnapshotRecord.FALSE);
+        if (snapshotProgressListener != null && currentPartition != null) {
+            try {
+                snapshotProgressListener.snapshotCompleted(currentPartition);
+            }
+            catch (Exception e) {
+                LOGGER.warn("Snapshot metrics completion notification failed: {}", e.getMessage());
+            }
+        }
+        // Like the relational snapshot sources, send a heartbeat once the snapshot is complete. When every
+        // captured table is empty, no record carries snapshot_completed=true and this heartbeat stores
+        // it. With heartbeat.interval.ms=0 heartbeats are disabled and this is a no-op.
+        dispatcher.alwaysDispatchHeartbeatEvent(currentPartition, offsetContext);
+    }
+
+    private void dispatchPendingInitialOnlyEvent(CockroachDBOffsetContext offsetContext) {
+        PendingChangefeedEvent pending = pendingInitialOnlyEvent;
+        if (pending == null) {
+            return;
+        }
+        pendingInitialOnlyEvent = null;
+        if (pending.consumerOffsetKey() != null) {
+            offsetContext.setConsumerOffset(pending.consumerOffsetKey(), pending.consumerOffset());
+        }
+        processChangefeedEvent(pending.keyJson(), pending.valueJson(), pending.table(), offsetContext);
+    }
+
+    /**
+     * A changefeed event held back in initial_only mode, with its intermediate topic position when it
+     * came from kafka (see {@link #completeInitialOnlySnapshot}).
+     */
+    private record PendingChangefeedEvent(String keyJson, String valueJson, TableId table, String consumerOffsetKey, long consumerOffset) {
     }
 
     /**
@@ -642,48 +935,73 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     LOGGER.trace("Polled {} records from {} topic(s)", records.count(), topicNames.size());
                 }
 
-                Map<TopicPartition, OffsetAndMetadata> positionsToMirror = commitOffsetsToGroup ? new HashMap<>() : null;
+                Set<TopicPartition> polledPartitions = commitOffsetsToGroup ? new HashSet<>() : null;
+                boolean holdBackLatest = isInitialOnly() && initialScanInProgress;
                 for (ConsumerRecord<String, String> record : records) {
                     if (!context.isRunning()) {
                         break;
                     }
-                    // Record the consumed position so it is persisted in the Debezium offset (flushed
-                    // by Connect after the dispatched events are produced) and a restart can resume here.
-                    offsetContext.setConsumerOffset(kafkaConsumerOffsetKey(record.topic(), record.partition()), record.offset());
-                    if (positionsToMirror != null) {
-                        positionsToMirror.put(new TopicPartition(record.topic(), record.partition()),
-                                new OffsetAndMetadata(record.offset() + 1));
+                    String consumerOffsetKey = kafkaConsumerOffsetKey(record.topic(), record.partition());
+                    if (polledPartitions != null) {
+                        polledPartitions.add(new TopicPartition(record.topic(), record.partition()));
                     }
                     String valueJson = record.value();
+                    TableId table = null;
                     if (valueJson != null && !valueJson.trim().isEmpty()) {
-                        TableId table = resolveTableFromTopic(record.topic());
-                        if (table != null) {
-                            processChangefeedEvent(record.key(), valueJson, table, offsetContext);
-                        }
-                        else {
+                        table = resolveTableFromTopic(record.topic());
+                        if (table == null) {
                             LOGGER.warn("Cannot resolve table for topic '{}', skipping event", record.topic());
                         }
                     }
+                    if (holdBackLatest) {
+                        // Dispatch the event held back so far and hold this one back instead, so the final
+                        // event of the scan can carry the completed snapshot (see completeInitialOnlySnapshot).
+                        dispatchPendingInitialOnlyEvent(offsetContext);
+                        if (table != null) {
+                            pendingInitialOnlyEvent = new PendingChangefeedEvent(record.key(), valueJson, table, consumerOffsetKey, record.offset());
+                        }
+                        else {
+                            offsetContext.setConsumerOffset(consumerOffsetKey, record.offset());
+                        }
+                        continue;
+                    }
+                    // Record the consumed position so it is persisted in the Debezium offset (flushed
+                    // by Connect after the dispatched events are produced) and a restart can resume here.
+                    offsetContext.setConsumerOffset(consumerOffsetKey, record.offset());
+                    if (table != null) {
+                        processChangefeedEvent(record.key(), valueJson, table, offsetContext);
+                    }
                 }
 
-                if (positionsToMirror != null && !positionsToMirror.isEmpty()) {
+                if (polledPartitions != null && !polledPartitions.isEmpty()) {
                     // Observability mirror only: the connector resumes from the Debezium offsets via the
                     // explicit seeks above, never from the group, so a failed commit must never fail the
-                    // pipeline.
-                    consumer.commitAsync(positionsToMirror, (offsets, exception) -> {
-                        if (exception != null) {
-                            LOGGER.debug("Failed to mirror consumer positions to the Kafka group: {}", exception.getMessage());
-                        }
-                    });
+                    // pipeline. Mirror the positions stored in the Debezium offset, which leave out a
+                    // record that initial_only mode holds back until it is dispatched.
+                    Map<TopicPartition, OffsetAndMetadata> positionsToMirror = dispatchedPositions(polledPartitions, offsetContext);
+                    if (!positionsToMirror.isEmpty()) {
+                        consumer.commitAsync(positionsToMirror, (offsets, exception) -> {
+                            if (exception != null) {
+                                LOGGER.debug("Failed to mirror consumer positions to the Kafka group: {}", exception.getMessage());
+                            }
+                        });
+                    }
                 }
 
                 offsetActivityMonitorService.pulse(currentPartition, offsetContext);
 
-                if (config.getSnapshotMode() == CockroachDBConnectorConfig.SnapshotMode.INITIAL_ONLY
-                        && !initialScanInProgress) {
-                    LOGGER.info("Initial scan completed and snapshot.mode=initial_only, stopping connector");
-                    running.set(false);
-                    break;
+                if (isInitialOnly()) {
+                    if (initialScanInProgress && initialOnlyScanDelivered(consumer, topicNames)) {
+                        completeInitialOnlySnapshot(offsetContext);
+                        if (commitOffsetsToGroup) {
+                            mirrorFinalPositionsToGroup(consumer, dispatchedPositions(consumer.assignment(), offsetContext));
+                        }
+                    }
+                    if (!initialScanInProgress) {
+                        LOGGER.info("Initial scan completed and snapshot.mode=initial_only, stopping connector");
+                        running.set(false);
+                        break;
+                    }
                 }
 
                 metronome.pause();
@@ -760,18 +1078,31 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                         }
                         String keyJson = readChangefeedKey(rs);
                         TableId table = resolveTableFromSource(valueJson, tablesBySchemaAndName);
-                        // Resolved-timestamp rows carry no table; processChangefeedEvent handles
-                        // them by their "resolved" field regardless of the table argument.
-                        processChangefeedEvent(keyJson, valueJson, table, offsetContext);
+                        if (isInitialOnly() && initialScanInProgress) {
+                            // Hold back the latest event so the final event of the scan can carry the
+                            // completed snapshot (see completeInitialOnlySnapshot).
+                            dispatchPendingInitialOnlyEvent(offsetContext);
+                            pendingInitialOnlyEvent = new PendingChangefeedEvent(keyJson, valueJson, table, null, 0L);
+                        }
+                        else {
+                            // Resolved-timestamp rows carry no table; processChangefeedEvent handles
+                            // them by their "resolved" field regardless of the table argument.
+                            processChangefeedEvent(keyJson, valueJson, table, offsetContext);
+                        }
 
                         offsetActivityMonitorService.pulse(currentPartition, offsetContext);
-
-                        if (config.getSnapshotMode() == CockroachDBConnectorConfig.SnapshotMode.INITIAL_ONLY
-                                && !initialScanInProgress) {
-                            LOGGER.info("Initial scan completed and snapshot.mode=initial_only, stopping connector");
-                            running.set(false);
-                            break;
-                        }
+                    }
+                    // CockroachDB ends a sinkless initial_scan='only' changefeed normally only once it has
+                    // delivered the whole scan. When a node fails or drains mid-scan, it either re-plans
+                    // the scan and still delivers every row, or fails the statement, which reaches this
+                    // code as an SQLException rather than as the end of the result set. A result set
+                    // that ends while the connector is running is therefore the end of the scan.
+                    if (isInitialOnly() && initialScanInProgress && context.isRunning() && running.get()) {
+                        completeInitialOnlySnapshot(offsetContext);
+                    }
+                    if (isInitialOnly() && !initialScanInProgress) {
+                        LOGGER.info("Initial scan completed and snapshot.mode=initial_only, stopping connector");
+                        running.set(false);
                     }
                 }
             }
@@ -1197,11 +1528,19 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         if (enrichedProperties != null && !enrichedProperties.trim().isEmpty()) {
             options.add("enriched_properties = '" + sanitizeLiteral(enrichedProperties) + "'");
         }
-        if (config.isChangefeedIncludeUpdated()) {
+        if (isUpdatedRequested()) {
             options.add("updated");
         }
-        if (config.isChangefeedIncludeDiff()) {
+        else if (config.isChangefeedIncludeUpdated()) {
+            LOGGER.warn("Ignoring cockroachdb.changefeed.include.updated because snapshot.mode=initial_only maps to "
+                    + "initial_scan='only', which CockroachDB does not allow together with updated.");
+        }
+        if (isDiffRequested()) {
             options.add("diff");
+        }
+        else if (config.isChangefeedIncludeDiff()) {
+            LOGGER.warn("Ignoring cockroachdb.changefeed.include.diff because snapshot.mode=initial_only maps to "
+                    + "initial_scan='only', which CockroachDB does not allow together with diff.");
         }
         if (isMvccTimestampRequested()) {
             options.add("mvcc_timestamp");
@@ -1211,7 +1550,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     + "initial_scan='only', which CockroachDB does not allow together with mvcc_timestamp. "
                     + "Events will not carry a per-row source.ts_hlc.");
         }
-        options.add("resolved = '" + sanitizeLiteral(config.getChangefeedResolvedInterval()) + "'");
+        // CockroachDB also rejects resolved together with initial_scan='only'. An initial_only run
+        // detects the end of the scan without resolved timestamps (see completeInitialOnlySnapshot).
+        if (!isInitialOnly()) {
+            options.add("resolved = '" + sanitizeLiteral(config.getChangefeedResolvedInterval()) + "'");
+        }
 
         String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
         if (initialScan != null) {
