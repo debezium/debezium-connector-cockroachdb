@@ -450,6 +450,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
+     * A changefeed job as listed by {@code SHOW CHANGEFEED JOBS}.
+     */
+    private record Job(String jobId, String status, String description) {
+    }
+
+    /**
      * Checks whether a running changefeed job already exists for the given table
      * using the same topic prefix as this connector instance.
      * Matches the fully-qualified table name and a {@code topic_prefix=} marker in the
@@ -468,16 +474,16 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     + "WHERE status IN ('running', 'paused', 'pause-requested')";
             // Read every job first, so a missing-option error can name all of this connector's jobs that
             // lack the option, not just the one that covers this table.
-            List<String[]> jobs = new ArrayList<>();
+            List<Job> jobs = new ArrayList<>();
             try (var rs = stmt.executeQuery(query)) {
                 while (rs.next()) {
-                    jobs.add(new String[]{ rs.getString(1), rs.getString(2), rs.getString(3) });
+                    jobs.add(new Job(rs.getString(1), rs.getString(2), rs.getString(3)));
                 }
             }
-            for (String[] job : jobs) {
-                String jobId = job[0];
-                String status = job[1];
-                String description = job[2];
+            for (Job job : jobs) {
+                String jobId = job.jobId();
+                String status = job.status();
+                String description = job.description();
                 if (description != null && descriptionCapturesTable(description, table) && description.contains(sinkMarker)) {
                     if (!"running".equals(status)) {
                         throw new IllegalStateException("Found changefeed job " + jobId + " covering table " + table
@@ -555,11 +561,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * Returns the ids of the running changefeed jobs with this connector's topic prefix and the
      * enriched envelope that do not use the given option.
      */
-    private static List<String> runningJobsWithout(List<String[]> jobs, String sinkMarker, String option) {
+    private static List<String> runningJobsWithout(List<Job> jobs, String sinkMarker, String option) {
         return jobs.stream()
-                .filter(job -> "running".equals(job[1]) && job[2] != null && job[2].contains(sinkMarker)
-                        && changefeedUsesEnrichedEnvelope(job[2]) && !changefeedHasOption(job[2], option))
-                .map(job -> job[0])
+                .filter(job -> "running".equals(job.status()) && job.description() != null && job.description().contains(sinkMarker)
+                        && changefeedUsesEnrichedEnvelope(job.description()) && !changefeedHasOption(job.description(), option))
+                .map(Job::jobId)
                 .distinct()
                 .collect(Collectors.toList());
     }
