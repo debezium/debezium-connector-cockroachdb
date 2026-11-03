@@ -20,6 +20,7 @@ import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.Test;
 
 import io.debezium.config.Configuration;
+import io.debezium.connector.cockroachdb.CockroachDBStreamingChangeEventSource.JobStatus;
 import io.debezium.junit.logging.LogInterceptor;
 import io.debezium.util.Clock;
 
@@ -42,14 +43,14 @@ public class CockroachDBInitialOnlyCompletionTest {
 
     /** A source whose job status query returns the queued answers, or throws when the answer is null. */
     private static final class ScriptedSource extends CockroachDBStreamingChangeEventSource {
-        private final Deque<Map<Long, String[]>> answers = new ArrayDeque<>();
+        private final Deque<Map<Long, JobStatus>> answers = new ArrayDeque<>();
         private final AtomicInteger reconnects = new AtomicInteger();
 
         ScriptedSource() {
             super(CONFIG, null, null, Clock.system(), null);
         }
 
-        ScriptedSource answer(Map<Long, String[]> statuses) {
+        ScriptedSource answer(Map<Long, JobStatus> statuses) {
             answers.add(statuses);
             return this;
         }
@@ -60,8 +61,8 @@ public class CockroachDBInitialOnlyCompletionTest {
         }
 
         @Override
-        Map<Long, String[]> queryChangefeedJobStatuses(List<Long> jobIds) throws SQLException {
-            Map<Long, String[]> next = answers.poll();
+        Map<Long, JobStatus> queryChangefeedJobStatuses(List<Long> jobIds) throws SQLException {
+            Map<Long, JobStatus> next = answers.poll();
             if (next == null || next.isEmpty()) {
                 throw new SQLException("An I/O error occurred while sending to the backend.", "08006");
             }
@@ -74,8 +75,8 @@ public class CockroachDBInitialOnlyCompletionTest {
         }
     }
 
-    private static String[] status(String status) {
-        return new String[]{ status, "" };
+    private static JobStatus status(String status) {
+        return new JobStatus(status, "");
     }
 
     @Test
@@ -91,7 +92,7 @@ public class CockroachDBInitialOnlyCompletionTest {
     @Test
     void failsTheRunWhenAChangefeedJobFails() {
         ScriptedSource source = new ScriptedSource()
-                .answer(Map.of(7L, new String[]{ "failed", "kafka: client has run out of available brokers" }));
+                .answer(Map.of(7L, new JobStatus("failed", "kafka: client has run out of available brokers")));
 
         assertThatThrownBy(() -> source.changefeedJobsSucceeded(List.of(7L)))
                 .isInstanceOf(IllegalStateException.class)

@@ -661,6 +661,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
+     * The status of a changefeed job and its error, as listed by {@code SHOW CHANGEFEED JOBS}.
+     */
+    record JobStatus(String status, String error) {
+    }
+
+    /**
      * Returns {@code true} once every given changefeed job has succeeded, and fails the run when a job
      * ends with a failure status. While it waits, it periodically logs the job statuses, and warns when
      * a job is paused, because the scan does not continue until the job is resumed. A failed status
@@ -670,7 +676,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         if (jobIds.isEmpty()) {
             throw new IllegalStateException("snapshot.mode=initial_only found no changefeed job to wait for");
         }
-        Map<Long, String[]> statuses;
+        Map<Long, JobStatus> statuses;
         try {
             statuses = queryChangefeedJobStatuses(jobIds);
         }
@@ -686,11 +692,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
         Map<Long, String> waiting = new LinkedHashMap<>();
         for (Long jobId : jobIds) {
-            String[] statusAndError = statuses.get(jobId);
-            String status = statusAndError == null ? "unknown" : statusAndError[0];
+            JobStatus jobStatus = statuses.get(jobId);
+            String status = jobStatus == null ? "unknown" : jobStatus.status();
             if (FAILED_CHANGEFEED_JOB_STATUSES.contains(status)) {
                 throw new IllegalStateException("Changefeed job " + jobId + " that performs the snapshot.mode=initial_only "
-                        + "scan ended with status '" + status + "': " + statusAndError[1]);
+                        + "scan ended with status '" + status + "': " + jobStatus.error());
             }
             if (!"succeeded".equals(status)) {
                 waiting.put(jobId, status);
@@ -725,13 +731,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     /**
      * Returns the status and error of each given changefeed job, keyed by job id.
      */
-    Map<Long, String[]> queryChangefeedJobStatuses(List<Long> jobIds) throws SQLException {
+    Map<Long, JobStatus> queryChangefeedJobStatuses(List<Long> jobIds) throws SQLException {
         String ids = jobIds.stream().map(String::valueOf).collect(Collectors.joining(", "));
-        Map<Long, String[]> statuses = new HashMap<>();
+        Map<Long, JobStatus> statuses = new HashMap<>();
         try (Statement stmt = schemaRefreshConnection.connection().createStatement();
                 ResultSet rs = stmt.executeQuery("SELECT job_id, status, error FROM [SHOW CHANGEFEED JOBS] WHERE job_id IN (" + ids + ")")) {
             while (rs.next()) {
-                statuses.put(rs.getLong(1), new String[]{ rs.getString(2), rs.getString(3) });
+                statuses.put(rs.getLong(1), new JobStatus(rs.getString(2), rs.getString(3)));
             }
         }
         return statuses;
