@@ -673,7 +673,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * Returns {@code true} once every given changefeed job has succeeded, and fails the run when a job
      * ends with a failure status. While it waits, it periodically logs the job statuses, and warns when
      * a job is paused, because the scan does not continue until the job is resumed. A failed status
-     * query reconnects and is retried on the next check instead of failing the task.
+     * query reconnects and is retried once. If that fails too, the task fails, so that the runtime
+     * restarts it with its usual backoff and {@code errors.max.retries} limit instead of this check
+     * retrying every second. The restarted task reuses the job and keeps waiting for it.
      */
     boolean changefeedJobsSucceeded(List<Long> jobIds) {
         if (jobIds.isEmpty()) {
@@ -683,15 +685,16 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         try {
             statuses = queryChangefeedJobStatuses(jobIds);
         }
-        catch (SQLException e) {
-            LOGGER.warn("Checking changefeed job(s) {} failed ({}); reconnecting and checking again", jobIds, e.getMessage());
+        catch (SQLException first) {
+            LOGGER.warn("Checking changefeed job(s) {} failed ({}); reconnecting and retrying", jobIds, first.getMessage());
             try {
                 reconnectSchemaRefreshConnection();
+                statuses = queryChangefeedJobStatuses(jobIds);
             }
-            catch (SQLException reconnectFailure) {
-                LOGGER.warn("Reconnecting the schema refresh connection failed: {}", reconnectFailure.getMessage());
+            catch (SQLException second) {
+                // The SQLException in the cause chain makes the error handler treat the failure as retriable
+                throw new DebeziumException("Checking changefeed job(s) " + jobIds + " failed after reconnecting", second);
             }
-            return false;
         }
         Map<Long, String> waiting = new LinkedHashMap<>();
         for (Long jobId : jobIds) {
