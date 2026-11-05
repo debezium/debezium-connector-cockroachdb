@@ -19,6 +19,7 @@ import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.Test;
 
+import io.debezium.DebeziumException;
 import io.debezium.config.Configuration;
 import io.debezium.connector.cockroachdb.CockroachDBStreamingChangeEventSource.JobStatus;
 import io.debezium.junit.logging.LogInterceptor;
@@ -45,6 +46,7 @@ public class CockroachDBInitialOnlyCompletionTest {
     private static final class ScriptedSource extends CockroachDBStreamingChangeEventSource {
         private final Deque<Map<Long, JobStatus>> answers = new ArrayDeque<>();
         private final AtomicInteger reconnects = new AtomicInteger();
+        private boolean reconnectFails;
 
         ScriptedSource() {
             super(CONFIG, null, null, Clock.system(), null);
@@ -60,6 +62,11 @@ public class CockroachDBInitialOnlyCompletionTest {
             return this;
         }
 
+        ScriptedSource failReconnect() {
+            reconnectFails = true;
+            return this;
+        }
+
         @Override
         Map<Long, JobStatus> queryChangefeedJobStatuses(List<Long> jobIds) throws SQLException {
             Map<Long, JobStatus> next = answers.poll();
@@ -70,8 +77,11 @@ public class CockroachDBInitialOnlyCompletionTest {
         }
 
         @Override
-        void reconnectSchemaRefreshConnection() {
+        void reconnectSchemaRefreshConnection() throws SQLException {
             reconnects.incrementAndGet();
+            if (reconnectFails) {
+                throw new SQLException("Connection to localhost:26257 refused.", "08001");
+            }
         }
     }
 
@@ -121,14 +131,39 @@ public class CockroachDBInitialOnlyCompletionTest {
     }
 
     @Test
-    void reconnectsAndKeepsWaitingWhenTheStatusQueryFails() {
+    void retriesTheStatusQueryOnceAfterReconnecting() {
+        // For example a node restart behind a load balancer: the new connection reaches another node.
         ScriptedSource source = new ScriptedSource()
                 .failQuery()
                 .answer(Map.of(5L, status("succeeded")));
 
-        assertThat(source.changefeedJobsSucceeded(List.of(5L))).isFalse();
-        assertThat(source.reconnects.get()).isEqualTo(1);
         assertThat(source.changefeedJobsSucceeded(List.of(5L))).isTrue();
+        assertThat(source.reconnects.get()).isEqualTo(1);
+    }
+
+    @Test
+    void failsTheTaskWhenTheStatusQueryFailsAgainAfterReconnecting() {
+        // Retrying every second would hide a permanent failure. With the SQLException as the cause, the
+        // error handler treats the failure as retriable, so the runtime restarts the task with its backoff.
+        ScriptedSource source = new ScriptedSource()
+                .failQuery()
+                .failQuery();
+
+        assertThatThrownBy(() -> source.changefeedJobsSucceeded(List.of(5L)))
+                .isInstanceOf(DebeziumException.class)
+                .hasCauseInstanceOf(SQLException.class);
+        assertThat(source.reconnects.get()).isEqualTo(1);
+    }
+
+    @Test
+    void failsTheTaskWhenReconnectingFails() {
+        ScriptedSource source = new ScriptedSource()
+                .failQuery()
+                .failReconnect();
+
+        assertThatThrownBy(() -> source.changefeedJobsSucceeded(List.of(5L)))
+                .isInstanceOf(DebeziumException.class)
+                .hasCauseInstanceOf(SQLException.class);
     }
 
     @Test
