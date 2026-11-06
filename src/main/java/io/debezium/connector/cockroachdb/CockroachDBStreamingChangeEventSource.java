@@ -301,11 +301,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * per-table performance coupling. A changefeed is skipped if one already covers its tables (for
      * idempotent restarts and reuse of a pre-provisioned feed).
      */
-    private void createChangefeeds(
-                                   CockroachDBConnection connection,
-                                   List<TableId> tables,
-                                   CockroachDBOffsetContext offsetContext,
-                                   boolean hasPriorOffset)
+    void createChangefeeds(
+                           CockroachDBConnection connection,
+                           List<TableId> tables,
+                           CockroachDBOffsetContext offsetContext,
+                           boolean hasPriorOffset)
             throws SQLException {
 
         if (config.isSinklessChangefeed()) {
@@ -456,7 +456,36 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * changefeed job description to avoid false positives from changefeeds created by
      * other connector instances targeting the same tables with different topic prefixes.
      */
-    boolean changefeedExists(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables) throws SQLException {
+    boolean changefeedExists(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables) {
+        try {
+            return findReusableChangefeed(connection, table, allIncludedTables);
+        }
+        catch (SQLException first) {
+            LOGGER.warn("Checking existing changefeed jobs failed ({}); reconnecting and retrying", first.getMessage());
+            try {
+                connection.close();
+            }
+            catch (SQLException closeFailure) {
+                LOGGER.debug("Closing the connection after the failed check failed: {}", closeFailure.getMessage());
+            }
+            try {
+                return findReusableChangefeed(connection, table, allIncludedTables);
+            }
+            catch (SQLException second) {
+                // The SQLException in the cause chain makes the error handler treat the failure as retriable
+                throw new DebeziumException("Checking existing changefeed jobs failed after reconnecting", second);
+            }
+        }
+    }
+
+    /**
+     * Looks for a running changefeed job of this connector that covers the given table. A failed query is
+     * retried by {@link #changefeedExists} and never taken to mean that no changefeed runs: creating one
+     * without knowing whether one already runs could start a second one that double-produces into the
+     * same topics (debezium/dbz#3037).
+     */
+    private boolean findReusableChangefeed(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables)
+            throws SQLException {
         String topicPrefix = resolveTopicPrefix();
         String sinkMarker = "topic_prefix=" + topicPrefix;
 
@@ -532,10 +561,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 }
                 return false;
             }
-        }
-        catch (SQLException e) {
-            LOGGER.warn("Unable to check existing changefeed jobs: {}", e.getMessage());
-            return false;
         }
     }
 
