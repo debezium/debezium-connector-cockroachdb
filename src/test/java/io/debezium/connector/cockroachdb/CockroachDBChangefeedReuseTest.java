@@ -9,16 +9,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 
+import io.debezium.DebeziumException;
 import io.debezium.config.Configuration;
 import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
 import io.debezium.relational.TableId;
@@ -29,7 +32,7 @@ import io.debezium.relational.TableId;
  * connector configuration;
  * silently reusing a changefeed without the {@code diff} option while
  * {@code cockroachdb.changefeed.include.diff} is enabled leaves update events without a before
- * image.
+ * image. Also covers a failing jobs query, which must never be taken to mean that no changefeed runs.
  *
  * @author Virag Tripathi
  */
@@ -145,6 +148,45 @@ public class CockroachDBChangefeedReuseTest {
                 .hasMessageContaining("1005");
     }
 
+    @Test
+    void retriesTheJobsQueryAfterReconnecting() throws Exception {
+        // A node restart or drain ends the session, so the first query fails and a new connection finds the job.
+        ResultSet jobs = jobRows(new String[]{ "1006", "running", WITHOUT_DIFF });
+        Statement statement = mock(Statement.class);
+        when(statement.executeQuery(anyString())).thenThrow(sessionEnded()).thenReturn(jobs);
+        CockroachDBConnection connection = connectionFor(statement);
+
+        assertThat(source(Map.of()).changefeedExists(connection, ACCT, List.of(ACCT))).isTrue();
+        verify(connection).close();
+    }
+
+    @Test
+    void failsTheTaskWhenTheJobsQueryFailsAgainAfterReconnecting() throws Exception {
+        // Creating a changefeed without knowing whether one already runs could start a second one that
+        // double-produces into the same topics (debezium/dbz#3037). With the SQLException as the cause, the
+        // error handler treats the failure as retriable, so the restarted task checks again.
+        Statement statement = mock(Statement.class);
+        when(statement.executeQuery(anyString())).thenThrow(sessionEnded());
+
+        assertThatThrownBy(() -> source(Map.of()).changefeedExists(connectionFor(statement), ACCT, List.of(ACCT)))
+                .isInstanceOf(DebeziumException.class)
+                .hasCauseInstanceOf(SQLException.class);
+    }
+
+    @Test
+    void failsTheTaskWhenReconnectingForTheJobsQueryFails() throws Exception {
+        Statement statement = mock(Statement.class);
+        when(statement.executeQuery(anyString())).thenThrow(sessionEnded());
+        Connection jdbc = mock(Connection.class);
+        when(jdbc.createStatement()).thenReturn(statement);
+        CockroachDBConnection connection = mock(CockroachDBConnection.class);
+        when(connection.connection()).thenReturn(jdbc).thenThrow(new SQLException("Connection to localhost:26257 refused.", "08001"));
+
+        assertThatThrownBy(() -> source(Map.of()).changefeedExists(connection, ACCT, List.of(ACCT)))
+                .isInstanceOf(DebeziumException.class)
+                .hasCauseInstanceOf(SQLException.class);
+    }
+
     private static CockroachDBStreamingChangeEventSource initialOnlySource() {
         return source(Map.of("snapshot.mode", "initial_only", "cockroachdb.changefeed.include.diff", "true"));
     }
@@ -171,18 +213,31 @@ public class CockroachDBChangefeedReuseTest {
     }
 
     private static CockroachDBConnection connectionListingJobs(String[]... rows) throws Exception {
+        ResultSet jobs = jobRows(rows);
+        Statement statement = mock(Statement.class);
+        when(statement.executeQuery(anyString())).thenReturn(jobs);
+        return connectionFor(statement);
+    }
+
+    private static ResultSet jobRows(String[]... rows) throws SQLException {
         ResultSet jobs = mock(ResultSet.class);
         int[] row = { -1 };
         when(jobs.next()).thenAnswer(invocation -> ++row[0] < rows.length);
         when(jobs.getString(1)).thenAnswer(invocation -> rows[row[0]][0]);
         when(jobs.getString(2)).thenAnswer(invocation -> rows[row[0]][1]);
         when(jobs.getString(3)).thenAnswer(invocation -> rows[row[0]][2]);
-        Statement statement = mock(Statement.class);
-        when(statement.executeQuery(anyString())).thenReturn(jobs);
+        return jobs;
+    }
+
+    private static CockroachDBConnection connectionFor(Statement statement) throws SQLException {
         Connection jdbc = mock(Connection.class);
         when(jdbc.createStatement()).thenReturn(statement);
         CockroachDBConnection connection = mock(CockroachDBConnection.class);
         when(connection.connection()).thenReturn(jdbc);
         return connection;
+    }
+
+    private static SQLException sessionEnded() {
+        return new SQLException("An I/O error occurred while sending to the backend.", "08006");
     }
 }
