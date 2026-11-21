@@ -135,6 +135,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     private final Map<TableId, BigDecimal> scanTimestamps = new HashMap<>();
 
     /**
+     * Whether the cursors of the running changefeeds were read since the changefeeds were last set up.
+     * They are read once, when the first table is found to have a running changefeed.
+     */
+    private boolean reusedCursorsRecorded;
+
+    /**
      * How often an initial_only run in kafka mode asks CockroachDB whether its changefeed jobs have
      * finished the scan.
      */
@@ -319,6 +325,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             throws SQLException {
 
         scanTimestamps.clear();
+        reusedCursorsRecorded = false;
         if (config.isSinklessChangefeed()) {
             // A sinkless changefeed is created and streamed in a single executeQuery during
             // consumption (see consumeSinkless), so there is nothing to pre-create here.
@@ -597,11 +604,17 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             String query = "SELECT job_id, status, description FROM [SHOW CHANGEFEED JOBS] "
                     + "WHERE status IN ('running', 'paused', 'pause-requested')";
             try (var rs = stmt.executeQuery(query)) {
+                boolean found = false;
+                // The running changefeeds of this connector, as job id and description.
+                final List<String[]> running = new ArrayList<>();
                 while (rs.next()) {
                     String jobId = rs.getString(1);
                     String status = rs.getString(2);
                     String description = rs.getString(3);
-                    if (description != null && descriptionCapturesTable(description, table) && description.contains(sinkMarker)) {
+                    if ("running".equals(status) && description != null && description.contains(sinkMarker)) {
+                        running.add(new String[]{ jobId, description });
+                    }
+                    if (!found && description != null && descriptionCapturesTable(description, table) && description.contains(sinkMarker)) {
                         if (!"running".equals(status)) {
                             throw new IllegalStateException("Found changefeed job " + jobId + " covering table " + table
                                     + " with topic prefix '" + topicPrefix + "' in status '" + status + "'. Starting anyway would "
@@ -656,17 +669,39 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                     + "CANCEL JOB {}, and restart the connector so it recreates the changefeed.",
                                     jobId, extraTables, jobId);
                         }
-                        final BigDecimal cursor = changefeedCursor(description);
-                        if (cursor != null) {
-                            allIncludedTables.stream()
-                                    .filter(included -> descriptionCapturesTable(description, included))
-                                    .forEach(included -> scanTimestamps.put(included, cursor));
-                        }
                         changefeedJobIds.add(Long.parseLong(jobId));
-                        return true;
+                        found = true;
                     }
                 }
-                return false;
+                if (found && !reusedCursorsRecorded) {
+                    recordCursorsOfRunningJobs(running, allIncludedTables);
+                    reusedCursorsRecorded = true;
+                }
+                return found;
+            }
+        }
+    }
+
+    /**
+     * Remembers the cursor of every running changefeed that has this connector's topic prefix, for the
+     * tables that it covers. The jobs do not have to line up with the connector's own groups of tables,
+     * for example after {@code cockroachdb.changefeed.max.tables.per.changefeed} was changed.
+     *
+     * @param running the running changefeeds of this connector, as job id and description
+     */
+    private void recordCursorsOfRunningJobs(List<String[]> running, List<TableId> includedTables) {
+        for (String[] job : running) {
+            final String description = job[1];
+            final BigDecimal cursor = changefeedCursor(description);
+            if (cursor != null) {
+                // The table list of the job is parsed once, not once for every included table.
+                final List<List<String>> captured = parseChangefeedTableComponents(description);
+                for (TableId included : includedTables) {
+                    final List<String> expected = tableIdComponents(included);
+                    if (captured.stream().anyMatch(candidate -> qualifiedSuffixMatches(candidate, expected))) {
+                        scanTimestamps.put(included, cursor);
+                    }
+                }
             }
         }
     }
