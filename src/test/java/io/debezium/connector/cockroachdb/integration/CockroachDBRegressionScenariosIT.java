@@ -1019,6 +1019,54 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
     }
 
     @Test
+    public void shouldPassQuotedSinkOptionsToTheChangefeed() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("sink-options-test", "sink_options_testdb", "public.sink_options_events");
+        // CockroachDB does not send resolved timestamps more often than min_checkpoint_frequency, which
+        // takes a quoted duration.
+        config.put("cockroachdb.changefeed.sink.options", "min_checkpoint_frequency = '10s'");
+        connection = openDatabase("sink_options_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS sink_options_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO sink_options_events VALUES (1, 'Alice')");
+        }
+
+        startTask(config);
+
+        assertThat(pollForRecords(1, 45)).as("Should receive the scan row").isNotEmpty();
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOBS] "
+                        + "WHERE status = 'running' AND description LIKE '%topic_prefix=sink-options-test.%'")) {
+            assertThat(rs.next()).as("The connector should have created a changefeed").isTrue();
+            assertThat(rs.getString(1)).contains("min_checkpoint_frequency = '10s'");
+        }
+    }
+
+    @Test
+    public void shouldKeepItsOwnOptionsWhenTheSinkOptionsRepeatThem() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("own-options-test", "own_options_testdb", "public.own_options_events");
+        // CockroachDB uses the last value of an option that is given twice. The connector can only read the
+        // enriched envelope, so its own options have to come after the configured ones.
+        config.put("cockroachdb.changefeed.sink.options", "envelope = 'wrapped', min_checkpoint_frequency = '10s'");
+        connection = openDatabase("own_options_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS own_options_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO own_options_events VALUES (1, 'Alice')");
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(1, 45);
+        assertThat(scanRows).as("Should receive the scan row").isNotEmpty();
+        assertThat(((Struct) scanRows.get(0).value()).getStruct("after").getString("name")).isEqualTo("Alice");
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOBS] "
+                        + "WHERE status = 'running' AND description LIKE '%topic_prefix=own-options-test.%'")) {
+            assertThat(rs.next()).as("The connector should have created a changefeed").isTrue();
+            assertThat(rs.getString(1)).contains("envelope = 'enriched'", "min_checkpoint_frequency = '10s'");
+        }
+    }
+
+    @Test
     public void shouldStreamQuotedIdentifiersInKafkaMode() throws Exception {
         connection = openDatabase("quoted_kafka_testdb");
         createQuotedIdentifierTable(connection);
