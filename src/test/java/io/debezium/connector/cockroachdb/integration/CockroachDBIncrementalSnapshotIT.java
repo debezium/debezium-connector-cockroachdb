@@ -266,6 +266,15 @@ public class CockroachDBIncrementalSnapshotIT {
         // We should have the 3 original rows + 1 new row = 4 snapshot records
         assertThat(snapshotRecords).as("Should receive incremental snapshot records (op=r)")
                 .hasSizeGreaterThanOrEqualTo(4);
+
+        // Rows of the initial scan are also op=r, so the source block is what tells an incremental
+        // snapshot record apart.
+        for (SourceRecord r : snapshotRecords) {
+            Struct source = ((Struct) r.value()).getStruct("source");
+            assertThat(source.getString("snapshot"))
+                    .as("incremental snapshot record must be marked as such in the source block")
+                    .isEqualTo("incremental");
+        }
     }
 
     private SourceTaskContext createMockContext() {
