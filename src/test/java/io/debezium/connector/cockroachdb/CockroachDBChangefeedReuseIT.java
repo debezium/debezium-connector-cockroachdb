@@ -38,7 +38,7 @@ import io.debezium.util.Clock;
 @Testcontainers
 public class CockroachDBChangefeedReuseIT {
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.13");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final String TOPIC_PREFIX = "reuse";
     private static final Network NETWORK = Network.newNetwork();
 
