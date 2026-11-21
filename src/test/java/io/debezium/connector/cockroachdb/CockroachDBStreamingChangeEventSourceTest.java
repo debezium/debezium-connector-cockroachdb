@@ -26,6 +26,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.debezium.config.Configuration;
+import io.debezium.data.Envelope;
 import io.debezium.relational.TableId;
 
 /**
@@ -151,6 +152,38 @@ public class CockroachDBStreamingChangeEventSourceTest {
 
         assertThat(CockroachDBStreamingChangeEventSource.createEventId(orders, nested, "[1]"))
                 .isEqualTo(CockroachDBStreamingChangeEventSource.createEventId(orders, flat, "[1]"));
+    }
+
+    @Test
+    void emitsScanRowsAsReadsWhileTheInitialScanIsInProgress() throws Exception {
+        // CockroachDB reports the rows of an initial scan as creates.
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(event("c", "100", "orders"), true))
+                .isEqualTo(Envelope.Operation.READ);
+    }
+
+    @Test
+    void keepsUpdatesAndDeletesThatArriveWhileTheInitialScanIsInProgress() throws Exception {
+        // An update or a delete is a change made after the scan. CockroachDB can deliver it before the
+        // first resolved timestamp, which ends the scan phase, and a delete emitted as a read has no key
+        // (debezium/dbz#3142).
+        final JsonNode delete = MAPPER.readTree("{\"op\": \"d\", \"ts_ns\": 100, \"after\": null}");
+
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(event("u", "100", "orders"), true))
+                .isEqualTo(Envelope.Operation.UPDATE);
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(delete, true))
+                .isEqualTo(Envelope.Operation.DELETE);
+    }
+
+    @Test
+    void usesTheChangefeedOperationAfterTheInitialScan() throws Exception {
+        final JsonNode delete = MAPPER.readTree("{\"op\": \"d\", \"ts_ns\": 100, \"after\": null}");
+
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(event("c", "100", "orders"), false))
+                .isEqualTo(Envelope.Operation.CREATE);
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(event("u", "100", "orders"), false))
+                .isEqualTo(Envelope.Operation.UPDATE);
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(delete, false))
+                .isEqualTo(Envelope.Operation.DELETE);
     }
 
     @Test
