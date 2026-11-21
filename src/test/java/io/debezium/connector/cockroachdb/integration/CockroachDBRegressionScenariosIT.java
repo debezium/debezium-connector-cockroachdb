@@ -13,9 +13,11 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.kafka.clients.admin.Admin;
@@ -170,7 +172,7 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
         startTask(config);
 
         final List<SourceRecord> scanRows = pollForRecords(2, 45);
-        assertThat(scanRows).as("Should receive both scan rows").hasSize(2);
+        assertThat(scanRows).as("Should receive both scan rows").hasSizeGreaterThanOrEqualTo(2);
         assertThat(scanRows).allSatisfy(row -> assertThat(((Struct) row.value()).getString("op")).isEqualTo("r"));
 
         try (Statement stmt = connection.createStatement()) {
@@ -178,8 +180,11 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             stmt.execute("DELETE FROM scan_window_events WHERE id = 2");
         }
 
-        // The two changes touch different rows, so CockroachDB can deliver them in either order.
-        final List<SourceRecord> changes = pollForRecords(r -> r.value() != null, 2, 60);
+        // The two changes touch different rows, so CockroachDB can deliver them in either order. It can
+        // also deliver an event more than once, so only the first update and the first delete are kept.
+        final Set<String> expected = new HashSet<>(Set.of("u", "d"));
+        final List<SourceRecord> changes = pollForRecords(
+                r -> r.value() != null && expected.remove(((Struct) r.value()).getString("op")), 2, 60);
         assertThat(changes).as("Should receive the update and the delete").hasSize(2);
 
         final SourceRecord update = changes.stream()
