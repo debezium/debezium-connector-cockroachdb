@@ -175,9 +175,11 @@ public class CockroachDBHeartbeatIT {
         String lastOffsetCursor = null;
         int offsetAdvanceCount = 0;
 
-        // Poll for 20 seconds: first we expect data events, then idle period with heartbeats
-        int maxAttempts = 20;
-        for (int i = 0; i < maxAttempts; i++) {
+        // Poll until the offset has advanced to a resolved timestamp: first we expect data events, then
+        // heartbeats. CockroachDB can send the first resolved timestamp only with its first checkpoint,
+        // about 30 seconds after the scan, so allow well beyond that.
+        int maxAttempts = 90;
+        for (int i = 0; i < maxAttempts && (allRecords.isEmpty() || offsetAdvanceCount < 2); i++) {
             try {
                 List<SourceRecord> records = task.poll();
                 if (records != null && !records.isEmpty()) {
