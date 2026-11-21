@@ -277,6 +277,11 @@ public class CockroachDBIncrementalSnapshotIT {
             assertThat(source.getString("ts_hlc"))
                     .as("incremental snapshot record must not carry another row's commit timestamp")
                     .isNull();
+            // Rows of the initial scan are also op=r, so the source block is what tells an incremental
+            // snapshot record apart.
+            assertThat(source.getString("snapshot"))
+                    .as("incremental snapshot record must be marked as such in the source block")
+                    .isEqualTo("incremental");
         }
     }
 

@@ -52,8 +52,6 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
      */
     public static final String CONSUMER_OFFSET_PREFIX = "consumer.offset.";
 
-    private final SourceInfo sourceInfo;
-
     private String cursor;
     private Instant timestamp;
     private TransactionContext transactionContext;
@@ -62,7 +60,6 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
 
     public CockroachDBOffsetContext(CockroachDBConnectorConfig connectorConfig) {
         super(new SourceInfo(connectorConfig), false);
-        this.sourceInfo = new SourceInfo(connectorConfig);
         this.cursor = connectorConfig.getChangefeedCursor();
         this.timestamp = Instant.now();
         this.incrementalSnapshotContext = new SignalBasedIncrementalSnapshotContext<>(false);
@@ -71,7 +68,6 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
     public CockroachDBOffsetContext(CockroachDBConnectorConfig config, String cursor, Instant timestamp,
                                     IncrementalSnapshotContext<TableId> incrementalSnapshotContext) {
         super(new SourceInfo(config), false);
-        this.sourceInfo = new SourceInfo(config);
         this.cursor = cursor;
         this.timestamp = timestamp;
         this.incrementalSnapshotContext = incrementalSnapshotContext != null
