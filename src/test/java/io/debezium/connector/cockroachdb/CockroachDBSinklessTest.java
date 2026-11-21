@@ -6,8 +6,13 @@
 package io.debezium.connector.cockroachdb;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -21,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import io.debezium.config.Configuration;
 import io.debezium.relational.TableId;
@@ -100,7 +106,8 @@ public class CockroachDBSinklessTest {
                 .with("snapshot.mode", "when_needed")
                 .build());
         Statement statement = mock(Statement.class);
-        Connection connection = mock(Connection.class);
+        Statement timestampStatement = mock(Statement.class);
+        Connection connection = connectionToAClusterAt("1795243641446371339.0000000000", timestampStatement);
         ResultSet recoveredResult = mock(ResultSet.class);
         SQLException staleCursor = new SQLException(
                 "batch timestamp 1 must be after replica GC threshold 2", "XXUUU");
@@ -110,13 +117,73 @@ public class CockroachDBSinklessTest {
                 statement, connection, List.of(new TableId("testdb", "public", "orders")), "1.0000000000", true);
 
         assertThat(result).isSameAs(recoveredResult);
-        verify(connection).rollback();
+        // The failed statement aborted the transaction, so it is rolled back before anything else runs. The
+        // new scan runs at the current cluster timestamp, not at the rejected cursor.
+        InOrder order = inOrder(statement, connection, timestampStatement);
+        order.verify(statement).executeQuery(contains("cursor = '1.0000000000'"));
+        order.verify(connection).rollback();
+        order.verify(timestampStatement).executeQuery(anyString());
+        order.verify(connection).rollback();
+        order.verify(statement).executeQuery(contains("cursor = '1795243641446371339.0000000000'"));
         org.mockito.ArgumentCaptor<String> queries = org.mockito.ArgumentCaptor.forClass(String.class);
         verify(statement, times(2)).executeQuery(queries.capture());
-        assertThat(queries.getAllValues().get(0)).contains("cursor = '1.0000000000'");
-        assertThat(queries.getAllValues().get(1))
-                .contains("initial_scan = 'yes'")
-                .doesNotContain("cursor =");
+        assertThat(queries.getAllValues().get(1)).contains("initial_scan = 'yes'");
+    }
+
+    @Test
+    public void shouldScanAtTheCurrentClusterTimestamp() throws Exception {
+        CockroachDBStreamingChangeEventSource source = createSource(sinklessConfig()
+                .with("snapshot.mode", "initial")
+                .build());
+        TableId orders = new TableId("testdb", "public", "orders");
+        Statement statement = mock(Statement.class);
+        Statement timestampStatement = mock(Statement.class);
+        Connection connection = connectionToAClusterAt("1795243641446371339.0000000000", timestampStatement);
+
+        source.executeSinklessChangefeed(statement, connection, List.of(orders), null, false);
+
+        // The streaming connection has auto-commit disabled, so the driver opens a transaction for the
+        // timestamp query. The query needs a SERIALIZABLE transaction, and the transaction is ended before
+        // the changefeed starts.
+        InOrder order = inOrder(connection, statement, timestampStatement);
+        order.verify(timestampStatement).execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        order.verify(timestampStatement).executeQuery("SELECT cluster_logical_timestamp()::STRING");
+        order.verify(connection).rollback();
+        order.verify(statement).executeQuery(contains("cursor = '1795243641446371339.0000000000'"));
+        org.mockito.ArgumentCaptor<String> queries = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(statement).executeQuery(queries.capture());
+        assertThat(queries.getValue()).contains("initial_scan = 'yes'", " updated,").doesNotContain(" INTO ");
+        assertThat(source.scanTimestamp(orders)).isEqualByComparingTo("1795243641446371339");
+    }
+
+    @Test
+    public void shouldKeepTheFailureOfTheTimestampQuery() throws Exception {
+        CockroachDBStreamingChangeEventSource source = createSource(sinklessConfig()
+                .with("snapshot.mode", "initial")
+                .build());
+        Statement statement = mock(Statement.class);
+        Statement timestampStatement = mock(Statement.class);
+        Connection connection = mock(Connection.class);
+        SQLException connectionLost = new SQLException("An I/O error occurred while sending to the backend", "08006");
+        when(connection.createStatement()).thenReturn(timestampStatement);
+        when(timestampStatement.executeQuery(anyString())).thenThrow(connectionLost);
+        doThrow(new SQLException("This connection has been closed", "08003")).when(connection).rollback();
+
+        assertThatThrownBy(() -> source.executeSinklessChangefeed(
+                statement, connection, List.of(new TableId("testdb", "public", "orders")), null, false))
+                .isSameAs(connectionLost);
+        assertThat(connectionLost.getSuppressed()).hasSize(1);
+        verify(statement, never()).executeQuery(anyString());
+    }
+
+    private static Connection connectionToAClusterAt(String clusterTimestamp, Statement timestampStatement) throws SQLException {
+        Connection connection = mock(Connection.class);
+        ResultSet timestamp = mock(ResultSet.class);
+        when(connection.createStatement()).thenReturn(timestampStatement);
+        when(timestampStatement.executeQuery(anyString())).thenReturn(timestamp);
+        when(timestamp.next()).thenReturn(true);
+        when(timestamp.getString(1)).thenReturn(clusterTimestamp);
+        return connection;
     }
 
     @Test
