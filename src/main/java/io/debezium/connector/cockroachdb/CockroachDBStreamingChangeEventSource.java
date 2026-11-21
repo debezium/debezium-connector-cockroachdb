@@ -1850,6 +1850,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     private String buildChangefeedWithOptions(String cursor, boolean hasPriorOffset) {
         List<String> options = new ArrayList<>();
+        // The user's own options are SQL in their own right and are passed through as they are. Escaping
+        // their quotes would break every quoted value, for example min_checkpoint_frequency = '10s'.
+        // They come first: when an option is given twice, CockroachDB uses the last value, so an option
+        // that the connector sets itself keeps the connector's value.
+        String sinkOptions = config.getChangefeedSinkOptions();
+        if (sinkOptions != null && !sinkOptions.trim().isEmpty()) {
+            options.add(sinkOptions.trim());
+        }
         // The connector parses only the enriched envelope (it relies on the 'op' and 'ts_ns' fields
         // it provides), so the envelope is fixed rather than configurable.
         options.add("envelope = 'enriched'");
@@ -1889,10 +1897,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
         if (timestampCursor) {
             options.add("cursor = '" + sanitizeLiteral(cursor) + "'");
-        }
-        String sinkOptions = config.getChangefeedSinkOptions();
-        if (sinkOptions != null && !sinkOptions.trim().isEmpty()) {
-            options.add(sanitizeLiteral(sinkOptions));
         }
         // kafka_sink_config takes a JSON document as a quoted SQL literal; the value is
         // validated as JSON at configuration time and internal single quotes are doubled here.
