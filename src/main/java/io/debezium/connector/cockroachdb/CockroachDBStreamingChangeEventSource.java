@@ -1357,8 +1357,22 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     beforeNode.isMissingNode() ? null : beforeNode,
                     keyNode);
 
-            LOGGER.debug("Dispatching {} event for table {}", operation, table);
-            dispatcher.dispatchDataChangeEvent(currentPartition, table, emitter);
+            // An update or a delete that arrives while the initial scan is in progress is a change made
+            // after the scan, so its source block must not mark it as a snapshot record
+            // (debezium/dbz#3142). The scan rows that follow are marked again.
+            final boolean changeDuringScan = initialScanInProgress && operation != Envelope.Operation.READ;
+            if (changeDuringScan) {
+                offsetContext.markSnapshotRecord(SnapshotRecord.FALSE);
+            }
+            try {
+                LOGGER.debug("Dispatching {} event for table {}", operation, table);
+                dispatcher.dispatchDataChangeEvent(currentPartition, table, emitter);
+            }
+            finally {
+                if (changeDuringScan) {
+                    offsetContext.markSnapshotRecord(SnapshotRecord.TRUE);
+                }
+            }
         }
         catch (DebeziumException e) {
             // Deliberate failure (for example a schema refresh that failed after reconnect):
@@ -1411,11 +1425,24 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     /**
      * Extracts the Debezium {@link Envelope.Operation} from the changefeed payload.
-     * During initial scan, all events are treated as READ operations.
-     * Otherwise uses the {@code op} field first, falling back to before/after presence detection.
+     *
+     * @see #operationFor(JsonNode, boolean)
      */
     private Envelope.Operation extractOperation(JsonNode payloadNode) {
-        if (initialScanInProgress) {
+        return operationFor(payloadNode, initialScanInProgress);
+    }
+
+    /**
+     * Returns the Debezium {@link Envelope.Operation} of a changefeed event.
+     * <p>CockroachDB reports the rows of an initial scan as creates, so while the scan is in progress
+     * creates are emitted as READ. An update or a delete is a change made after the scan. CockroachDB
+     * can deliver it before the first resolved timestamp, which is what ends the scan phase, so it
+     * keeps its own operation: emitted as a READ, a delete has no row image to build the record key
+     * from (debezium/dbz#3142).
+     * <p>After the scan the {@code op} field decides, falling back to before/after presence detection.
+     */
+    static Envelope.Operation operationFor(JsonNode payloadNode, boolean initialScanInProgress) {
+        if (initialScanInProgress && !isUpdateOrDelete(payloadNode)) {
             return Envelope.Operation.READ;
         }
         if (payloadNode.has("op")) {
@@ -1449,6 +1476,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
         LOGGER.warn("Cannot determine operation type from payload structure");
         return Envelope.Operation.READ;
+    }
+
+    private static boolean isUpdateOrDelete(JsonNode payloadNode) {
+        final String op = payloadNode.path("op").asText("");
+        return "u".equals(op) || "d".equals(op);
     }
 
     /**
