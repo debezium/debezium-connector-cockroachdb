@@ -9,6 +9,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -66,6 +67,15 @@ import ch.qos.logback.core.read.ListAppender;
  * <li>{@link #shouldKeepUpdatesAndDeletesThatArriveBeforeTheFirstResolvedTimestamp}
  * (debezium/dbz#3142): an update or a delete that arrives before the first resolved timestamp
  * must keep its operation and key instead of being emitted as a snapshot read.</li>
+ * <li>{@link #shouldEmitRowsInsertedBeforeTheFirstResolvedTimestampAsCreates},
+ * {@link #shouldCreateChangefeedsThatScanAtAnExplicitCursor} and
+ * {@link #shouldProcessSignalsThatArriveBeforeTheFirstResolvedTimestamp}: a row
+ * inserted after the initial scan must be emitted as a create even when it arrives before the first
+ * resolved timestamp. Emitted as a snapshot read, a row of the signaling table is not acted on.
+ * {@link #shouldEmitScanRowsThatArriveOutsideTheScanPhaseAsReads} covers the reverse case,
+ * {@link #shouldTellScanRowsFromInsertedRowsAcrossSeveralChangefeeds} several changefeeds, and
+ * {@link #shouldCreateChangefeedsWhenTheSessionDefaultsToReadCommitted} a session that cannot
+ * evaluate the cluster timestamp in its default isolation level.</li>
  * </ul>
  *
  * @author Virag Tripathi
@@ -210,6 +220,272 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             jsonConverter.configure(converterConfig);
             assertThat(jsonConverter.fromConnectData(delete.topic(), delete.keySchema(), delete.key())).isNotEmpty();
         }
+    }
+
+    @Test
+    public void shouldEmitRowsInsertedBeforeTheFirstResolvedTimestampAsCreates() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("insert-window-test", "insert_window_testdb", "public.insert_window_events");
+        connection = openDatabase("insert_window_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS insert_window_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO insert_window_events VALUES (1, 'scanned'), (2, 'scanned')");
+            // As in the test above, a reused changefeed without the resolved option keeps the connector in
+            // the scan phase. Its cursor is the timestamp of the scan. With the updated option every scan
+            // row carries that timestamp and every row inserted afterwards carries a later one.
+            final String cursor;
+            try (ResultSet rs = stmt.executeQuery("SELECT cluster_logical_timestamp()::STRING")) {
+                assertThat(rs.next()).isTrue();
+                cursor = rs.getString(1);
+            }
+            stmt.execute("CREATE CHANGEFEED FOR TABLE insert_window_testdb.public.insert_window_events INTO '"
+                    + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=insert-window-test.' "
+                    + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source,schema', updated, "
+                    + "initial_scan = 'yes', cursor = '" + cursor + "'");
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(2, 45);
+        assertThat(scanRows).as("Should receive both scan rows").hasSizeGreaterThanOrEqualTo(2);
+        assertThat(scanRows).allSatisfy(row -> {
+            assertThat(((Struct) row.value()).getString("op")).isEqualTo("r");
+            assertThat(((Struct) row.value()).getStruct("source").getString("snapshot")).isEqualTo("true");
+        });
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO insert_window_events VALUES (3, 'inserted')");
+        }
+
+        // CockroachDB can deliver a change more than once, so every record of the inserted row is checked.
+        final List<SourceRecord> inserts = pollForRecords(r -> hasId(r, 3L), 1, 60);
+        assertThat(inserts).as("Should receive the inserted row").isNotEmpty();
+        assertThat(inserts).allSatisfy(record -> {
+            final Struct insert = (Struct) record.value();
+            assertThat(insert.getString("op")).as("A row inserted after the scan is a create").isEqualTo("c");
+            assertThat(insert.getStruct("after").getString("name")).isEqualTo("inserted");
+            assertThat(insert.getStruct("source").getString("snapshot")).as("A create is not a snapshot record").isIn(null, "false");
+        });
+    }
+
+    @Test
+    public void shouldProcessSignalsThatArriveBeforeTheFirstResolvedTimestamp() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("signal-window-test", "signal_window_testdb",
+                "public.signal_window_products,public.debezium_signal");
+        config.put("signal.data.collection", "signal_window_testdb.public.debezium_signal");
+        connection = openDatabase("signal_window_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS signal_window_products (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS debezium_signal (id STRING PRIMARY KEY, type STRING NOT NULL, data STRING)");
+            stmt.execute("UPSERT INTO signal_window_products VALUES (1, 'Widget'), (2, 'Gadget')");
+            // As in the tests above, a reused changefeed without the resolved option keeps the connector
+            // in the scan phase.
+            final String cursor;
+            try (ResultSet rs = stmt.executeQuery("SELECT cluster_logical_timestamp()::STRING")) {
+                assertThat(rs.next()).isTrue();
+                cursor = rs.getString(1);
+            }
+            stmt.execute("CREATE CHANGEFEED FOR TABLE signal_window_testdb.public.signal_window_products, "
+                    + "signal_window_testdb.public.debezium_signal INTO '"
+                    + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=signal-window-test.' "
+                    + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source,schema', updated, "
+                    + "initial_scan = 'yes', cursor = '" + cursor + "'");
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(2, 45);
+        assertThat(scanRows).as("Should receive both scan rows").hasSizeGreaterThanOrEqualTo(2);
+        assertThat(scanRows).allSatisfy(row -> {
+            assertThat(((Struct) row.value()).getString("op")).isEqualTo("r");
+            assertThat(((Struct) row.value()).getStruct("source").getString("snapshot")).isEqualTo("true");
+        });
+
+        // The connector acts on a row of the signaling table only when the row arrives as a create.
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO debezium_signal VALUES ('signal-window-1', 'execute-snapshot', "
+                    + "'{\"data-collections\": [\"signal_window_testdb.public.signal_window_products\"]}')");
+        }
+
+        // The rows of the changefeed's scan are marked as snapshot records in the source block. A read
+        // without that mark comes from the incremental snapshot.
+        final List<SourceRecord> snapshotRows = pollForRecords(r -> r.topic().endsWith(".signal_window_products")
+                && r.value() != null && "r".equals(((Struct) r.value()).getString("op"))
+                && !"true".equals(((Struct) r.value()).getStruct("source").getString("snapshot")), 2, 60);
+        assertThat(snapshotRows).as("The incremental snapshot that the signal asks for should read both rows")
+                .extracting(r -> ((Struct) r.key()).getInt64("id"))
+                .contains(1L, 2L);
+    }
+
+    @Test
+    public void shouldEmitScanRowsThatArriveOutsideTheScanPhaseAsReads() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("late-scan-test", "late_scan_testdb", "public.late_scan_events");
+        // With no_data the connector does not start a scan phase, so the scan rows of the reused changefeed
+        // arrive outside of it.
+        config.put("snapshot.mode", "no_data");
+        connection = openDatabase("late_scan_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS late_scan_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO late_scan_events VALUES (1, 'scanned'), (2, 'scanned')");
+            final String cursor;
+            try (ResultSet rs = stmt.executeQuery("SELECT cluster_logical_timestamp()::STRING")) {
+                assertThat(rs.next()).isTrue();
+                cursor = rs.getString(1);
+            }
+            stmt.execute("CREATE CHANGEFEED FOR TABLE late_scan_testdb.public.late_scan_events INTO '"
+                    + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=late-scan-test.' "
+                    + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source,schema', updated, "
+                    + "initial_scan = 'yes', cursor = '" + cursor + "'");
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(2, 45);
+        assertThat(scanRows).as("Should receive both scan rows").hasSizeGreaterThanOrEqualTo(2);
+        assertThat(scanRows).allSatisfy(row -> {
+            assertThat(((Struct) row.value()).getString("op")).as("A scan row is a snapshot read").isEqualTo("r");
+            assertThat(((Struct) row.value()).getStruct("source").getString("snapshot")).isEqualTo("true");
+        });
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO late_scan_events VALUES (3, 'inserted')");
+        }
+
+        final List<SourceRecord> inserts = pollForRecords(r -> hasId(r, 3L), 1, 60);
+        assertThat(inserts).as("Should receive the inserted row").isNotEmpty();
+        assertThat(inserts).allSatisfy(record -> {
+            final Struct insert = (Struct) record.value();
+            assertThat(insert.getString("op")).isEqualTo("c");
+            assertThat(insert.getStruct("source").getString("snapshot")).as("A create is not a snapshot record").isIn(null, "false");
+        });
+    }
+
+    @Test
+    public void shouldCreateChangefeedsThatScanAtAnExplicitCursor() throws Exception {
+        connection = openDatabase("scan_cursor_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS scan_cursor_orders (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS scan_cursor_items (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO scan_cursor_orders VALUES (1, 'scanned')");
+            stmt.execute("UPSERT INTO scan_cursor_items VALUES (1, 'scanned')");
+        }
+
+        // CockroachDB v26.4 sends the first resolved timestamp of a changefeed over several tables only
+        // with its first checkpoint, about 30 seconds after the scan.
+        startTask(baseConnectorConfig("scan-cursor-test", "scan_cursor_testdb", "public.scan_cursor_orders,public.scan_cursor_items"));
+
+        final List<SourceRecord> scanRows = pollForRecords(2, 45);
+        assertThat(scanRows).as("Should receive the scan row of each table").hasSizeGreaterThanOrEqualTo(2);
+        assertThat(scanRows).allSatisfy(row -> {
+            assertThat(((Struct) row.value()).getString("op")).isEqualTo("r");
+            // The connector adds the updated option for its own use. The timestamp is not emitted unless
+            // cockroachdb.changefeed.include.updated or include.mvcc.timestamp is enabled.
+            assertThat(((Struct) row.value()).getStruct("source").getString("ts_hlc")).isNull();
+        });
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO scan_cursor_orders VALUES (2, 'inserted')");
+            try (ResultSet rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOBS] "
+                    + "WHERE status = 'running' AND description LIKE '%topic_prefix=scan-cursor-test.%'")) {
+                assertThat(rs.next()).as("The connector should have created a changefeed").isTrue();
+                final String options = rs.getString(1).substring(rs.getString(1).indexOf("WITH OPTIONS ("));
+                // The connector tells scan rows from rows inserted later by comparing the updated timestamp
+                // of a row with the cursor of the changefeed.
+                assertThat(options).contains("cursor = '", "initial_scan = 'yes'").containsPattern("[(,] ?updated[,)]");
+            }
+        }
+
+        final List<SourceRecord> inserts = pollForRecords(r -> r.topic().endsWith(".scan_cursor_orders") && hasId(r, 2L), 1, 60);
+        assertThat(inserts).as("Should receive the inserted row").isNotEmpty();
+        assertThat(inserts).allSatisfy(record -> {
+            final Struct insert = (Struct) record.value();
+            assertThat(insert.getString("op")).as("A row inserted after the scan is a create").isEqualTo("c");
+            assertThat(insert.getStruct("source").getString("snapshot")).as("A create is not a snapshot record").isIn(null, "false");
+            assertThat(insert.getStruct("source").getString("ts_hlc")).isNull();
+        });
+    }
+
+    @Test
+    public void shouldTellScanRowsFromInsertedRowsAcrossSeveralChangefeeds() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("scan-groups-test", "scan_groups_testdb",
+                "public.scan_groups_orders,public.scan_groups_items");
+        // One changefeed per table. Each changefeed scans at its own cursor, and the first resolved
+        // timestamp of either of them ends the scan phase for both.
+        config.put("cockroachdb.changefeed.max.tables.per.changefeed", "1");
+        connection = openDatabase("scan_groups_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS scan_groups_orders (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS scan_groups_items (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO scan_groups_orders VALUES (1, 'scanned'), (2, 'scanned')");
+            stmt.execute("UPSERT INTO scan_groups_items VALUES (1, 'scanned'), (2, 'scanned')");
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(4, 45);
+        assertThat(scanRows).as("Should receive the scan rows of both tables").hasSizeGreaterThanOrEqualTo(4);
+        assertThat(scanRows).allSatisfy(row -> {
+            assertThat(((Struct) row.value()).getString("op")).as("A scan row is a snapshot read").isEqualTo("r");
+            assertThat(((Struct) row.value()).getStruct("source").getString("snapshot")).isEqualTo("true");
+        });
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO scan_groups_orders VALUES (3, 'inserted')");
+            stmt.execute("INSERT INTO scan_groups_items VALUES (3, 'inserted')");
+            try (ResultSet rs = stmt.executeQuery("SELECT count(*), count(DISTINCT substring(description FROM 'cursor = ''[0-9.]+''')) "
+                    + "FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' AND description LIKE '%topic_prefix=scan-groups-test.%'")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getInt(1)).as("The connector should have created one changefeed per table").isEqualTo(2);
+                assertThat(rs.getInt(2)).as("Each changefeed has its own cursor").isEqualTo(2);
+            }
+        }
+
+        final Set<String> tables = new HashSet<>();
+        final List<SourceRecord> inserts = pollForRecords(r -> hasId(r, 3L) && tables.add(r.topic()), 2, 60);
+        assertThat(inserts).as("Should receive the row inserted into each table").hasSize(2);
+        assertThat(inserts).allSatisfy(record -> {
+            final Struct insert = (Struct) record.value();
+            assertThat(insert.getString("op")).as("A row inserted after the scan is a create").isEqualTo("c");
+            assertThat(insert.getStruct("source").getString("snapshot")).as("A create is not a snapshot record").isIn(null, "false");
+        });
+    }
+
+    @Test
+    public void shouldCreateChangefeedsWhenTheSessionDefaultsToReadCommitted() throws Exception {
+        connection = openDatabase("read_committed_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            // CockroachDB evaluates cluster_logical_timestamp(), which gives the changefeed its cursor, only
+            // in a SERIALIZABLE transaction. Role defaults do not apply to root, so the connector gets a
+            // user of its own.
+            stmt.execute("CREATE USER IF NOT EXISTS read_committed_connector");
+            stmt.execute("GRANT admin TO read_committed_connector");
+            stmt.execute("ALTER ROLE read_committed_connector SET default_transaction_isolation = 'read committed'");
+            stmt.execute("CREATE TABLE IF NOT EXISTS read_committed_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO read_committed_events VALUES (1, 'scanned')");
+        }
+        try (Connection session = DriverManager.getConnection(
+                cockroachdb.getJdbcUrl().replace("/postgres", "/read_committed_testdb"), "read_committed_connector", "");
+                Statement stmt = session.createStatement();
+                ResultSet rs = stmt.executeQuery("SHOW transaction_isolation")) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getString(1)).as("A session of the connector's user should default to READ COMMITTED").isEqualTo("read committed");
+        }
+
+        final Map<String, String> config = baseConnectorConfig("read-committed-test", "read_committed_testdb", "public.read_committed_events");
+        config.put("database.user", "read_committed_connector");
+        config.put("database.password", "");
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(1, 45);
+        assertThat(scanRows).as("Should receive the scan row").isNotEmpty();
+        assertThat(scanRows).allSatisfy(row -> assertThat(((Struct) row.value()).getString("op")).isEqualTo("r"));
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO read_committed_events VALUES (2, 'inserted')");
+        }
+
+        final List<SourceRecord> inserts = pollForRecords(r -> hasId(r, 2L), 1, 60);
+        assertThat(inserts).as("Should receive the inserted row").isNotEmpty();
+        assertThat(inserts).allSatisfy(record -> assertThat(((Struct) record.value()).getString("op")).isEqualTo("c"));
     }
 
     @Test
@@ -616,6 +892,10 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
                 .as("source.schema enables JDBC sink routing via ${source.schema} (debezium/dbz#2432)")
                 .isEqualTo("public");
         assertThat(source.getString("table")).isEqualTo("accounts");
+    }
+
+    private static boolean hasId(SourceRecord record, long id) {
+        return record.value() != null && record.key() instanceof Struct && Long.valueOf(id).equals(((Struct) record.key()).getInt64("id"));
     }
 
     private boolean isDelete(SourceRecord record) {
