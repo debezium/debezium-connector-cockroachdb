@@ -19,11 +19,16 @@ import java.sql.Statement;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import io.debezium.DebeziumException;
 import io.debezium.config.Configuration;
 import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
 import io.debezium.relational.TableId;
+
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 
 /**
  * Unit tests for the changefeed reuse option checks. CockroachDB fixes changefeed options at
@@ -172,6 +177,33 @@ public class CockroachDBChangefeedReuseTest {
                 new String[]{ "1011", "running", scanning("orders", "3.0000000000") }), ORDERS, List.of(ACCT, ORDERS))).isTrue();
 
         assertThat(source.scanTimestamp(ORDERS)).isEqualByComparingTo("2");
+    }
+
+    @Test
+    void namesEveryReusedChangefeedThatLacksTheUpdatedOption() throws Exception {
+        // A changefeed that an earlier version of the connector created has no updated option unless
+        // cockroachdb.changefeed.include.updated was enabled. The notice names the jobs and the way to add it.
+        final String withoutUpdated = "CREATE CHANGEFEED FOR TABLE reprodb.public.orders INTO 'kafka://kafka:9092?topic_prefix=repro.' "
+                + "WITH OPTIONS (enriched_properties = 'source', envelope = 'enriched', full_table_name, resolved = '3s')";
+        final Logger sourceLogger = (Logger) LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
+        final ListAppender<ILoggingEvent> log = new ListAppender<>();
+        log.start();
+        sourceLogger.addAppender(log);
+        try {
+            assertThat(defaultSource().changefeedExists(connectionListingJobs(
+                    new String[]{ "1012", "running", WITHOUT_DIFF },
+                    new String[]{ "1013", "running", withoutUpdated },
+                    new String[]{ "1014", "running", scanning("other", "1.0000000000") }), ACCT, List.of(ACCT, ORDERS))).isTrue();
+
+            assertThat(log.list).filteredOn(event -> event.getFormattedMessage().contains("without the updated option"))
+                    .singleElement()
+                    .satisfies(event -> assertThat(event.getFormattedMessage())
+                            .contains("1012, 1013", "ALTER CHANGEFEED <job_id> SET updated")
+                            .doesNotContain("1014"));
+        }
+        finally {
+            sourceLogger.detachAppender(log);
+        }
     }
 
     private static String scanning(String table, String cursor) {

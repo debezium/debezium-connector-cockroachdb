@@ -11,6 +11,8 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -100,13 +102,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     private final ObjectMapper objectMapper = ChangefeedJsonMapper.create();
 
     /**
-     * Bounded LRU cache for deduplication. Evicts oldest entries when the cache
-     * exceeds {@link #MAX_DEDUP_CACHE_SIZE} to prevent unbounded memory growth.
+     * The identifier of the event that was dispatched last for a row, for the
+     * {@link #MAX_DEDUP_CACHE_SIZE} rows that were looked up most recently (see {@link #isCopyOfLastEvent}).
+     * A bounded LRU cache, to prevent unbounded memory growth.
      */
-    private final Map<String, Boolean> processedEvents = Collections.synchronizedMap(
+    private final Map<String, String> lastEventOfRow = Collections.synchronizedMap(
             new LinkedHashMap<>(MAX_DEDUP_CACHE_SIZE, 0.75f, true) {
                 @Override
-                protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+                protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
                     return size() > MAX_DEDUP_CACHE_SIZE;
                 }
             });
@@ -676,10 +679,33 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 if (found && !reusedCursorsRecorded) {
                     recordCursorsOfRunningJobs(running, allIncludedTables);
                     reusedCursorsRecorded = true;
+                    reportJobsWithoutUpdated(running.stream()
+                            .filter(job -> changefeedUsesEnrichedEnvelope(job[1])
+                                    && changefeedOptions(job[1]).stream().noneMatch(option -> "updated".equals(option.trim())))
+                            .map(job -> job[0])
+                            .distinct()
+                            .collect(Collectors.toList()));
                 }
                 return found;
             }
         }
+    }
+
+    /**
+     * Names the reused changefeeds that were created without the {@code updated} option, for example by
+     * an earlier version of the connector, and says how to add it. The connector works without it, but
+     * then it has no timestamp to tell scan rows from inserted rows, or copies of an event from new
+     * events (see {@link #isScanRow} and {@link #createEventId}).
+     */
+    private void reportJobsWithoutUpdated(List<String> jobIds) {
+        if (jobIds.isEmpty() || isInitialOnly()) {
+            return;
+        }
+        LOGGER.info("Reusing changefeed job(s) {}, created without the updated option. For their events the connector cannot "
+                + "recognize the rows of an initial scan by their timestamp, and it cannot recognize an event that CockroachDB "
+                + "delivers more than once. A changefeed that the connector creates has the option. To add it to an existing "
+                + "changefeed, run PAUSE JOB <job_id>, wait until SHOW CHANGEFEED JOB <job_id> reports the status 'paused', and "
+                + "run ALTER CHANGEFEED <job_id> SET updated and RESUME JOB <job_id>.", String.join(", ", jobIds));
     }
 
     /**
@@ -803,14 +829,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     private boolean isInitialOnly() {
         return config.getSnapshotMode() == CockroachDBConnectorConfig.SnapshotMode.INITIAL_ONLY;
-    }
-
-    /**
-     * Returns {@code true} if the changefeed should be created with {@code updated}. CockroachDB
-     * rejects it together with {@code initial_scan='only'}.
-     */
-    boolean isUpdatedRequested() {
-        return config.isChangefeedIncludeUpdated() && !isInitialOnly();
     }
 
     /**
@@ -1520,9 +1538,10 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 return;
             }
 
-            String eventId = createEventId(table, jsonNode, keyJson);
-            if (eventId != null && processedEvents.putIfAbsent(eventId, Boolean.TRUE) != null) {
-                LOGGER.debug("Skipping duplicate event: {}", eventId);
+            final String eventId = createEventId(table, jsonNode, keyJson);
+            final String rowId = rowId(table, keyJson);
+            if (isCopyOfLastEvent(rowId, eventId)) {
+                LOGGER.debug("Skipping an event that was delivered again: {}", eventId);
                 return;
             }
 
@@ -1585,6 +1604,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     offsetContext.markSnapshotRecord(scanPhase ? SnapshotRecord.TRUE : SnapshotRecord.FALSE);
                 }
             }
+            // Only now: an event that was skipped or that failed must not make its copy look processed.
+            rememberDispatched(rowId, eventId);
         }
         catch (DebeziumException e) {
             // Deliberate failure (for example a schema refresh that failed after reconnect):
@@ -1598,33 +1619,89 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
-     * Creates a unique event identifier for deduplication.
-     * <p>The identifier combines the schema-qualified {@link TableId} with the operation
-     * type, the event's nanosecond timestamp, and the changefeed message key. The table
-     * identity is taken from the {@code TableId} (derived from the Kafka topic the event
-     * arrived on), not from the message body: the changefeed {@code source.table_name}
-     * field is unqualified, so two same-named tables in different schemas (for example
-     * {@code public.orders} and {@code inventory.orders}) that change at the same MVCC
-     * timestamp would otherwise collide and have one event silently dropped. Using the
-     * {@code TableId} also removes any dependency on the {@code source} enriched property
-     * being present.
-     * <p>The message key is required to tell apart different rows that share an operation
-     * and timestamp: two rows changed in the same transaction can carry the same
-     * {@code ts_ns}, and without the key one of the two events is silently discarded as a
-     * duplicate (debezium/dbz#2283). A missing key degrades to table, operation and
-     * timestamp only.
+     * Returns {@code true} if the event is a copy of the event that was dispatched last for its row.
+     * <p>CockroachDB delivers changefeed events at least once: after a retry, a pause, or a restart of
+     * the changefeed it emits again what it emitted since its last checkpoint, for every row in the
+     * order of the changes. Only a copy of the last event of a row is dropped. When a row changed
+     * more than once since the checkpoint, its events are all emitted again, in their order, so the last
+     * event that the connector emits for a row is always the last one that CockroachDB delivered for
+     * it. Dropping every event that was seen before would not guarantee that: if the older of two
+     * events of a row was no longer remembered and the newer one was, the older one would be emitted
+     * after the newer one (debezium/dbz#2927).
+     */
+    boolean isCopyOfLastEvent(String rowId, String eventId) {
+        return eventId != null && eventId.equals(lastEventOfRow.get(rowId));
+    }
+
+    /** Remembers the event as the last one that was dispatched for its row. */
+    void rememberDispatched(String rowId, String eventId) {
+        if (eventId != null) {
+            lastEventOfRow.put(rowId, eventId);
+        }
+    }
+
+    /** Identifies the row of an event by its table and its message key. */
+    static String rowId(TableId table, String keyJson) {
+        return table.identifier() + ":" + (keyJson == null ? "" : keyJson.trim());
+    }
+
+    /**
+     * Creates the identifier that tells whether two events are copies of each other.
+     * <p>The copies of an event that CockroachDB delivers more than once are identical except for the
+     * top-level {@code ts_ns}, the time at which the changefeed processed the message, and the node
+     * that emitted them. So the identifier is built from what stays the same: the table, the
+     * operation, the message key, the timestamp that the changefeed assigned to the row (the
+     * {@code updated} timestamp, or else the MVCC timestamp), and a digest of the row images
+     * (debezium/dbz#2927). The row images are part of it so that two events that share all the rest but
+     * carry different data are never taken for copies of each other.
+     * <p>The connector creates its changefeeds with the {@code updated} option. For a reused changefeed
+     * that has neither timestamp, the identifier falls back to the processing time, which only
+     * recognizes a message that is read twice.
+     * <p>The table identity is taken from the {@link TableId} (derived from the Kafka topic the event
+     * arrived on), not from the message body: the changefeed {@code source.table_name} field is
+     * unqualified, so same-named tables in different schemas would otherwise collide. The message key
+     * tells apart different rows that were changed in the same transaction and share a timestamp
+     * (debezium/dbz#2283). A missing key degrades to the remaining parts.
      */
     static String createEventId(TableId table, JsonNode jsonNode, String keyJson) {
         try {
             JsonNode payloadNode = resolvePayload(jsonNode);
             String operation = payloadNode.path("op").asText("");
-            String timestamp = payloadNode.path("ts_ns").asText("");
             String rowKey = keyJson == null ? "" : keyJson.trim();
-            return table.identifier() + ":" + operation + ":" + timestamp + ":" + rowKey;
+            final String rowTimestamp = extractRowTimestamp(payloadNode);
+            if (rowTimestamp == null) {
+                String timestamp = payloadNode.path("ts_ns").asText("");
+                return table.identifier() + ":" + operation + ":" + timestamp + ":" + rowKey;
+            }
+            return table.identifier() + ":" + operation + ":" + rowTimestamp + ":" + rowKey + ":" + digestOfRowImages(payloadNode);
         }
         catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * Returns the timestamp that the changefeed assigned to the row of an event: the {@code updated}
+     * timestamp ({@code source.ts_hlc}) or else the MVCC timestamp. Returns {@code null} if the event
+     * carries neither.
+     */
+    private static String extractRowTimestamp(JsonNode payloadNode) {
+        final JsonNode source = payloadNode.path("source");
+        for (String field : new String[]{ "ts_hlc", "mvcc_timestamp" }) {
+            final JsonNode value = source.path(field);
+            if (value.isValueNode() && !value.isNull() && !value.asText().isEmpty()) {
+                return value.asText();
+            }
+        }
+        return null;
+    }
+
+    private static String digestOfRowImages(JsonNode payloadNode) throws NoSuchAlgorithmException {
+        final MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        digest.update(payloadNode.path("after").toString().getBytes(StandardCharsets.UTF_8));
+        digest.update((byte) 0);
+        digest.update(payloadNode.path("before").toString().getBytes(StandardCharsets.UTF_8));
+        return Base64.getEncoder().withoutPadding().encodeToString(digest.digest());
     }
 
     /**
@@ -1783,9 +1860,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
         final String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
         final boolean timestampCursor = isTimestampCursor(cursor);
-        // A changefeed that scans at a cursor always gets updated: the connector compares the updated
-        // timestamp of a row with the cursor to recognize the rows of the scan (see isScanRow).
-        if (isUpdatedRequested() || ("yes".equals(initialScan) && timestampCursor)) {
+        // Every changefeed gets updated, whatever cockroachdb.changefeed.include.updated says. The
+        // connector reads the updated timestamp of each event for its own use: it compares it with
+        // the cursor to recognize the rows of an initial scan (see isScanRow), and it identifies an
+        // event by it to drop events that CockroachDB delivers more than once (see createEventId).
+        if (!isInitialOnly()) {
             options.add("updated");
         }
         else if (config.isChangefeedIncludeUpdated()) {
