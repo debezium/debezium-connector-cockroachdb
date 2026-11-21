@@ -131,6 +131,17 @@ public class CockroachDBOffsetContextTest {
     }
 
     @Test
+    public void shouldMarkIncrementalSnapshotRecordsInTheSourceBlock() {
+        // The incremental snapshot marks its records through the base offset context and clears the
+        // mark afterwards. Both must reach the source info that builds the emitted source block.
+        offsetContext.incrementalSnapshotEvents();
+        assertThat(offsetContext.getSourceInfo().getString("snapshot")).isEqualTo("incremental");
+
+        offsetContext.postSnapshotCompletion();
+        assertThat(offsetContext.getSourceInfo().getString("snapshot")).isIn(null, "false");
+    }
+
+    @Test
     public void shouldHandleConstructorWithCursorAndTimestamp() {
         String testCursor = "test-cursor";
         Instant testTimestamp = Instant.now();
