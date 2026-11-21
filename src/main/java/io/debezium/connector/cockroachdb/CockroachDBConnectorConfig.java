@@ -405,8 +405,11 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withWidth(Width.LONG)
             .withImportance(Importance.LOW)
-            .withDescription("Additional options for the sink in key=value format, comma-separated. "
-                    + "Example: 'compression=gzip,retry_count=3'");
+            .withDescription("Additional CockroachDB changefeed options, comma-separated, that the connector adds "
+                    + "to the WITH clause of CREATE CHANGEFEED exactly as they are written here. CockroachDB takes most "
+                    + "option values as quoted strings. Example: min_checkpoint_frequency = '10s', "
+                    + "protect_data_from_gc_on_pause. An option that the connector sets itself, such as envelope, "
+                    + "cursor, initial_scan, or resolved, keeps the connector's value.");
 
     public static final Field CHANGEFEED_KAFKA_SINK_CONFIG = Field.create("cockroachdb.changefeed.kafka.sink.config")
             .withDisplayName("Changefeed kafka sink config")
