@@ -133,6 +133,8 @@ public class CockroachDBSnapshotLifecycleIT {
         config.put("cockroachdb.changefeed.kafka.auto.offset.reset", "earliest");
         config.put("cockroachdb.changefeed.kafka.poll.timeout.ms", "1000");
         config.put("snapshot.mode", "initial");
+        // Heartbeats carry the offset, so the end of the scan phase is visible without a data change.
+        config.put("heartbeat.interval.ms", "1000");
         config.put("offset.storage", "org.apache.kafka.connect.storage.MemoryOffsetBackingStore");
 
         task = new CockroachDBConnectorTask();
@@ -176,7 +178,25 @@ public class CockroachDBSnapshotLifecycleIT {
                 .as("Initial-scan backfill reads (op=r) must carry source.snapshot")
                 .isTrue();
 
-        // Phase 2: after the scan completes, new DML is a normal create that is not a snapshot record,
+        // Phase 2: the first resolved timestamp ends the scan phase. CockroachDB can send it only with
+        // its first checkpoint, about 30 seconds after the scan, so wait for a heartbeat whose offset
+        // reports the snapshot as completed before making the live change.
+        boolean snapshotCompleted = false;
+        for (int i = 0; i < 90 && !snapshotCompleted; i++) {
+            List<SourceRecord> polled = task.poll();
+            if (polled != null) {
+                snapshotCompleted = polled.stream().anyMatch(r -> r.sourceOffset() != null
+                        && "true".equals(String.valueOf(r.sourceOffset().get("snapshot_completed"))));
+            }
+            if (!snapshotCompleted) {
+                Thread.sleep(1000);
+            }
+        }
+        assertThat(snapshotCompleted)
+                .as("The first resolved timestamp must complete the snapshot")
+                .isTrue();
+
+        // Phase 3: after the scan completes, new DML is a normal create that is not a snapshot record,
         // and the offset reports snapshot_completed=true.
         try (Statement stmt = connection.createStatement()) {
             stmt.execute("INSERT INTO " + TABLE_NAME + " VALUES (100, 'live')");
