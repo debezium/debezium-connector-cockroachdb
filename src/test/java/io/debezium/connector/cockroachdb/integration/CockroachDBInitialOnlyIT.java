@@ -65,7 +65,7 @@ public class CockroachDBInitialOnlyIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBInitialOnlyIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.18");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final String DATABASE_NAME = "initial_only_db";
     private static final int ROWS = 200;
 

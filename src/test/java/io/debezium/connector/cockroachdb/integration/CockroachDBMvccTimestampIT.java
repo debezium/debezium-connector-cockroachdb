@@ -52,7 +52,7 @@ import io.debezium.engine.format.Json;
 @Testcontainers
 public class CockroachDBMvccTimestampIT {
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.18");
+    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final String DATABASE_NAME = "mvcc_ts_db";
     private static final String TABLE_NAME = "mvcc_orders";
     private static final ObjectMapper MAPPER = new ObjectMapper();
