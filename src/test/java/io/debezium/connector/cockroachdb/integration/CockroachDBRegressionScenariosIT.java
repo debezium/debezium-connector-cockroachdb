@@ -73,7 +73,9 @@ import ch.qos.logback.core.read.ListAppender;
  * inserted after the initial scan must be emitted as a create even when it arrives before the first
  * resolved timestamp. Emitted as a snapshot read, a row of the signaling table is not acted on.
  * {@link #shouldEmitScanRowsThatArriveOutsideTheScanPhaseAsReads} covers the reverse case,
- * {@link #shouldTellScanRowsFromInsertedRowsAcrossSeveralChangefeeds} several changefeeds, and
+ * {@link #shouldTellScanRowsFromInsertedRowsAcrossSeveralChangefeeds} several changefeeds,
+ * {@link #shouldUseTheCursorOfEveryReusedChangefeed} reused changefeeds that do not line up with the
+ * connector's own grouping, and
  * {@link #shouldCreateChangefeedsWhenTheSessionDefaultsToReadCommitted} a session that cannot
  * evaluate the cluster timestamp in its default isolation level.</li>
  * </ul>
@@ -441,6 +443,48 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             assertThat(insert.getString("op")).as("A row inserted after the scan is a create").isEqualTo("c");
             assertThat(insert.getStruct("source").getString("snapshot")).as("A create is not a snapshot record").isIn(null, "false");
         });
+    }
+
+    @Test
+    public void shouldUseTheCursorOfEveryReusedChangefeed() throws Exception {
+        // The connector puts both tables into one changefeed, but finds one running changefeed per table,
+        // for example after cockroachdb.changefeed.max.tables.per.changefeed was raised. Neither of them
+        // sends resolved timestamps, so the connector stays in the scan phase.
+        final Map<String, String> config = baseConnectorConfig("reused-cursors-test", "reused_cursors_testdb",
+                "public.reused_cursors_orders,public.reused_cursors_items");
+        connection = openDatabase("reused_cursors_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            for (String table : List.of("reused_cursors_orders", "reused_cursors_items")) {
+                stmt.execute("CREATE TABLE IF NOT EXISTS " + table + " (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+                stmt.execute("UPSERT INTO " + table + " VALUES (1, 'scanned')");
+                final String cursor;
+                try (ResultSet rs = stmt.executeQuery("SELECT cluster_logical_timestamp()::STRING")) {
+                    assertThat(rs.next()).isTrue();
+                    cursor = rs.getString(1);
+                }
+                stmt.execute("CREATE CHANGEFEED FOR TABLE reused_cursors_testdb.public." + table + " INTO '"
+                        + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=reused-cursors-test.' "
+                        + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source,schema', updated, "
+                        + "initial_scan = 'yes', cursor = '" + cursor + "'");
+            }
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(2, 45);
+        assertThat(scanRows).as("Should receive the scan row of each table").hasSizeGreaterThanOrEqualTo(2);
+        assertThat(scanRows).allSatisfy(row -> assertThat(((Struct) row.value()).getString("op")).isEqualTo("r"));
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO reused_cursors_orders VALUES (2, 'inserted')");
+            stmt.execute("INSERT INTO reused_cursors_items VALUES (2, 'inserted')");
+        }
+
+        final Set<String> tables = new HashSet<>();
+        final List<SourceRecord> inserts = pollForRecords(r -> hasId(r, 2L) && tables.add(r.topic()), 2, 60);
+        assertThat(inserts).as("Should receive the row inserted into each table").hasSize(2);
+        assertThat(inserts).allSatisfy(record -> assertThat(((Struct) record.value()).getString("op"))
+                .as("A row inserted after the scan is a create in " + record.topic()).isEqualTo("c"));
     }
 
     @Test
