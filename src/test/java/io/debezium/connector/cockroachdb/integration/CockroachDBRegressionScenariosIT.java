@@ -26,6 +26,7 @@ import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.json.JsonConverter;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.jupiter.api.AfterEach;
@@ -447,6 +448,30 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             rs.next();
             assertThat(rs.getInt(1)).as("No duplicate changefeed job may be created").isEqualTo(1);
         }
+    }
+
+    @Test
+    public void shouldFailTheTaskWhenTheUserLacksTheChangefeedPrivilege() throws Exception {
+        connection = openDatabase("no_privilege_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS no_privilege_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO no_privilege_events VALUES (1, 'Alice')");
+            // The user can see the table and the cluster settings, but may not create a changefeed.
+            stmt.execute("CREATE USER IF NOT EXISTS no_changefeed_connector");
+            stmt.execute("GRANT SELECT ON TABLE no_privilege_events TO no_changefeed_connector");
+            stmt.execute("GRANT SYSTEM VIEWCLUSTERSETTING TO no_changefeed_connector");
+        }
+
+        final Map<String, String> config = baseConnectorConfig("no-privilege-test", "no_privilege_testdb", "public.no_privilege_events");
+        config.put("database.user", "no_changefeed_connector");
+        config.put("database.password", "");
+        startTask(config);
+
+        final PollOutcome outcome = pollUntilRecordsOrError(45);
+        assertThat(outcome.error).as("The task should fail").isNotNull();
+        assertThat(outcome.error.getMessage() + " " + rootCauseMessage(outcome.error)).contains("privilege");
+        // A retriable error restarts the connector, which runs into the same error again and again.
+        assertThat(outcome.error).as("No retry can fix a missing privilege").isNotInstanceOf(RetriableException.class);
     }
 
     @Test
