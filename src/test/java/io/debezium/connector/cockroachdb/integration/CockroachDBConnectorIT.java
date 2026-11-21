@@ -169,28 +169,28 @@ public class CockroachDBConnectorIT {
         String topicName = TABLE_NAME; // CockroachDB uses table name as topic name
         consumer.subscribe(java.util.Arrays.asList(topicName));
 
-        // Poll for messages
-        var records = consumer.poll(java.time.Duration.ofSeconds(10));
+        // Poll for messages. Resolved timestamp messages share the topic with the change events and
+        // can arrive before them.
+        int changeEvents = 0;
+        for (int i = 0; i < 6 && changeEvents == 0; i++) {
+            for (var record : consumer.poll(java.time.Duration.ofSeconds(5))) {
+                String value = record.value();
+                LOGGER.info("Received message: {}", value);
+                if (value == null || value.isEmpty() || value.contains("\"resolved\"")) {
+                    continue;
+                }
 
-        // Verify we received change events
-        assertThat(records).isNotEmpty();
-
-        for (var record : records) {
-            String value = record.value();
-            LOGGER.info("Received change event: {}", value);
-
-            // Verify it's a valid JSON with enriched envelope and null checks
-            if (value != null && !value.isEmpty()) {
+                // Verify it's a valid JSON with enriched envelope
                 assertThat(value).contains("\"op\":");
                 assertThat(value).contains("\"source\":");
                 assertThat(value).contains("\"after\":");
-            }
-            else {
-                LOGGER.warn("Received null or empty change event value");
+                changeEvents++;
             }
         }
 
-        LOGGER.info("Successfully received {} change events", records.count());
+        // Verify we received change events
+        assertThat(changeEvents).as("Should receive at least one change event").isPositive();
+        LOGGER.info("Successfully received {} change events", changeEvents);
     }
 
     @Test
