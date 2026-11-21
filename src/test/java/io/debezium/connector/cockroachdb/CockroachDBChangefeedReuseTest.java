@@ -187,6 +187,56 @@ public class CockroachDBChangefeedReuseTest {
                 .hasCauseInstanceOf(SQLException.class);
     }
 
+    private static final TableId ORDERS = new TableId("reprodb", "public", "orders");
+
+    @Test
+    void remembersTheCursorOfEveryRunningChangefeed() throws Exception {
+        // The running changefeeds do not have to line up with the connector's groups of tables.
+        CockroachDBStreamingChangeEventSource source = source(Map.of());
+
+        assertThat(source.changefeedExists(connectionListingJobs(
+                new String[]{ "1007", "running", scanning("acct", "1.0000000000") },
+                new String[]{ "1008", "running", scanning("orders", "2.0000000000") }), ACCT, List.of(ACCT, ORDERS))).isTrue();
+
+        assertThat(source.scanTimestamp(ACCT)).isEqualByComparingTo("1");
+        assertThat(source.scanTimestamp(ORDERS)).isEqualByComparingTo("2");
+    }
+
+    @Test
+    void remembersNoCursorWhenNoChangefeedCoversTheTable() throws Exception {
+        CockroachDBStreamingChangeEventSource source = source(Map.of());
+
+        assertThat(source.changefeedExists(connectionListing("1009", "running", scanning("acct", "1.0000000000")), ORDERS,
+                List.of(ACCT, ORDERS))).isFalse();
+
+        assertThat(source.scanTimestamp(ACCT)).isNull();
+    }
+
+    @Test
+    void readsTheCursorsOfTheRunningChangefeedsOncePerStart() throws Exception {
+        // Reading them again for every group of tables that has a running changefeed made the work grow
+        // with the number of groups times the number of changefeeds times the number of tables.
+        CockroachDBStreamingChangeEventSource source = source(Map.of());
+        String acct = scanning("acct", "1.0000000000");
+
+        assertThat(source.changefeedExists(connectionListingJobs(
+                new String[]{ "1010", "running", acct },
+                new String[]{ "1011", "running", scanning("orders", "2.0000000000") }), ACCT, List.of(ACCT, ORDERS))).isTrue();
+        // The second listing differs from the first, which the listings of one start never do, so that the
+        // test can tell whether the cursors were read again.
+        assertThat(source.changefeedExists(connectionListingJobs(
+                new String[]{ "1010", "running", acct },
+                new String[]{ "1011", "running", scanning("orders", "3.0000000000") }), ORDERS, List.of(ACCT, ORDERS))).isTrue();
+
+        assertThat(source.scanTimestamp(ORDERS)).isEqualByComparingTo("2");
+    }
+
+    private static String scanning(String table, String cursor) {
+        return "CREATE CHANGEFEED FOR TABLE reprodb.public." + table + " INTO 'kafka://kafka:9092?topic_prefix=repro.' "
+                + "WITH OPTIONS (cursor = '" + cursor + "', enriched_properties = 'source', envelope = 'enriched', full_table_name, "
+                + "initial_scan = 'yes', resolved = '3s', updated)";
+    }
+
     private static CockroachDBStreamingChangeEventSource initialOnlySource() {
         return source(Map.of("snapshot.mode", "initial_only", "cockroachdb.changefeed.include.diff", "true"));
     }
