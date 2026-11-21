@@ -61,6 +61,9 @@ import ch.qos.logback.core.read.ListAppender;
  * with {@code cockroachdb.changefeed.kafka.consumer.offset.commit.enabled} the connector
  * mirrors its consumed positions to the Kafka consumer group so external lag tooling works;
  * {@link #shouldNotCommitGroupOffsetsByDefault} guards that the default stays commit-free.</li>
+ * <li>{@link #shouldKeepUpdatesAndDeletesThatArriveBeforeTheFirstResolvedTimestamp}
+ * (debezium/dbz#3142): an update or a delete that arrives before the first resolved timestamp
+ * must keep its operation and key instead of being emitted as a snapshot read.</li>
  * </ul>
  *
  * @author Virag Tripathi
@@ -145,6 +148,62 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             jsonConverter.configure(converterConfig);
             byte[] serializedKey = jsonConverter.fromConnectData(delete.topic(), delete.keySchema(), delete.key());
             assertThat(serializedKey).isNotEmpty();
+        }
+    }
+
+    @Test
+    public void shouldKeepUpdatesAndDeletesThatArriveBeforeTheFirstResolvedTimestamp() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("scan-window-test", "scan_window_testdb", "public.scan_window_events");
+        connection = openDatabase("scan_window_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS scan_window_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO scan_window_events VALUES (1, 'to be updated'), (2, 'to be deleted')");
+            // The connector reuses a running changefeed that has its topic prefix. One created without the
+            // resolved option never sends a resolved timestamp, so every change made after the scan reaches
+            // the connector before the first resolved timestamp. CockroachDB v26.4 opens the same window for
+            // about 30 seconds on a changefeed over several tables that the connector creates itself.
+            stmt.execute("CREATE CHANGEFEED FOR TABLE scan_window_testdb.public.scan_window_events INTO '"
+                    + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=scan-window-test.' "
+                    + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source,schema', initial_scan = 'yes'");
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(2, 45);
+        assertThat(scanRows).as("Should receive both scan rows").hasSize(2);
+        assertThat(scanRows).allSatisfy(row -> assertThat(((Struct) row.value()).getString("op")).isEqualTo("r"));
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("UPDATE scan_window_events SET name = 'updated' WHERE id = 1");
+            stmt.execute("DELETE FROM scan_window_events WHERE id = 2");
+        }
+
+        // The two changes touch different rows, so CockroachDB can deliver them in either order.
+        final List<SourceRecord> changes = pollForRecords(r -> r.value() != null, 2, 60);
+        assertThat(changes).as("Should receive the update and the delete").hasSize(2);
+
+        final SourceRecord update = changes.stream()
+                .filter(r -> "u".equals(((Struct) r.value()).getString("op")))
+                .findFirst().orElse(null);
+        assertThat(update).as("An update must not be emitted as a snapshot read").isNotNull();
+        final Struct updateValue = (Struct) update.value();
+        assertThat(updateValue.getStruct("after").getString("name")).isEqualTo("updated");
+        assertThat(((Struct) update.key()).getInt64("id")).isEqualTo(1L);
+        assertThat(updateValue.getStruct("source").getString("snapshot")).as("An update is not a snapshot record").isIn(null, "false");
+
+        final SourceRecord delete = changes.stream().filter(this::isDelete).findFirst().orElse(null);
+        assertThat(delete).as("A delete must not be emitted as a snapshot read").isNotNull();
+        assertThat(delete.key()).as("Delete record must carry its primary key").isNotNull();
+        assertThat(((Struct) delete.key()).getInt64("id")).isEqualTo(2L);
+        assertThat(((Struct) delete.value()).getStruct("source").getString("snapshot")).as("A delete is not a snapshot record").isIn(null, "false");
+
+        // The production failure point: with the delete emitted as a read, the key was null.
+        try (JsonConverter jsonConverter = new JsonConverter()) {
+            final Map<String, Object> converterConfig = new HashMap<>();
+            converterConfig.put("schemas.enable", "true");
+            converterConfig.put("converter.type", "key");
+            jsonConverter.configure(converterConfig);
+            assertThat(jsonConverter.fromConnectData(delete.topic(), delete.keySchema(), delete.key())).isNotEmpty();
         }
     }
 
