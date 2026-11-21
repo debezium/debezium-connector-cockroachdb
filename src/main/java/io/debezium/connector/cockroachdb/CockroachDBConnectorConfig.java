@@ -214,10 +214,10 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDefault(false)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
-            .withDescription("Whether to create the changefeed with the CockroachDB 'updated' option, which adds a "
-                    + "timestamp to each changefeed message. A changefeed that the connector creates with an initial "
-                    + "scan always uses the option: the connector compares that timestamp with the cursor of the "
-                    + "changefeed to tell rows of the scan from rows that are inserted afterwards.");
+            .withDescription("Whether to emit the timestamp of the CockroachDB 'updated' option as source.ts_hlc. "
+                    + "The connector creates every changefeed with that option, which adds a timestamp to each "
+                    + "changefeed message, and uses the timestamp to tell rows of an initial scan from rows that are "
+                    + "inserted afterwards and to recognize events that CockroachDB delivers more than once.");
 
     public static final Field CHANGEFEED_INCLUDE_MVCC_TIMESTAMP = Field.create("cockroachdb.changefeed.include.mvcc.timestamp")
             .withDisplayName("Include MVCC timestamp")

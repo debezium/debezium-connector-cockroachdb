@@ -12,6 +12,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -20,11 +21,16 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.json.JsonConverter;
@@ -78,6 +84,10 @@ import ch.qos.logback.core.read.ListAppender;
  * connector's own grouping, and
  * {@link #shouldCreateChangefeedsWhenTheSessionDefaultsToReadCommitted} a session that cannot
  * evaluate the cluster timestamp in its default isolation level.</li>
+ * <li>{@link #shouldDropEventsThatCockroachDbDeliversMoreThanOnce} and
+ * {@link #shouldCreateEveryChangefeedWithTheUpdatedOption} (debezium/dbz#2927): an event that
+ * CockroachDB delivers again has a new processing time but the same updated timestamp and row
+ * images, and the connector must emit it only once.</li>
  * </ul>
  *
  * @author Virag Tripathi
@@ -449,6 +459,214 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             assertThat(insert.getString("op")).as("A row inserted after the scan is a create").isEqualTo("c");
             assertThat(insert.getStruct("source").getString("snapshot")).as("A create is not a snapshot record").isIn(null, "false");
         });
+    }
+
+    @Test
+    public void shouldDropEventsThatCockroachDbDeliversMoreThanOnce() throws Exception {
+        final String topic = "redelivery-test.redelivery_testdb.public.redelivery_events";
+        connection = openDatabase("redelivery_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS redelivery_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO redelivery_events VALUES (1, 'scanned')");
+        }
+
+        startTask(baseConnectorConfig("redelivery-test", "redelivery_testdb", "public.redelivery_events"));
+        assertThat(pollForRecords(1, 45)).as("Should receive the scan row").isNotEmpty();
+        final String jobId = runningChangefeedJobFor("redelivery_events");
+
+        // After PAUSE JOB and RESUME JOB a changefeed emits again what it emitted since its last
+        // checkpoint. A checkpoint can fall between the insert and the pause, so the sequence is repeated
+        // with a new row until CockroachDB has written one of the inserts to the intermediate topic twice.
+        final List<SourceRecord> emitted = new ArrayList<>();
+        long redelivered = -1;
+        for (long id = 100; id < 106 && redelivered < 0; id++) {
+            final long inserted = id;
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute("INSERT INTO redelivery_events VALUES (" + inserted + ", 'inserted')");
+            }
+            emitted.addAll(pollForRecords(r -> hasId(r, inserted), 1, 60));
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute("PAUSE JOB " + jobId);
+            }
+            waitForChangefeedJobStatus(jobId, "paused");
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute("RESUME JOB " + jobId);
+            }
+            waitForChangefeedJobStatus(jobId, "running");
+            for (int i = 0; i < 20 && redelivered < 0; i++) {
+                if (copiesInTopic(topic, "\"after\": {\"id\": " + inserted + ",") >= 2) {
+                    redelivered = inserted;
+                }
+                else {
+                    Thread.sleep(1000);
+                }
+            }
+        }
+        assertThat(redelivered).as("CockroachDB should have written one of the inserts to the intermediate topic twice").isPositive();
+
+        // The connector has emitted the insert already. A row that is written after the second copy tells
+        // when the connector has read that copy.
+        final long row = redelivered;
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO redelivery_events VALUES (999, 'written after the copy')");
+        }
+        final List<SourceRecord> written = pollForRecords(r -> {
+            if (hasId(r, row)) {
+                emitted.add(r);
+            }
+            return hasId(r, 999L);
+        }, 1, 60);
+        assertThat(written).as("Should receive the row that was written after the copy").isNotEmpty();
+        assertThat(emitted.stream().filter(r -> hasId(r, row))).as("The connector should emit the insert once").hasSize(1);
+    }
+
+    @Test
+    public void shouldEmitTheChangesOfARowInTheirOrderWhenCockroachDbDeliversThemAgain() throws Exception {
+        final String topic = "reorder-test.reorder_testdb.public.reorder_events";
+        final Map<String, String> config = baseConnectorConfig("reorder-test", "reorder_testdb", "public.reorder_events,public.reorder_filler");
+        config.put("snapshot.mode", "no_data");
+        connection = openDatabase("reorder_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS reorder_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS reorder_filler (id INT8 PRIMARY KEY)");
+            // When a changefeed is paused and resumed, it emits again what it emitted since its last
+            // checkpoint. This one writes a checkpoint soon after it starts and then only every ten minutes.
+            stmt.execute("CREATE CHANGEFEED FOR TABLE reorder_testdb.public.reorder_events, reorder_testdb.public.reorder_filler INTO '"
+                    + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=reorder-test.' "
+                    + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source,schema', updated, "
+                    + "initial_scan = 'no', min_checkpoint_frequency = '10m'");
+        }
+
+        startTask(config);
+        final String jobId = runningChangefeedJobFor("reorder_events");
+        waitForACheckpoint(jobId);
+
+        // The row changes twice, and between the two changes more events pass than the connector remembers.
+        final List<SourceRecord> changes = new ArrayList<>();
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO reorder_events VALUES (1, 'older')");
+        }
+        changes.addAll(pollForRecords(r -> isReorderEvent(r, 1L), 1, 60));
+        assertThat(changes).as("Should receive the insert").isNotEmpty();
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO reorder_filler SELECT generate_series(1001, 11050)");
+        }
+        // CockroachDB can deliver events again on its own at any time, so the test counts rows, not records,
+        // and waits for the update instead of taking the next record of the row for it.
+        final Set<Long> otherRows = new HashSet<>();
+        pollForRecords(r -> {
+            if (r.topic().endsWith(".reorder_filler") && r.key() instanceof Struct) {
+                otherRows.add(((Struct) r.key()).getInt64("id"));
+            }
+            return otherRows.size() >= 10_050;
+        }, 1, 180);
+        assertThat(otherRows).as("Should receive the rows of the other table").hasSize(10_050);
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("UPDATE reorder_events SET name = 'newer' WHERE id = 1");
+        }
+        final List<SourceRecord> updates = pollForRecords(r -> {
+            if (isReorderEvent(r, 1L)) {
+                changes.add(r);
+            }
+            return isReorderEvent(r, 1L) && "newer".equals(nameOf(r));
+        }, 1, 60);
+        assertThat(updates).as("Should receive the update").isNotEmpty();
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("PAUSE JOB " + jobId);
+        }
+        waitForChangefeedJobStatus(jobId, "paused");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("RESUME JOB " + jobId);
+        }
+        waitForChangefeedJobStatus(jobId, "running");
+        int copies = 0;
+        for (int i = 0; i < 60 && copies < 2; i++) {
+            copies = copiesInTopic(topic, "\"name\": \"newer\"");
+            if (copies < 2) {
+                Thread.sleep(1000);
+            }
+        }
+        assertThat(copies).as("CockroachDB should have written the update to the intermediate topic twice").isGreaterThanOrEqualTo(2);
+        assertThat(copiesInTopic(topic, "\"name\": \"older\"")).as("and the insert as well").isGreaterThanOrEqualTo(2);
+
+        // A row that is written after the copies tells when the connector has read them.
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO reorder_events VALUES (2, 'written after the copies')");
+        }
+        final List<SourceRecord> written = pollForRecords(r -> {
+            if (isReorderEvent(r, 1L)) {
+                changes.add(r);
+            }
+            return isReorderEvent(r, 2L);
+        }, 1, 120);
+        assertThat(written).as("Should receive the row that was written after the copies").isNotEmpty();
+
+        // Whatever the connector emitted again, the last event of the row must be its last change.
+        assertThat(nameOfTheLastChange(changes)).as("The row must not end on its older version").isEqualTo("newer");
+    }
+
+    private static boolean isReorderEvent(SourceRecord record, long id) {
+        return record.topic().endsWith(".reorder_events") && hasId(record, id);
+    }
+
+    private void waitForACheckpoint(String jobId) throws Exception {
+        for (int i = 0; i < 90; i++) {
+            try (Statement stmt = connection.createStatement();
+                    ResultSet rs = stmt.executeQuery("SELECT high_water_timestamp FROM [SHOW CHANGEFEED JOB " + jobId + "]")) {
+                if (rs.next() && rs.getString(1) != null) {
+                    return;
+                }
+            }
+            Thread.sleep(1000);
+        }
+        throw new IllegalStateException("Changefeed job " + jobId + " wrote no checkpoint");
+    }
+
+    private static String nameOfTheLastChange(List<SourceRecord> changes) {
+        return nameOf(changes.get(changes.size() - 1));
+    }
+
+    private static String nameOf(SourceRecord record) {
+        final Struct after = ((Struct) record.value()).getStruct("after");
+        return after == null ? null : after.getString("name");
+    }
+
+    @Test
+    public void shouldCreateEveryChangefeedWithTheUpdatedOption() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("updated-option-test", "updated_option_testdb", "public.updated_option_events");
+        // With no_data the changefeed has neither an initial scan nor a cursor.
+        config.put("snapshot.mode", "no_data");
+        connection = openDatabase("updated_option_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS updated_option_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+        }
+
+        startTask(config);
+
+        String options = null;
+        for (int i = 0; i < 30 && options == null; i++) {
+            try (Statement stmt = connection.createStatement();
+                    ResultSet rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOBS] "
+                            + "WHERE status = 'running' AND description LIKE '%topic_prefix=updated-option-test.%'")) {
+                if (rs.next()) {
+                    options = rs.getString(1).substring(rs.getString(1).indexOf("WITH OPTIONS ("));
+                }
+            }
+            if (options == null) {
+                Thread.sleep(1000);
+            }
+        }
+        assertThat(options).as("The connector should have created a changefeed").isNotNull();
+        assertThat(options).contains("initial_scan = 'no'").containsPattern("[(,] ?updated[,)]");
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO updated_option_events VALUES (1, 'inserted')");
+        }
+        final List<SourceRecord> inserts = pollForRecords(r -> hasId(r, 1L), 1, 60);
+        assertThat(inserts).as("Should receive the inserted row").isNotEmpty();
+        // The option is for the connector's own use. The timestamp is not emitted unless the configuration asks for it.
+        assertThat(inserts).allSatisfy(record -> assertThat(((Struct) record.value()).getStruct("source").getString("ts_hlc")).isNull());
     }
 
     @Test
@@ -936,6 +1154,31 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
                 .as("source.schema enables JDBC sink routing via ${source.schema} (debezium/dbz#2432)")
                 .isEqualTo("public");
         assertThat(source.getString("table")).isEqualTo("accounts");
+    }
+
+    /** Counts the messages of an intermediate topic whose value contains the given text. */
+    private static int copiesInTopic(String topic, String text) {
+        final Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", ""));
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
+            final List<TopicPartition> partitions = consumer.partitionsFor(topic).stream()
+                    .map(info -> new TopicPartition(info.topic(), info.partition()))
+                    .collect(Collectors.toList());
+            consumer.assign(partitions);
+            consumer.seekToBeginning(partitions);
+            final Map<TopicPartition, Long> end = consumer.endOffsets(partitions);
+            int copies = 0;
+            while (partitions.stream().anyMatch(partition -> consumer.position(partition) < end.get(partition))) {
+                for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(500))) {
+                    if (record.value() != null && record.value().contains(text)) {
+                        copies++;
+                    }
+                }
+            }
+            return copies;
+        }
     }
 
     private static boolean hasId(SourceRecord record, long id) {
