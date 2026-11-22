@@ -475,6 +475,25 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
     }
 
     @Test
+    public void shouldFailTheTaskOnAChangefeedOptionThatDoesNotExist() throws Exception {
+        connection = openDatabase("unknown_option_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS unknown_option_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO unknown_option_events VALUES (1, 'Alice')");
+        }
+
+        final Map<String, String> config = baseConnectorConfig("unknown-option-test", "unknown_option_testdb", "public.unknown_option_events");
+        config.put("cockroachdb.changefeed.sink.options", "no_such_option");
+        startTask(config);
+
+        final PollOutcome outcome = pollUntilRecordsOrError(45);
+        assertThat(outcome.error).as("The task should fail").isNotNull();
+        assertThat(outcome.error.getMessage() + " " + rootCauseMessage(outcome.error)).contains("invalid option \"no_such_option\"");
+        // CockroachDB reports this without a specific SQLSTATE, like a sink that it cannot reach.
+        assertThat(outcome.error).as("No retry can fix an option that does not exist").isNotInstanceOf(RetriableException.class);
+    }
+
+    @Test
     public void shouldMirrorConsumerPositionsToTheKafkaGroupWhenEnabled() throws Exception {
         connection = openDatabase("offsetmirror_testdb");
         try (Statement stmt = connection.createStatement()) {

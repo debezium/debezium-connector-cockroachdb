@@ -241,6 +241,11 @@ public class CockroachDBStreamingChangeEventSourceTest {
                 new SQLException("table orders does not exist", "42P01"))).isFalse();
         assertThat(CockroachDBStreamingChangeEventSource.isInvalidCursorRejection(
                 new SQLException("connection refused", "08001"))).isFalse();
+        // CockroachDB adds the hint to every failure to look the tables up at a cursor, also to one that passes.
+        assertThat(CockroachDBStreamingChangeEventSource.isInvalidCursorRejection(new SQLException(
+                "failed to resolve targets in the CHANGEFEED stmt: query execution canceled "
+                        + "HINT: do the targets exist at the specified cursor time 1?",
+                "XXUUU"))).isFalse();
     }
 
     @Test
@@ -249,8 +254,8 @@ public class CockroachDBStreamingChangeEventSourceTest {
                 .with("snapshot.mode", "when_needed")
                 .build());
         Statement statement = mock(Statement.class);
-        SQLException staleCursor = new SQLException(
-                "HINT: do the targets exist at the specified cursor time 1?", "42P01");
+        SQLException staleCursor = new SQLException("failed to resolve targets in the CHANGEFEED stmt: table \"testdb.public.orders\" does not "
+                + "exist HINT: do the targets exist at the specified cursor time 1?", "XXUUU");
         doThrow(staleCursor).doReturn(false).when(statement).execute(anyString());
 
         boolean recovered = source.executeSinkChangefeed(
@@ -272,14 +277,79 @@ public class CockroachDBStreamingChangeEventSourceTest {
                 .with("snapshot.mode", "initial")
                 .build());
         Statement statement = mock(Statement.class);
-        SQLException staleCursor = new SQLException(
-                "HINT: do the targets exist at the specified cursor time 1?", "42P01");
+        SQLException staleCursor = new SQLException("failed to resolve targets in the CHANGEFEED stmt: table \"testdb.public.orders\" does not "
+                + "exist HINT: do the targets exist at the specified cursor time 1?", "XXUUU");
         doThrow(staleCursor).when(statement).execute(anyString());
 
+        // The rejection is passed on with what the operator can do about it, and the statement is not run again.
         assertThatThrownBy(() -> source.executeSinkChangefeed(
                 statement, List.of(new TableId("testdb", "public", "orders")), "1.0000000000", true))
-                .isSameAs(staleCursor);
+                .hasCause(staleCursor);
         verify(statement, times(1)).execute(anyString());
+    }
+
+    @Test
+    void saysThatThePrivilegeIsCheckedAsOfTheCursor() throws Exception {
+        // The text as CockroachDB v25.4.21 and v26.4.1 return it. With a cursor from before the GRANT they
+        // return it although the user has the privilege by now.
+        SQLException noPrivilege = new SQLException("ERROR: user \"cdc\" requires the CHANGEFEED privilege on all target tables to be able to "
+                + "run an enterprise changefeed", "42501");
+        Statement statement = mock(Statement.class);
+        doThrow(noPrivilege).when(statement).execute(anyString());
+        List<TableId> tables = List.of(new TableId("testdb", "public", "orders"));
+        CockroachDBStreamingChangeEventSource source = source(baseConfig().with("snapshot.mode", "no_data").build());
+
+        assertThatThrownBy(() -> source.executeSinkChangefeed(statement, tables, "1795332885584348201.0000000000", true))
+                .isInstanceOfSatisfying(SQLException.class, failure -> assertThat(failure.getSQLState()).isEqualTo("42501"))
+                .hasMessageContaining("requires the CHANGEFEED privilege")
+                .hasMessageContaining("checks the privilege as of the cursor")
+                .hasCause(noPrivilege);
+        // Without a cursor the error is passed on as it is.
+        assertThatThrownBy(() -> source.executeSinkChangefeed(statement, tables, null, false)).isSameAs(noPrivilege);
+
+        // Another missing privilege says nothing about the cursor.
+        SQLException noSinkPrivilege = new SQLException("ERROR: only users with the admin role or the EXTERNALIOIMPLICITACCESS system "
+                + "privilege are allowed to access the specified kafka URI", "42501");
+        doThrow(noSinkPrivilege).when(statement).execute(anyString());
+        assertThatThrownBy(() -> source.executeSinkChangefeed(statement, tables, "1795332885584348201.0000000000", true))
+                .isSameAs(noSinkPrivilege);
+    }
+
+    @Test
+    void namesTheSnapshotModeThatScansAgainWhenTheCursorIsTooOld() throws Exception {
+        SQLException tooOld = new SQLException("ERROR: batch timestamp 1795332885.584348201,0 must be after replica GC threshold "
+                + "1795332894.103672556,0 (r79: /{Table/106-Max})", "XXUUU");
+        Statement statement = mock(Statement.class);
+        doThrow(tooOld).when(statement).execute(anyString());
+        List<TableId> tables = List.of(new TableId("testdb", "public", "orders"));
+
+        CockroachDBStreamingChangeEventSource source = source(baseConfig().with("snapshot.mode", "initial").build());
+        assertThatThrownBy(() -> source.executeSinkChangefeed(statement, tables, "1795332885584348201.0000000000", true))
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("must be after replica GC threshold")
+                .hasMessageContaining("snapshot mode when_needed")
+                .hasCause(tooOld);
+        // Without a cursor the error is passed on as it is.
+        CockroachDBStreamingChangeEventSource firstStart = source(baseConfig().with("snapshot.mode", "no_data").build());
+        assertThatThrownBy(() -> firstStart.executeSinkChangefeed(statement, tables, null, false)).isSameAs(tooOld);
+    }
+
+    @Test
+    void saysWhatToDoWhenATableIsNewerThanTheCursor() throws Exception {
+        // The text as CockroachDB v26.4.1 returns it.
+        SQLException newer = new SQLException("ERROR: failed to resolve targets in the CHANGEFEED stmt: table \"testdb.public.orders\" does "
+                + "not exist\n  Hint: do the targets exist at the specified cursor time 1795343265.665877422,0?", "XXUUU");
+        Statement statement = mock(Statement.class);
+        doThrow(newer).when(statement).execute(anyString());
+        List<TableId> tables = List.of(new TableId("testdb", "public", "orders"));
+
+        CockroachDBStreamingChangeEventSource source = source(baseConfig().with("snapshot.mode", "initial").build());
+        assertThatThrownBy(() -> source.executeSinkChangefeed(statement, tables, "1795332885584348201.0000000000", true))
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("do the targets exist at the specified cursor time")
+                .hasMessageContaining("did not exist at the cursor")
+                .hasMessageContaining("snapshot mode when_needed")
+                .hasCause(newer);
     }
 
     @Test
