@@ -712,6 +712,38 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
     }
 
     @Test
+    public void shouldCreateAChangefeedForATableThatNoRunningChangefeedCovers() throws Exception {
+        connection = openDatabase("uncovered_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS uncovered_first (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS uncovered_second (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO uncovered_first VALUES (1, 'Alice')");
+            stmt.execute("UPSERT INTO uncovered_second VALUES (1, 'Bob')");
+        }
+
+        // The first run creates a changefeed for one table.
+        startTask(baseConnectorConfig("uncovered-test", "uncovered_testdb", "public.uncovered_first"));
+        assertThat(pollForRecords(1, 45)).as("First run should stream").isNotEmpty();
+        stopTask();
+
+        // The second run names another table as well. The changefeed of the first run keeps running, and it
+        // covers one of the two tables of the group only.
+        startTask(baseConnectorConfig("uncovered-test", "uncovered_testdb", "public.uncovered_first,public.uncovered_second"));
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO uncovered_second VALUES (2, 'Carol')");
+        }
+        final List<SourceRecord> added = pollForRecords(r -> r.topic().endsWith(".uncovered_second") && hasId(r, 2L), 1, 60);
+        assertThat(added).as("Should receive the insert into the table that had no changefeed").isNotEmpty();
+
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery("SELECT count(*) FROM [SHOW CHANGEFEED JOBS] "
+                        + "WHERE status = 'running' AND description LIKE '%topic_prefix=uncovered-test.''%'")) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getInt(1)).as("The changefeed of the first run and one for the other table").isEqualTo(2);
+        }
+    }
+
+    @Test
     public void shouldCreateItsOwnChangefeedNextToOneWithALongerTopicPrefix() throws Exception {
         final Map<String, String> config = baseConnectorConfig("nested-prefix-test", "nested_prefix_testdb", "public.nested_prefix_events");
         connection = openDatabase("nested_prefix_testdb");
