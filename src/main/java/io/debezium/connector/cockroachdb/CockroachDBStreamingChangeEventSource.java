@@ -563,7 +563,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     /**
      * Checks whether a running changefeed job already exists for the given table
      * using the same topic prefix as this connector instance.
-     * Matches the fully-qualified table name and a {@code topic_prefix=} marker in the
+     * Matches the fully-qualified table name and the topic prefix of the sink URI in the
      * changefeed job description to avoid false positives from changefeeds created by
      * other connector instances targeting the same tables with different topic prefixes.
      */
@@ -598,7 +598,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     private boolean findReusableChangefeed(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables)
             throws SQLException {
         String topicPrefix = resolveTopicPrefix();
-        String sinkMarker = "topic_prefix=" + topicPrefix;
 
         try (Statement stmt = connection.connection().createStatement()) {
             // Paused jobs are matched too: a paused job is invisible to a running-only check,
@@ -614,10 +613,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     String jobId = rs.getString(1);
                     String status = rs.getString(2);
                     String description = rs.getString(3);
-                    if ("running".equals(status) && description != null && description.contains(sinkMarker)) {
+                    if ("running".equals(status) && descriptionHasTopicPrefix(description, topicPrefix)) {
                         running.add(new String[]{ jobId, description });
                     }
-                    if (!found && description != null && descriptionCapturesTable(description, table) && description.contains(sinkMarker)) {
+                    if (!found && description != null && descriptionCapturesTable(description, table)
+                            && descriptionHasTopicPrefix(description, topicPrefix)) {
                         if (!"running".equals(status)) {
                             throw new IllegalStateException("Found changefeed job " + jobId + " covering table " + table
                                     + " with topic prefix '" + topicPrefix + "' in status '" + status + "'. Starting anyway would "
@@ -689,6 +689,29 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 return found;
             }
         }
+    }
+
+    /**
+     * Returns {@code true} if the sink URI in a {@code SHOW CHANGEFEED JOBS} description has exactly the
+     * given topic prefix. The prefix is the value of the {@code topic_prefix} parameter, which ends at the
+     * next parameter or at the end of the URI. Looking for the text {@code topic_prefix=<prefix>} alone
+     * would also accept a longer prefix that starts with it, for example {@code crdb.v2.} for
+     * {@code crdb.}, which is the changefeed of another connector.
+     */
+    static boolean descriptionHasTopicPrefix(String description, String topicPrefix) {
+        if (description == null) {
+            return false;
+        }
+        final String parameter = "topic_prefix=" + topicPrefix;
+        for (int start = description.indexOf(parameter); start >= 0; start = description.indexOf(parameter, start + 1)) {
+            final int end = start + parameter.length();
+            final boolean startsParameter = start > 0 && (description.charAt(start - 1) == '?' || description.charAt(start - 1) == '&');
+            final boolean endsValue = end == description.length() || description.charAt(end) == '&' || description.charAt(end) == '\'';
+            if (startsParameter && endsValue) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
