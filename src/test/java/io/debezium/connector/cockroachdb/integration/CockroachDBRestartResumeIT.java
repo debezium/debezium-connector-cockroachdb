@@ -13,6 +13,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -84,6 +85,8 @@ public class CockroachDBRestartResumeIT {
     private Connection connection;
     private CockroachDBConnectorTask task1;
     private CockroachDBConnectorTask task2;
+    private CockroachDBConnectorTask task3;
+    private CockroachDBConnectorTask task4;
 
     @BeforeEach
     public void setUp() throws Exception {
@@ -107,7 +110,7 @@ public class CockroachDBRestartResumeIT {
 
     @AfterEach
     public void tearDown() throws Exception {
-        for (CockroachDBConnectorTask t : new CockroachDBConnectorTask[]{ task1, task2 }) {
+        for (CockroachDBConnectorTask t : new CockroachDBConnectorTask[]{ task1, task2, task3, task4 }) {
             if (t != null) {
                 try {
                     t.stop();
@@ -330,6 +333,19 @@ public class CockroachDBRestartResumeIT {
         try (Connection db = DriverManager.getConnection(adminUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
                 Statement stmt = db.createStatement()) {
             stmt.execute("GRANT CHANGEFEED ON TABLE latergrant_testdb.public.granted_later TO latergrant_connector");
+            // Without the resolved option, the changefeed of the first table reports no resolved timestamp for
+            // the rest of this test. The stored cursor then stays older than the grant, as it does while a
+            // topic has a backlog.
+            final String firstJob;
+            try (var rs = stmt.executeQuery("SELECT job_id FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' AND description LIKE '%granted_first%'")) {
+                assertThat(rs.next()).as("the running changefeed of run 1").isTrue();
+                firstJob = rs.getString(1);
+            }
+            stmt.execute("PAUSE JOB " + firstJob);
+            waitForJobStatus(stmt, firstJob, "paused");
+            stmt.execute("ALTER CHANGEFEED " + firstJob + " UNSET resolved");
+            stmt.execute("RESUME JOB " + firstJob);
+            waitForJobStatus(stmt, firstJob, "running");
         }
         config.put("table.include.list", "public.granted_first,public.granted_later");
         task2 = new CockroachDBConnectorTask();
@@ -339,31 +355,54 @@ public class CockroachDBRestartResumeIT {
         // CockroachDB checks the privilege as of the cursor of a changefeed, so it rejects the stored cursor for
         // the added table. Its changefeed starts at the current time instead. The inserts are repeated until one
         // arrives, because nothing tells from the outside when that changefeed has started.
-        Map<String, String> operations = new HashMap<>();
+        Map<String, List<String>> operations = new HashMap<>();
+        AtomicReference<Map<String, Object>> offsetOfTheAddedTable = new AtomicReference<>(null);
         for (int id = 1; id <= 30 && operations.keySet().stream().noneMatch(key -> key.startsWith("granted_later#")); id++) {
             try (Connection db = DriverManager.getConnection(adminUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
                     Statement stmt = db.createStatement()) {
                 stmt.execute("INSERT INTO latergrant_testdb.public.granted_later VALUES (" + id + ", 'after the restart')");
             }
-            pollOperations(task2, operations, persistedOffset, 3, () -> false);
+            pollEveryOperation(task2, operations, "granted_later", offsetOfTheAddedTable, 3, () -> false);
         }
         LOGGER.info("Run 2 emitted: {}", operations);
         assertThat(operations.entrySet()).as("an insert into the added table")
-                .anyMatch(entry -> entry.getKey().startsWith("granted_later#") && "c, snapshot=false".equals(entry.getValue()));
+                .anyMatch(entry -> entry.getKey().startsWith("granted_later#") && entry.getValue().contains("c"));
+        task2.stop();
+        task2 = null;
 
-        // The changefeed of the added table started later than the stored cursor.
+        // The changefeed of the added table started later than the stored cursor, which has not reached that
+        // start: the offsets hold the start, next to the position in the topic of the table.
         final BigDecimal storedCursor = new BigDecimal(String.valueOf(firstRunOffset.get("offset.cursor")));
+        assertThat(offsetOfTheAddedTable.get()).as("the offset of an event of the added table")
+                .containsKey("changefeed.start.latergrant-test.latergrant_testdb.public.granted_later")
+                .containsKey("consumer.offset.latergrant-test.latergrant_testdb.public.granted_later:0");
         try (Connection db = DriverManager.getConnection(adminUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
                 Statement stmt = db.createStatement()) {
+            final String jobId;
             try (var rs = stmt.executeQuery("SELECT job_id, description FROM [SHOW CHANGEFEED JOBS] "
                     + "WHERE status = 'running' AND description LIKE '%granted_later%'")) {
                 assertThat(rs.next()).as("a running changefeed for the added table").isTrue();
+                jobId = rs.getString(1);
                 final Matcher cursor = Pattern.compile("cursor = '([0-9.]+)'").matcher(rs.getString(2));
                 assertThat(cursor.find()).as("the changefeed of the added table has a cursor: %s", rs.getString(2)).isTrue();
                 assertThat(new BigDecimal(cursor.group(1))).as("it started later than the stored cursor, which CockroachDB rejected")
                         .isGreaterThan(storedCursor);
             }
+            stmt.execute("CANCEL JOB " + jobId);
+            waitForJobStatus(stmt, jobId, "canceled", "reverting");
+            stmt.execute("INSERT INTO latergrant_testdb.public.granted_later VALUES (1000, 'after the changefeed ended')");
         }
+
+        // --- Run 3: CockroachDB still rejects a cursor from before the grant for the added table, whose changes
+        // are owed by now. The offsets hold the start of its first changefeed, and the new one starts there. ---
+        persistedOffset.set(offsetOfTheAddedTable.get());
+        task3 = new CockroachDBConnectorTask();
+        task3.initialize(contextReturning(persistedOffset));
+        startTask(task3, config);
+        Map<String, String> thirdRun = new HashMap<>();
+        pollOperations(task3, thirdRun, persistedOffset, 90, () -> thirdRun.containsKey("granted_later#1000"));
+        LOGGER.info("Run 3 emitted: {}", thirdRun);
+        assertThat(thirdRun).as("the insert that was made after the changefeed had ended").containsEntry("granted_later#1000", "c, snapshot=false");
     }
 
     @Test
@@ -435,6 +474,145 @@ public class CockroachDBRestartResumeIT {
         // snapshot.mode=no_data: a table that existed at the stored cursor is not scanned. Only a table that
         // was created after the cursor is, because all of its rows are newer than the cursor.
         assertThat(operations).as("the row from before the table was added").doesNotContainKey("seen_later#1");
+    }
+
+    @Test
+    public void shouldNotLoseADeleteWhenTheChangefeedOfATableThatWasCreatedLaterIsReplaced() throws Exception {
+        String hostBootstrap = kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", "");
+        Map<String, String> config = baseConfig(hostBootstrap);
+        config.put("name", "laterscan-test");
+        config.put("database.server.name", "laterscan-test");
+        config.put("topic.prefix", "laterscan-test");
+        config.put("database.dbname", "laterscan_testdb");
+        config.put("snapshot.mode", "initial");
+        config.put("heartbeat.interval.ms", "1000");
+        config.put("table.include.list", "public.scan_first");
+
+        String adminUrl = cockroachdb.getJdbcUrl().replace("/postgres", "/defaultdb");
+        try (Connection db = DriverManager.getConnection(adminUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
+                Statement stmt = db.createStatement()) {
+            stmt.execute("CREATE DATABASE IF NOT EXISTS laterscan_testdb");
+            stmt.execute("CREATE TABLE laterscan_testdb.public.scan_first (id INT PRIMARY KEY, name STRING)");
+            stmt.execute("INSERT INTO laterscan_testdb.public.scan_first VALUES (1, 'scanned by the first run')");
+        }
+        AtomicReference<Map<String, Object>> persistedOffset = new AtomicReference<>(null);
+
+        // --- Run 1 leaves a cursor. ---
+        task1 = new CockroachDBConnectorTask();
+        task1.initialize(contextReturning(persistedOffset));
+        startTask(task1, config);
+        Map<String, String> firstRun = new HashMap<>();
+        pollOperations(task1, firstRun, persistedOffset, 120, () -> firstRun.containsKey("scan_first#1") && hasResolvedCursor(persistedOffset.get()));
+        assertThat(hasResolvedCursor(persistedOffset.get())).as("Run 1 should leave an offset with a resolved timestamp").isTrue();
+        final Map<String, Object> firstRunOffset = new HashMap<>(persistedOffset.get());
+        final Object storedCursor = firstRunOffset.get("offset.cursor");
+        task1.stop();
+        task1 = null;
+
+        // --- A table is created while the connector is stopped. ---
+        try (Connection db = DriverManager.getConnection(adminUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
+                Statement stmt = db.createStatement()) {
+            stmt.execute("CREATE TABLE laterscan_testdb.public.scan_new (id INT PRIMARY KEY, name STRING)");
+            stmt.execute("INSERT INTO laterscan_testdb.public.scan_new VALUES (1, 'deleted later'), (2, 'kept')");
+        }
+
+        // --- Run 2 scans the new table. The task stops right after the scan: the offset of a scan row is what
+        // Kafka Connect has stored then. Its cursor is still the one of run 1, which is older than the table. ---
+        config.put("table.include.list", "public.scan_first,public.scan_new");
+        task2 = new CockroachDBConnectorTask();
+        task2.initialize(contextReturning(persistedOffset));
+        startTask(task2, config);
+        Map<String, List<String>> secondRun = new HashMap<>();
+        AtomicReference<Map<String, Object>> offsetOfTheScan = new AtomicReference<>(null);
+        pollEveryOperation(task2, secondRun, "scan_new", offsetOfTheScan, 120,
+                () -> secondRun.containsKey("scan_new#1") && secondRun.containsKey("scan_new#2"));
+        assertThat(secondRun.get("scan_new#1")).as("the scan of the new table").containsExactly("r");
+        assertThat(offsetOfTheScan.get().get("offset.cursor")).as("the cursor has not reached the scan").isEqualTo(storedCursor);
+        assertThat(offsetOfTheScan.get()).as("the offsets hold the start of the scan")
+                .containsKey("changefeed.start.laterscan-test.laterscan_testdb.public.scan_new");
+        final Object startOfTheScan = offsetOfTheScan.get().get("changefeed.start.laterscan-test.laterscan_testdb.public.scan_new");
+        task2.stop();
+        task2 = null;
+
+        // --- Run 3 starts from the offset of run 1 again, as if run 2 had ended before Kafka Connect stored an
+        // offset. It finds the changefeed of the new table running, and takes its start from the job. ---
+        persistedOffset.set(firstRunOffset);
+        task3 = new CockroachDBConnectorTask();
+        task3.initialize(contextReturning(persistedOffset));
+        startTask(task3, config);
+        Map<String, List<String>> reused = new HashMap<>();
+        offsetOfTheScan.set(null);
+        pollEveryOperation(task3, reused, "scan_new", offsetOfTheScan, 120,
+                () -> reused.containsKey("scan_new#1") && reused.containsKey("scan_new#2"));
+        assertThat(offsetOfTheScan.get()).as("the offset of a row of the scan, read again from the topic").isNotNull();
+        assertThat(offsetOfTheScan.get().get("changefeed.start.laterscan-test.laterscan_testdb.public.scan_new"))
+                .as("the start of the reused changefeed").isEqualTo(startOfTheScan);
+        task3.stop();
+        task3 = null;
+
+        // --- An option is added to the changefeed of the new table, the way the connector asks for it when a
+        // reused changefeed lacks one. ALTER CHANGEFEED takes the initial_scan option out of the description of
+        // the job, so the job no longer tells that it began with a scan. ---
+        try (Connection db = DriverManager.getConnection(adminUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
+                Statement stmt = db.createStatement()) {
+            final String jobId;
+            try (var rs = stmt.executeQuery("SELECT job_id FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' AND description LIKE '%scan_new%'")) {
+                assertThat(rs.next()).as("a running changefeed for the new table").isTrue();
+                jobId = rs.getString(1);
+            }
+            stmt.execute("PAUSE JOB " + jobId);
+            waitForJobStatus(stmt, jobId, "paused");
+            stmt.execute("ALTER CHANGEFEED " + jobId + " SET resolved = '5s'");
+            stmt.execute("RESUME JOB " + jobId);
+            waitForJobStatus(stmt, jobId, "running");
+            try (var rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOB " + jobId + "]")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString(1)).as("the description of the altered job").contains("cursor = ").doesNotContain("initial_scan");
+            }
+        }
+
+        // --- Another run from the offset of run 1. Neither the job nor the offsets tell how the changefeed
+        // began, so the connector takes it for one that began with a scan. ---
+        persistedOffset.set(firstRunOffset);
+        task3 = new CockroachDBConnectorTask();
+        task3.initialize(contextReturning(persistedOffset));
+        startTask(task3, config);
+        Map<String, List<String>> altered = new HashMap<>();
+        offsetOfTheScan.set(null);
+        pollEveryOperation(task3, altered, "scan_new", offsetOfTheScan, 120,
+                () -> altered.containsKey("scan_new#1") && altered.containsKey("scan_new#2"));
+        assertThat(offsetOfTheScan.get()).as("the offset of a row of the scan, read once more from the topic").isNotNull();
+        assertThat(offsetOfTheScan.get().get("changefeed.start.laterscan-test.laterscan_testdb.public.scan_new"))
+                .as("the start of the reused changefeed after it was altered").isEqualTo(startOfTheScan);
+        task3.stop();
+        task3 = null;
+
+        // --- The changefeed of the new table ends. Afterwards a scanned row is deleted. ---
+        try (Connection db = DriverManager.getConnection(adminUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
+                Statement stmt = db.createStatement()) {
+            final String jobId;
+            try (var rs = stmt.executeQuery("SELECT job_id FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' AND description LIKE '%scan_new%'")) {
+                assertThat(rs.next()).as("a running changefeed for the new table").isTrue();
+                jobId = rs.getString(1);
+            }
+            stmt.execute("CANCEL JOB " + jobId);
+            waitForJobStatus(stmt, jobId, "canceled", "reverting");
+            stmt.execute("DELETE FROM laterscan_testdb.public.scan_new WHERE id = 1");
+            stmt.execute("INSERT INTO laterscan_testdb.public.scan_new VALUES (3, 'after the changefeed ended')");
+        }
+
+        // --- Run 4: the stored cursor is still older than the table. A scan as of now would not show that row 1
+        // is gone. The offsets hold the start of the first scan, and the new changefeed starts there. ---
+        persistedOffset.set(offsetOfTheScan.get());
+        task4 = new CockroachDBConnectorTask();
+        task4.initialize(contextReturning(persistedOffset));
+        startTask(task4, config);
+        Map<String, List<String>> lastRun = new HashMap<>();
+        pollEveryOperation(task4, lastRun, "scan_new", new AtomicReference<>(null), 90,
+                () -> lastRun.getOrDefault("scan_new#1", List.of()).contains("d") && lastRun.containsKey("scan_new#3"));
+        LOGGER.info("Run 4 emitted: {}", lastRun);
+        assertThat(lastRun.get("scan_new#1")).as("the delete that was made after the changefeed had ended").isNotNull().contains("d");
+        assertThat(lastRun).as("the insert that was made after the changefeed had ended").containsKey("scan_new#3");
     }
 
     @Test
@@ -750,6 +928,27 @@ public class CockroachDBRestartResumeIT {
                     final String snapshot = value.getStruct("source").getString("snapshot");
                     operations.putIfAbsent(r.topic().substring(r.topic().lastIndexOf('.') + 1) + "#" + key.get("id"),
                             value.getString("op") + ", snapshot=" + (snapshot == null ? "false" : snapshot));
+                }
+            }
+            Thread.sleep(1000);
+        }
+    }
+
+    /**
+     * Polls the task until the condition holds, and collects the operations of every row in the order of
+     * their events. The offset of the last record of the given table is kept in {@code offsetOfTable}.
+     */
+    private static void pollEveryOperation(CockroachDBConnectorTask task, Map<String, List<String>> operations, String table,
+                                           AtomicReference<Map<String, Object>> offsetOfTable, int attempts, BooleanSupplier done)
+            throws InterruptedException {
+        for (int i = 0; i < attempts && !done.getAsBoolean(); i++) {
+            for (SourceRecord r : poll(task)) {
+                if (r.value() instanceof Struct value && value.schema().field("op") != null && r.key() instanceof Struct key) {
+                    final String tableOfRecord = r.topic().substring(r.topic().lastIndexOf('.') + 1);
+                    operations.computeIfAbsent(tableOfRecord + "#" + key.get("id"), row -> new ArrayList<>()).add(value.getString("op"));
+                    if (table.equals(tableOfRecord) && r.sourceOffset() != null) {
+                        offsetOfTable.set(new HashMap<>(r.sourceOffset()));
+                    }
                 }
             }
             Thread.sleep(1000);
