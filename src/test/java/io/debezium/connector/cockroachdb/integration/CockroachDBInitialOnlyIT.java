@@ -65,7 +65,6 @@ public class CockroachDBInitialOnlyIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBInitialOnlyIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final String DATABASE_NAME = "initial_only_db";
     private static final int ROWS = 200;
 
@@ -78,8 +77,7 @@ public class CockroachDBInitialOnlyIT {
             .withNetworkAliases("kafka");
 
     @Container
-    private static final CockroachContainer cockroachdb = new CockroachContainer(
-            DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
+    private static final CockroachContainer cockroachdb = new CockroachContainer(CockroachDBTestImage.NAME)
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 
@@ -261,7 +259,7 @@ public class CockroachDBInitialOnlyIT {
     @Test
     public void shouldFailTheTaskWhenTheJobStatusQueryKeepsFailing() throws Exception {
         String table = "kafka_status_query_down";
-        try (CockroachContainer doomed = new CockroachContainer(DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
+        try (CockroachContainer doomed = new CockroachContainer(CockroachDBTestImage.NAME)
                 .withNetwork(NETWORK)) {
             doomed.start();
             try (Connection admin = DriverManager.getConnection(

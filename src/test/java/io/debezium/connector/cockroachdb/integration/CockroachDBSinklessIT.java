@@ -34,7 +34,6 @@ import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.CockroachContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import io.debezium.connector.cockroachdb.CockroachDBConnectorTask;
 
@@ -56,13 +55,11 @@ public class CockroachDBSinklessIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBSinklessIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final String DATABASE_NAME = "sinkless_testdb";
     private static final String TABLE_NAME = "sinkless_orders";
 
     @Container
-    private static final CockroachContainer cockroachdb = new CockroachContainer(
-            DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION));
+    private static final CockroachContainer cockroachdb = new CockroachContainer(CockroachDBTestImage.NAME);
 
     private Connection connection;
     private CockroachDBConnectorTask task;
