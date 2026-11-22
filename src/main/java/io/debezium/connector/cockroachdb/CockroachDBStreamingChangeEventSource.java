@@ -36,6 +36,7 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
 import org.apache.kafka.clients.CommonClientConfigs;
@@ -712,7 +713,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
         catch (SQLException e) {
             if (!shouldRecoverFromInvalidCursor(e, hasPriorOffset)) {
-                throw e;
+                throw hasPriorOffset && cursor != null ? withPrivilegeHint(withSnapshotModeHint(e)) : e;
             }
             logInvalidCursorRecovery(e);
             final String recoveryCursor = needsScanCursor(null, false) ? currentClusterTimestamp(stmt.getConnection()) : null;
@@ -1866,11 +1867,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     private void consumeSinkless(List<TableId> tables, CockroachDBOffsetContext offsetContext,
                                  ChangeEventSourceContext context, boolean hasPriorOffset)
             throws InterruptedException {
-        Map<String, TableId> tablesBySchemaAndName = new HashMap<>();
-        for (TableId table : tables) {
-            tablesBySchemaAndName.put(table.schema() + "." + table.table(), table);
-        }
-
         LOGGER.info("Starting sinkless changefeed for {} table(s) (streaming over SQL, no intermediate Kafka)", tables.size());
 
         // The streaming query holds its connection open indefinitely, so it must use a dedicated
@@ -1897,43 +1893,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 // CockroachDB emits it. This is independent of cockroachdb.changefeed.batch.size,
                 // which governs the kafka-mode consumer poll, not the SQL cursor.
                 stmt.setFetchSize(1);
-                try (ResultSet rs = executeSinklessChangefeed(
-                        stmt, jdbc, tables, offsetContext.getCursor(), hasPriorOffset)) {
-                    initializeSnapshotLifecycle(tables, offsetContext);
-                    while (context.isRunning() && running.get() && rs.next()) {
-                        String valueJson = readChangefeedValue(rs);
-                        if (valueJson == null || valueJson.trim().isEmpty()) {
-                            continue;
-                        }
-                        String keyJson = readChangefeedKey(rs);
-                        TableId table = resolveTableFromSource(valueJson, tablesBySchemaAndName);
-                        if (isInitialOnly() && initialScanInProgress) {
-                            // Hold back the latest event so the final event of the scan can carry the
-                            // completed snapshot (see completeInitialOnlySnapshot).
-                            dispatchPendingInitialOnlyEvent(offsetContext);
-                            pendingInitialOnlyEvent = new PendingChangefeedEvent(keyJson, valueJson, table, null, 0L);
-                        }
-                        else {
-                            // Resolved-timestamp rows carry no table; processChangefeedEvent handles
-                            // them by their "resolved" field regardless of the table argument.
-                            processChangefeedEvent(keyJson, valueJson, table, offsetContext);
-                        }
-
-                        offsetActivityMonitorService.pulse(currentPartition, offsetContext);
-                    }
-                    // CockroachDB ends a sinkless initial_scan='only' changefeed normally only once it has
-                    // delivered the whole scan. When a node fails or drains mid-scan, it either re-plans
-                    // the scan and still delivers every row, or fails the statement, which reaches this
-                    // code as an SQLException rather than as the end of the result set. A result set
-                    // that ends while the connector is running is therefore the end of the scan.
-                    if (isInitialOnly() && initialScanInProgress && context.isRunning() && running.get()) {
-                        completeInitialOnlySnapshot(offsetContext);
-                    }
-                    if (isInitialOnly() && !initialScanInProgress) {
-                        LOGGER.info("Initial scan completed and snapshot.mode=initial_only, stopping connector");
-                        running.set(false);
-                    }
-                }
+                streamSinkless(stmt, jdbc, tables, offsetContext, () -> context.isRunning() && running.get(), hasPriorOffset);
             }
             LOGGER.debug("Stopped sinkless changefeed consumption");
         }
@@ -1949,6 +1909,117 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             LOGGER.error("Error in sinkless changefeed consumption: {}", e.getMessage(), e);
             throw new RuntimeException("Failed to stream sinkless changefeed from CockroachDB: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Runs the sinkless changefeed on the statement of the streaming connection and processes its events
+     * until the source stops or the changefeed ends.
+     * <p>The changefeed can end with the error for data that is older than the garbage collection
+     * threshold after it has delivered rows, where {@link #executeSinklessChangefeed} cannot handle it:
+     * <ul>
+     * <li>While it streams from a cursor, because the connector fell behind, or because CockroachDB
+     * accepted a stored cursor that only some of the ranges still cover. A restart would start at the
+     * same cursor and end the same way, so {@code snapshot.mode=when_needed} scans again right here.</li>
+     * <li>During the initial scan, which reads the tables as of its start. A sinkless changefeed has no
+     * job that would protect that data. A new scan would begin again and end the same way, so the task
+     * stops in every snapshot mode. A statement that is rejected before it has returned a row has not
+     * scanned anything: that is the rejection of its cursor.</li>
+     * </ul>
+     */
+    void streamSinkless(Statement stmt, Connection jdbc, List<TableId> tables, CockroachDBOffsetContext offsetContext,
+                        BooleanSupplier keepsRunning, boolean hasPriorOffset)
+            throws SQLException, InterruptedException {
+        Map<String, TableId> tablesBySchemaAndName = new HashMap<>();
+        for (TableId table : tables) {
+            tablesBySchemaAndName.put(table.schema() + "." + table.table(), table);
+        }
+        String cursor = offsetContext.getCursor();
+        boolean resumes = hasPriorOffset;
+        int scansAfterAnExpiredCursor = 0;
+        while (true) {
+            // Whether this statement starts with an initial scan decides what its failure means.
+            initialScanInProgress = isInitialScan(config.getInitialScanForSnapshotMode(resumes));
+            boolean rowsReturned = false;
+            try (ResultSet rs = executeSinklessChangefeed(stmt, jdbc, tables, cursor, resumes)) {
+                initializeSnapshotLifecycle(tables, offsetContext);
+                while (keepsRunning.getAsBoolean() && rs.next()) {
+                    rowsReturned = true;
+                    String valueJson = readChangefeedValue(rs);
+                    if (valueJson == null || valueJson.trim().isEmpty()) {
+                        continue;
+                    }
+                    String keyJson = readChangefeedKey(rs);
+                    TableId table = resolveTableFromSource(valueJson, tablesBySchemaAndName);
+                    if (isInitialOnly() && initialScanInProgress) {
+                        // Hold back the latest event so the final event of the scan can carry the
+                        // completed snapshot (see completeInitialOnlySnapshot).
+                        dispatchPendingInitialOnlyEvent(offsetContext);
+                        pendingInitialOnlyEvent = new PendingChangefeedEvent(keyJson, valueJson, table, null, 0L);
+                    }
+                    else {
+                        // Resolved-timestamp rows carry no table; processChangefeedEvent handles
+                        // them by their "resolved" field regardless of the table argument.
+                        processChangefeedEvent(keyJson, valueJson, table, offsetContext);
+                    }
+
+                    offsetActivityMonitorService.pulse(currentPartition, offsetContext);
+                }
+                // CockroachDB ends a sinkless initial_scan='only' changefeed normally only once it has
+                // delivered the whole scan. When a node fails or drains mid-scan, it either re-plans
+                // the scan and still delivers every row, or fails the statement, which reaches this
+                // code as an SQLException rather than as the end of the result set. A result set
+                // that ends while the connector is running is therefore the end of the scan.
+                if (isInitialOnly() && initialScanInProgress && keepsRunning.getAsBoolean()) {
+                    completeInitialOnlySnapshot(offsetContext);
+                }
+                if (isInitialOnly() && !initialScanInProgress) {
+                    LOGGER.info("Initial scan completed and snapshot.mode=initial_only, stopping connector");
+                    running.set(false);
+                }
+                return;
+            }
+            catch (SQLException e) {
+                if (!keepsRunning.getAsBoolean()) {
+                    throw e;
+                }
+                if (initialScanInProgress && rowsReturned && isCursorTooOld(e)) {
+                    throw scanOvertakenByGarbageCollection(e);
+                }
+                // A statement that began with a scan is not answered with another scan. It was rejected before
+                // it returned a row, or it failed for another reason.
+                if (initialScanInProgress || !shouldRecoverFromInvalidCursor(e, true)) {
+                    // The changefeed ran from the cursor in the offsets, which a restart would use again.
+                    final String reached = offsetContext.getCursor();
+                    final boolean hasCursor = reached != null && !reached.isEmpty() && !CockroachDBOffsetContext.CURSOR_INITIAL.equals(reached)
+                            && !CockroachDBOffsetContext.CURSOR_NOW.equals(reached);
+                    throw hasCursor ? withSnapshotModeHint(e) : e;
+                }
+                scansAfterAnExpiredCursor++;
+                LOGGER.warn("The sinkless changefeed ended because CockroachDB no longer has the changes since its cursor, and "
+                        + "snapshot.mode=when_needed is configured. Starting again with an initial scan (scan number {} of this kind "
+                        + "since the task started). Existing rows will be re-read and duplicate events can be emitted. Deletes that "
+                        + "occurred since the cursor cannot be recovered by the scan and will be lost. A connector that reads more "
+                        + "slowly than the garbage collection moves on ends up here again: raise gc.ttlseconds of the captured "
+                        + "tables, or remove what slows the connector down. CockroachDB error: {}", scansAfterAnExpiredCursor, e.getMessage());
+                jdbc.rollback();
+                cursor = null;
+                resumes = false;
+            }
+        }
+    }
+
+    /**
+     * The failure of an initial scan whose data CockroachDB has garbage-collected before the scan was
+     * through. The error of CockroachDB is attached as a suppressed exception and not as the cause: the
+     * error handler retries after an SQL error, and no retry can fix this one.
+     */
+    private static DebeziumException scanOvertakenByGarbageCollection(SQLException failure) {
+        final DebeziumException stop = new DebeziumException("The initial scan of the sinkless changefeed ended before it had read "
+                + "all rows, because CockroachDB has garbage-collected the data as of the start of the scan: " + failure.getMessage()
+                + ". A scan that starts again would end the same way. Raise gc.ttlseconds of the captured tables above the time "
+                + "that the scan takes, and restart the connector.");
+        stop.addSuppressed(failure);
+        return stop;
     }
 
     /**
@@ -1969,7 +2040,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
         catch (SQLException e) {
             if (!shouldRecoverFromInvalidCursor(e, hasPriorOffset)) {
-                throw e;
+                throw hasPriorOffset && cursor != null ? withPrivilegeHint(withSnapshotModeHint(e)) : e;
             }
             logInvalidCursorRecovery(e);
             connection.rollback();
@@ -1981,6 +2052,60 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             recordScanTimestamp(tables, recoveryCursor);
             return rs;
         }
+    }
+
+    /** What the operator can do when CockroachDB no longer covers the cursor of the changefeed. */
+    private static final String SNAPSHOT_MODE_HINT = "Reconfigure the connector to use the snapshot mode when_needed, which starts again "
+            + "with an initial scan in this case.";
+
+    /**
+     * Adds to the error with which CockroachDB rejects the cursor of a changefeed what the operator can
+     * do about it, like the other connectors do when the stored position is no longer available: for a
+     * cursor that is older than the garbage collection threshold, and for a cursor that is older than a
+     * table of the changefeed. No retry at the same cursor can fix either. Other errors, and these in the
+     * snapshot mode that scans again, are returned as they are.
+     */
+    private SQLException withSnapshotModeHint(SQLException failure) {
+        if (config.getSnapshotMode() == CockroachDBConnectorConfig.SnapshotMode.WHEN_NEEDED || failure.getMessage() == null
+                || failure.getMessage().contains(SNAPSHOT_MODE_HINT)) {
+            return failure;
+        }
+        if (isCursorTooOld(failure)) {
+            return new SQLException(failure.getMessage() + ". CockroachDB no longer has the changes since the cursor of the changefeed. "
+                    + SNAPSHOT_MODE_HINT, failure.getSQLState(), failure);
+        }
+        if (isTableNewerThanCursorMessage(failure.getMessage())) {
+            return new SQLException(failure.getMessage() + ". A table of the changefeed did not exist at the cursor of the changefeed. "
+                    + "Exclude the table until the connector has stored a later cursor. " + SNAPSHOT_MODE_HINT, failure.getSQLState(), failure);
+        }
+        return failure;
+    }
+
+    /** What the operator has to know when CockroachDB denies a changefeed at a cursor to a user that has the privilege. */
+    private static final String PRIVILEGE_HINT = "CockroachDB checks the privilege as of the cursor of the changefeed. A privilege that "
+            + "was granted after the cursor does not count there.";
+
+    /**
+     * Adds to the error for a missing changefeed privilege on the tables, when the changefeed starts at a
+     * cursor, that CockroachDB checks the privilege as of the cursor. The error itself names only the
+     * privilege, which the user can have by now. Other errors are returned as they are.
+     */
+    private static SQLException withPrivilegeHint(SQLException failure) {
+        final String message = failure.getMessage();
+        if (!"42501".equals(failure.getSQLState()) || message == null || !message.toLowerCase(Locale.ROOT).contains("on all target tables")
+                || message.contains(PRIVILEGE_HINT)) {
+            return failure;
+        }
+        return new SQLException(message + ". " + PRIVILEGE_HINT, failure.getSQLState(), failure);
+    }
+
+    private static boolean isCursorTooOld(SQLException exception) {
+        for (Throwable current = exception; current != null; current = current.getCause()) {
+            if (current.getMessage() != null && current.getMessage().toLowerCase(Locale.ROOT).contains("must be after replica gc threshold")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean shouldRecoverFromInvalidCursor(SQLException exception, boolean hasPriorOffset) {
@@ -2018,9 +2143,21 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         if (message == null) {
             return false;
         }
-        String normalized = message.toLowerCase(Locale.ROOT);
-        return normalized.contains("do the targets exist at the specified cursor time")
-                || normalized.contains("must be after replica gc threshold");
+        return isTableNewerThanCursorMessage(message) || message.toLowerCase(Locale.ROOT).contains("must be after replica gc threshold");
+    }
+
+    /**
+     * Returns {@code true} for the error with which CockroachDB rejects a changefeed whose cursor is older
+     * than one of its tables. CockroachDB adds the hint about the cursor to every failure to look the
+     * tables up at a cursor, also to one that passes, for example when the lookup is interrupted. Only
+     * together with the table that does not exist does it say that the cursor is too early.
+     */
+    static boolean isTableNewerThanCursorMessage(String message) {
+        if (message == null) {
+            return false;
+        }
+        final String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("do the targets exist at the specified cursor time") && normalized.contains("does not exist");
     }
 
     /**
