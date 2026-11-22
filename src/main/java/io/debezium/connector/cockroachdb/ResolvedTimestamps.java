@@ -20,8 +20,9 @@ import io.debezium.relational.TableId;
  * <p>A resolved timestamp says that its changefeed has emitted every change up to it. The tables can be
  * covered by more than one changefeed, and a changefeed sends its resolved timestamps to the topics of
  * its own tables. The stored cursor is where a later start creates the changefeed of a table that has
- * none. It must not be ahead of any of the changefeeds: when a changefeed fell behind or stopped, the
- * changes between its own resolved timestamp and the cursor would never be emitted.
+ * none, unless the offsets hold a later point for the table. It must not be ahead of any of the
+ * changefeeds: when a changefeed fell behind or stopped, the changes between its own resolved timestamp
+ * and the cursor would never be emitted.
  *
  * @author Virag Tripathi
  */
@@ -71,6 +72,16 @@ final class ResolvedTimestamps {
             }
         }
         return lowest == null ? null : lowest.text();
+    }
+
+    /**
+     * Returns the latest resolved timestamp of every table that has delivered one: how far the changefeed
+     * of the table has come, by what the connector has read from its topic.
+     */
+    Map<TableId, BigDecimal> latest() {
+        final Map<TableId, BigDecimal> values = new HashMap<>();
+        latest.forEach((table, resolved) -> values.put(table, resolved.value()));
+        return values;
     }
 
     private void findLowest() {

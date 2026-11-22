@@ -178,6 +178,16 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     private boolean reusedCursorsRecorded;
 
     /**
+     * Whether the changefeed that covers a table began with an initial scan, for the changefeeds whose
+     * cursor is known (see {@link #scanTimestamps}): the connector created the changefeed in this run, or
+     * the description of its job says it (see {@link #scanAtStartOf}).
+     */
+    private final Map<TableId, ScanAtStart> scansAtStart = new HashMap<>();
+
+    /** The tables whose changefeed the connector created in this run, as opposed to one that it found running. */
+    private final Set<TableId> tablesWithNewChangefeed = new HashSet<>();
+
+    /**
      * How often an initial_only run in kafka mode asks CockroachDB whether its changefeed jobs have
      * finished the scan.
      */
@@ -403,6 +413,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
         scanTimestamps.clear();
         tablesInScan.clear();
+        scansAtStart.clear();
+        tablesWithNewChangefeed.clear();
         resolvedTimestamps = new ResolvedTimestamps(tables);
         reusedCursorsRecorded = false;
         if (config.isSinklessChangefeed()) {
@@ -471,6 +483,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 scanStarted |= createChangefeedFor(stmt, missing, offsetContext, hasPriorOffset);
             }
         }
+        // The scan of a changefeed that started later than the stored cursor can still be running, also when
+        // an earlier run created the changefeed.
+        tablesInScan.addAll(rememberStartsLaterThan(offsetContext.getCursor(), offsetContext));
 
         String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
         initialScanInProgress = scanStarted || isInitialScan(initialScan);
@@ -478,6 +493,91 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             LOGGER.info("Initial scan in progress (snapshot.mode={})",
                     config.getSnapshotMode().getValue());
         }
+    }
+
+    /**
+     * Puts into the offsets where a new changefeed starts for every table whose changefeed is ahead of the
+     * given cursor. A changefeed that has to be created again for such a table, while the stored cursor
+     * is still behind that point, starts there (see {@link #createChangefeedFor}). The stored cursor is
+     * no good start for it: CockroachDB can reject it because the table or the privilege of the user on
+     * it is newer, and it can be much older than what the table needs.
+     * <p>The point is how far the table has come: the latest resolved timestamp that the connector has
+     * read from the topic of the table in this run. A changefeed that takes the place of the one of the
+     * table can start there without a scan, because all earlier events of the table are in the topic. A
+     * resolved timestamp from before the start of the changefeed of the table is one of an earlier
+     * changefeed and does not count. A table that has delivered none since the start of its changefeed has
+     * that start as its point, together with whether the changefeed began with an initial scan. The
+     * connector knows the start of a changefeed that it created in this run, and the one in the
+     * description of a job that it found running. At a restart, the run that created a changefeed can
+     * have ended before a record carried the start into the offsets, which is why the starts of the
+     * changefeeds that are found running count as well.
+     * <p>The connector calls this with the stored cursor when the changefeeds are set up and when it
+     * replaces a failed changefeed while it streams, and with the new cursor when the cursor moves back.
+     * <p>The description of a job does not always tell whether its changefeed began with an initial scan:
+     * {@code ALTER CHANGEFEED} removes the option, and a changefeed that an operator created can have
+     * none. Then a start that the offsets hold for the same cursor tells it. Without one, the connector
+     * assumes a scan: a changefeed that scans again delivers rows a second time, and one that leaves out
+     * a scan that was not through loses rows.
+     *
+     * @return the tables whose changefeed is ahead of the cursor, began with an initial scan, and has
+     *         delivered no resolved timestamp since
+     */
+    private List<TableId> rememberStartsLaterThan(String cursor, CockroachDBOffsetContext offsetContext) {
+        final List<TableId> scanned = new ArrayList<>();
+        final BigDecimal limit = isTimestampCursor(cursor) ? parseDecimalTimestamp(cursor) : null;
+        if (limit == null || isInitialOnly()) {
+            return scanned;
+        }
+        final Map<TableId, BigDecimal> reached = resolvedTimestamps.latest();
+        final Set<TableId> tables = new HashSet<>(scanTimestamps.keySet());
+        tables.addAll(reached.keySet());
+        for (TableId table : tables) {
+            final BigDecimal start = scanTimestamps.get(table);
+            final BigDecimal progress = reached.get(table);
+            // A resolved timestamp from before the start of the changefeed is one of an earlier changefeed.
+            final boolean delivered = progress != null && (start == null || progress.compareTo(start) >= 0);
+            final BigDecimal point = delivered ? progress : start;
+            if (point.compareTo(limit) <= 0) {
+                continue;
+            }
+            final String topic = buildTopicName(table);
+            final CockroachDBOffsetContext.ChangefeedStart stored = offsetContext.getChangefeedStart(topic);
+            final BigDecimal storedPoint = stored == null ? null : parseDecimalTimestamp(stored.cursor());
+            if (storedPoint != null && storedPoint.compareTo(point) > 0 && !stored.scans()) {
+                // An earlier run has read further in the topic of the table than this one has so far.
+                continue;
+            }
+            final boolean samePoint = storedPoint != null && storedPoint.compareTo(point) == 0;
+            final ScanAtStart known = scansAtStart.getOrDefault(table, ScanAtStart.UNKNOWN);
+            final boolean scans;
+            if (delivered) {
+                scans = false;
+            }
+            else if (tablesWithNewChangefeed.contains(table)) {
+                scans = known == ScanAtStart.YES;
+            }
+            else if (samePoint) {
+                // The changefeed was found running. The offsets know more about it than its description: the
+                // scan can be through by now, and ALTER CHANGEFEED can have removed the option.
+                scans = stored.scans();
+            }
+            else {
+                scans = known != ScanAtStart.NO;
+            }
+            if (!samePoint || stored.scans() != scans) {
+                offsetContext.setChangefeedStart(topic, point.toPlainString(), scans);
+            }
+            if (scans) {
+                scanned.add(table);
+            }
+        }
+        return scanned;
+    }
+
+    /** Remembers whether the changefeed that this run has created for the tables began with an initial scan. */
+    private void recordScanAtStart(List<TableId> tables, boolean scans) {
+        tables.forEach(table -> scansAtStart.put(table, scans ? ScanAtStart.YES : ScanAtStart.NO));
+        tablesWithNewChangefeed.addAll(tables);
     }
 
     /**
@@ -493,6 +593,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * <li>It checks the privilege of the user as of the cursor, so it rejects the cursor for a table on
      * which the user got the CHANGEFEED privilege later (see {@link #createChangefeedForAddedTables}).</li>
      * </ul>
+     * The offsets keep where a new changefeed starts for a table whose changefeed is ahead of the
+     * stored cursor, until the cursor has reached that point (see {@link #rememberStartsLaterThan}). A
+     * table with such a point gets its changefeed there (see {@link #createChangefeedWhereTheOffsetsSay}).
      * The tables that the connector captured before get a changefeed of their own at the stored cursor,
      * so that what is new about the other tables does not keep them from resuming.
      *
@@ -508,16 +611,30 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             return scanStarted;
         }
 
-        final List<TableId> created = tablesCreatedAfter(stmt, tables, cursor);
+        final Map<CockroachDBOffsetContext.ChangefeedStart, List<TableId>> withAPoint = new LinkedHashMap<>();
+        final List<TableId> startingAtTheCursor = new ArrayList<>();
+        for (TableId table : tables) {
+            final CockroachDBOffsetContext.ChangefeedStart start = offsetContext.getChangefeedStart(buildTopicName(table));
+            if (start != null) {
+                withAPoint.computeIfAbsent(start, key -> new ArrayList<>()).add(table);
+            }
+            else {
+                startingAtTheCursor.add(table);
+            }
+        }
+        final List<TableId> created = tablesCreatedAfter(stmt, startingAtTheCursor, cursor);
         final List<TableId> capturedBefore = new ArrayList<>();
         final List<TableId> added = new ArrayList<>();
-        for (TableId table : tables) {
+        for (TableId table : startingAtTheCursor) {
             if (!created.contains(table)) {
                 (wasAddedSince(table, offsetContext) ? added : capturedBefore).add(table);
             }
         }
 
         boolean scanStarted = false;
+        for (Map.Entry<CockroachDBOffsetContext.ChangefeedStart, List<TableId>> point : withAPoint.entrySet()) {
+            scanStarted |= createChangefeedWhereTheOffsetsSay(stmt, point.getValue(), point.getKey(), cursor);
+        }
         if (!capturedBefore.isEmpty()) {
             scanStarted |= executeSinkChangefeed(stmt, capturedBefore, cursor, true);
             LOGGER.info("Created changefeed for tables: {}", capturedBefore);
@@ -589,10 +706,38 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     + "user as of the cursor, so a privilege that was granted later does not count. The connector did not "
                     + "capture these tables before, so their changefeed starts at the current time, {}. An incremental snapshot "
                     + "captures the rows that are in the tables already.", cursor, tables, originalMessage(e), start);
+            // A restart before the cursor has reached this start would run into the same rejection, so the
+            // offsets keep the start (see rememberStartsLaterThan).
             final boolean scanStarted = executeSinkChangefeed(stmt, tables, start, true);
             LOGGER.info("Created changefeed for tables: {}", tables);
             return scanStarted;
         }
+    }
+
+    /**
+     * Creates the changefeed for tables for which the offsets hold a point that is later than the stored
+     * cursor (see {@link #rememberStartsLaterThan}): how far the changefeed of the table had come, or
+     * where it started if it had delivered no resolved timestamp yet. CockroachDB can reject the cursor
+     * for such a table, and the table can be newer than the cursor. The new changefeed starts at that
+     * point, with an initial scan as of that time if the first one began with a scan that was not
+     * through. It delivers again what the first one delivered since that point, and also what happened
+     * to the table after the first one ended, which a scan as of now would not show for a deleted row.
+     */
+    private boolean createChangefeedWhereTheOffsetsSay(Statement stmt, List<TableId> tables, CockroachDBOffsetContext.ChangefeedStart start,
+                                                       String cursor)
+            throws SQLException {
+        LOGGER.info("The offsets hold {} as the point where a changefeed for the table(s) {} starts, and the stored cursor {} is "
+                + "earlier. The new changefeed starts at that point{}.", start.cursor(), tables, cursor,
+                start.scans() ? ", with an initial scan as of that time" : "");
+        boolean scanStarted = false;
+        if (start.scans()) {
+            createScanningChangefeed(stmt, tables, start.cursor());
+        }
+        else {
+            scanStarted = executeSinkChangefeed(stmt, tables, start.cursor(), true);
+        }
+        LOGGER.info("Created changefeed for tables: {}", tables);
+        return scanStarted;
     }
 
     /**
@@ -615,6 +760,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         stmt.execute(query);
         recordCreatedJobId(stmt, tables);
         recordScanTimestamp(tables, scanCursor);
+        recordScanAtStart(tables, true);
         if (!isInitialOnly()) {
             tablesInScan.addAll(tables);
         }
@@ -709,6 +855,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             stmt.execute(query);
             recordCreatedJobId(stmt, tables);
             recordScanTimestamp(tables, startCursor);
+            recordScanAtStart(tables, isInitialScan(config.getInitialScanForSnapshotMode(hasPriorOffset)));
             return false;
         }
         catch (SQLException e) {
@@ -722,6 +869,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             stmt.execute(recoveryQuery);
             recordCreatedJobId(stmt, tables);
             recordScanTimestamp(tables, recoveryCursor);
+            recordScanAtStart(tables, isInitialScan(config.getInitialScanForSnapshotMode(false)));
             return true;
         }
     }
@@ -1084,6 +1232,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     final List<String> expected = tableIdComponents(included);
                     if (captured.stream().anyMatch(candidate -> qualifiedSuffixMatches(candidate, expected))) {
                         scanTimestamps.put(included, cursor);
+                        scansAtStart.put(included, scanAtStartOf(description));
                     }
                 }
             }
@@ -1210,6 +1359,42 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     static boolean changefeedHasOption(String description, String optionName) {
         return changefeedOptions(description).stream().anyMatch(option -> optionName.equals(option.split("=", 2)[0].trim()));
+    }
+
+    /** Whether a changefeed began with an initial scan. */
+    enum ScanAtStart {
+        YES,
+        NO,
+        /**
+         * The description of the job has no option about the initial scan: {@code ALTER CHANGEFEED} removes
+         * it, and a changefeed that an operator created can have none.
+         */
+        UNKNOWN
+    }
+
+    /**
+     * Returns what a {@code SHOW CHANGEFEED JOBS} description says about an initial scan at the start of
+     * the changefeed: {@code initial_scan} with or without a value, or one of the options
+     * {@code no_initial_scan} and {@code initial_scan_only}. A description without any of them says
+     * nothing: {@code ALTER CHANGEFEED} removes them and keeps the cursor, so the description of a
+     * changefeed that began with a scan can look like the one of a changefeed that was created with a
+     * cursor and without such an option.
+     */
+    static ScanAtStart scanAtStartOf(String description) {
+        for (String option : changefeedOptions(description)) {
+            final String[] nameAndValue = option.split("=", 2);
+            final String name = nameAndValue[0].trim();
+            if ("no_initial_scan".equals(name)) {
+                return ScanAtStart.NO;
+            }
+            if ("initial_scan_only".equals(name)) {
+                return ScanAtStart.YES;
+            }
+            if ("initial_scan".equals(name)) {
+                return nameAndValue.length == 2 && "no".equals(nameAndValue[1].replace("'", "").trim()) ? ScanAtStart.NO : ScanAtStart.YES;
+            }
+        }
+        return ScanAtStart.UNKNOWN;
     }
 
     /**
@@ -1441,9 +1626,10 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * still run. CockroachDB reports the end of a changefeed job nowhere else: its topics just stay
      * silent, and the connector would wait for events that never come.
      * <p>A job that has ended, because it failed or because it was canceled, stops the task. The next
-     * start creates a changefeed for its tables at the stored cursor, which is never ahead of what the
-     * job delivered (see {@link ResolvedTimestamps}). A paused job is reported once, since it
-     * delivers again when it is resumed.
+     * start creates a changefeed for its tables at the stored cursor, or at the point that the offsets
+     * hold for a table (see {@link #rememberStartsLaterThan}). Neither is ahead of what the topics of
+     * the tables hold (see {@link ResolvedTimestamps}). A paused job is reported once, since it delivers
+     * again when it is resumed.
      * <p>CockroachDB accepts a changefeed into a sink at a cursor that is older than the garbage
      * collection threshold and fails its job afterwards, unlike a sinkless changefeed, whose statement it
      * rejects. With {@code snapshot.mode=when_needed} the connector then creates a new changefeed with an
@@ -1505,7 +1691,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                             + "CockroachDB error: {}", jobId, tables, error);
                     changefeedJobs.remove(jobId);
                     final Set<Long> jobsBefore = new HashSet<>(changefeedJobs.keySet());
-                    createChangefeedWithInitialScan(tables);
+                    createChangefeedWithInitialScan(tables, offsetContext);
                     changefeedJobs.keySet().stream().filter(id -> !jobsBefore.contains(id)).forEach(replacements::add);
                     replacementChangefeedJobs.addAll(replacements);
                     continue;
@@ -1516,8 +1702,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             }
             throw new DebeziumException("Changefeed job " + jobId + " for the table(s) " + tables + " has ended with the status '"
                     + status + "'" + (error.isEmpty() ? "" : ": " + error) + ". The connector receives no more changes of these "
-                    + "tables. Restart the connector to create a changefeed for them. It starts at the cursor in the connector's "
-                    + "offsets, or like on a first start if the offsets hold none.");
+                    + "tables. Restart the connector to create a changefeed for them. It continues where the connector's offsets "
+                    + "say, or starts like on a first start if they hold no cursor.");
         }
         final List<TableId> captured = changefeedJobs.values().stream().flatMap(List::stream).collect(Collectors.toList());
         if (!replacements.isEmpty() && tablesInScan.containsAll(captured)) {
@@ -1535,11 +1721,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * Creates a changefeed that starts with an initial scan, for tables whose changefeed failed because
      * CockroachDB no longer has the changes since its cursor.
      */
-    void createChangefeedWithInitialScan(List<TableId> tables) throws SQLException {
+    void createChangefeedWithInitialScan(List<TableId> tables, CockroachDBOffsetContext offsetContext) throws SQLException {
         try (Statement stmt = jobConnection().createStatement()) {
             createScanningChangefeed(stmt, tables, currentClusterTimestamp(stmt.getConnection()));
             LOGGER.info("Created changefeed for tables: {}", tables);
         }
+        // Until the scan is through, the stored cursor stays behind it. The other tables can be ahead of the
+        // cursor as well, and the cursor can be one that CockroachDB no longer covers.
+        rememberStartsLaterThan(offsetContext.getCursor(), offsetContext);
     }
 
     /** The connection on which the connector reads the status of its changefeed jobs and replaces a failed one. */
@@ -2277,13 +2466,20 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 if (cursor == null) {
                     LOGGER.debug("Received resolved timestamp: {}. The cursor advances once every table has delivered one", resolvedTs);
                 }
-                else if (isEarlierThan(cursor, offsetContext.getCursor())) {
-                    // After a restart the topics can still hold resolved timestamps from before the stored cursor.
-                    LOGGER.debug("Received resolved timestamp: {}. The stored cursor {} is later and stays", resolvedTs, offsetContext.getCursor());
-                }
                 else {
+                    if (!config.isSinklessChangefeed() && isEarlierThan(cursor, offsetContext.getCursor())) {
+                        // What the connector has read of every table since this start is behind the stored
+                        // cursor: a changefeed is behind it, or the connector had read the partitions of a
+                        // topic to different points, or a changefeed sent older resolved timestamps again. The
+                        // cursor moves back, and the tables that are ahead of it keep how far they have come.
+                        LOGGER.info("The resolved timestamp that the connector has read for every table, {}, is earlier than the "
+                                + "stored cursor {}. The cursor moves back to it.", cursor, offsetContext.getCursor());
+                        rememberStartsLaterThan(cursor, offsetContext);
+                    }
                     offsetContext.setCursor(cursor);
-                    LOGGER.debug("Received resolved timestamp: {}, cursor advanced to {}", resolvedTs, cursor);
+                    // From here on a changefeed can start at the cursor also for a table that was ahead of it.
+                    offsetContext.removeChangefeedStartsUpTo(cursor);
+                    LOGGER.debug("Received resolved timestamp: {}, cursor set to {}", resolvedTs, cursor);
                 }
                 offsetContext.setTimestamp(parseResolvedTimestamp(resolvedTs));
 

@@ -98,6 +98,53 @@ public class CockroachDBOffsetContextTest {
     }
 
     @Test
+    public void shouldKeepTheStartOfAChangefeedThatStartedLaterThanTheCursor() {
+        offsetContext.setChangefeedStart("test.testdb.public.orders", "1700000000000000020.0000000000", true);
+        offsetContext.setChangefeedStart("test.testdb.public.items", "1700000000000000030.0000000000", false);
+
+        CockroachDBOffsetContext restored = new CockroachDBOffsetContext.Loader(config).load(offsetContext.getOffset());
+
+        assertThat(restored.getChangefeedStart("test.testdb.public.orders"))
+                .isEqualTo(new CockroachDBOffsetContext.ChangefeedStart("1700000000000000020.0000000000", true));
+        assertThat(restored.getChangefeedStart("test.testdb.public.items"))
+                .isEqualTo(new CockroachDBOffsetContext.ChangefeedStart("1700000000000000030.0000000000", false));
+        assertThat(restored.getChangefeedStart("test.testdb.public.stock")).isNull();
+    }
+
+    @Test
+    public void shouldForgetTheStartOfAChangefeedOnceTheCursorHasReachedIt() {
+        offsetContext.setChangefeedStart("test.testdb.public.orders", "1700000000000000020.0000000000", true);
+        offsetContext.setChangefeedStart("test.testdb.public.items", "1700000000000000030.0000000000", false);
+
+        offsetContext.removeChangefeedStartsUpTo("1700000000000000019.0000000000");
+        assertThat(offsetContext.getChangefeedStarts()).containsOnlyKeys("test.testdb.public.orders", "test.testdb.public.items");
+
+        // From this cursor on, a changefeed for orders can start at the cursor like the others.
+        offsetContext.removeChangefeedStartsUpTo("1700000000000000020.0000000000");
+        assertThat(offsetContext.getChangefeedStarts()).containsOnlyKeys("test.testdb.public.items");
+        assertThat(offsetContext.getOffset()).doesNotContainKey(CockroachDBOffsetContext.CHANGEFEED_START_PREFIX + "test.testdb.public.orders");
+        assertThat(offsetContext.getOffset().get(CockroachDBOffsetContext.CHANGEFEED_START_PREFIX + "test.testdb.public.items"))
+                .isEqualTo("1700000000000000030.0000000000");
+
+        // A cursor that is not a timestamp says nothing about the starts.
+        offsetContext.removeChangefeedStartsUpTo("initial");
+        offsetContext.removeChangefeedStartsUpTo(null);
+        assertThat(offsetContext.getChangefeedStarts()).containsOnlyKeys("test.testdb.public.items");
+    }
+
+    @Test
+    public void shouldIgnoreAStoredChangefeedStartThatItCannotRead() {
+        Map<String, Object> persisted = new HashMap<>(offsetContext.getOffset());
+        persisted.put(CockroachDBOffsetContext.CHANGEFEED_START_PREFIX + "test.testdb.public.orders", "not a timestamp");
+        persisted.put(CockroachDBOffsetContext.CHANGEFEED_START_PREFIX + "test.testdb.public.items", "1700000000000000030.0000000000;scan");
+
+        CockroachDBOffsetContext restored = new CockroachDBOffsetContext.Loader(config).load(persisted);
+
+        assertThat(restored.getChangefeedStarts()).containsOnlyKeys("test.testdb.public.items");
+        assertThat(restored.getChangefeedStart("test.testdb.public.items").scans()).isTrue();
+    }
+
+    @Test
     public void shouldHandleSnapshotRecord() {
         offsetContext.markSnapshotRecord(SnapshotRecord.TRUE);
 

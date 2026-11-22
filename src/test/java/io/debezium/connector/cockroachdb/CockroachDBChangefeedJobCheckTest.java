@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
@@ -289,6 +290,19 @@ class CockroachDBChangefeedJobCheckTest {
     }
 
     @Test
+    void keepsTheStartOfTheScanThatReplacesAFailedChangefeed() throws Exception {
+        // The stored cursor stays the one that CockroachDB no longer covers until the scan is through. A
+        // changefeed that has to be created again in that time starts with that scan again. A scan as of a
+        // later time would not show the rows that were deleted in between.
+        final ScriptedSource source = new ScriptedSource("when_needed", new long[]{ 1_000_000 }).answer("running", "failed", TOO_OLD);
+
+        source.checkAfter(60_000);
+
+        verify(source.offsets).setChangefeedStart("repro.reprodb.public.orders", CLUSTER_TIMESTAMP, true);
+        verify(source.offsets, never()).setChangefeedStart(eq("repro.reprodb.public.acct"), anyString(), anyBoolean());
+    }
+
+    @Test
     void startsASnapshotPhaseWhenEveryTableIsScannedAgain() throws Exception {
         // One changefeed covers all tables. Its replacement scans all of them, like the scan with which
         // snapshot.mode=when_needed answers a cursor that CockroachDB rejects at the start.
@@ -350,6 +364,19 @@ class CockroachDBChangefeedJobCheckTest {
         verify(source.offsets, never()).markSnapshotRecord(SnapshotRecord.TRUE);
         assertThat(source.extractOperation(ORDERS, MAPPER.readTree("{\"after\":{\"id\":1},\"op\":\"c\"}"))).isEqualTo(Envelope.Operation.CREATE);
         assertThat(source.extractOperation(ACCT, MAPPER.readTree("{\"after\":{\"id\":1},\"op\":\"c\"}"))).isEqualTo(Envelope.Operation.READ);
+    }
+
+    @Test
+    void keepsHowFarTheOtherTablesHaveComeWhenAFailedChangefeedIsReplaced() throws Exception {
+        // The stored cursor is behind the changefeed that failed. A changefeed for the table that is ahead
+        // starts where that table has come to, not at the cursor that CockroachDB no longer covers.
+        final ScriptedSource source = new ScriptedSource("when_needed", new long[]{ 1_000_000 }).answer("running", "failed", TOO_OLD);
+        source.processChangefeedEvent(null, "{\"resolved\":\"1795243610000000000.0000000000\"}", ACCT, source.offsets);
+
+        source.checkAfter(60_000);
+
+        verify(source.offsets).setChangefeedStart("repro.reprodb.public.acct", "1795243610000000000.0000000000", false);
+        verify(source.offsets).setChangefeedStart("repro.reprodb.public.orders", CLUSTER_TIMESTAMP, true);
     }
 
     @Test
