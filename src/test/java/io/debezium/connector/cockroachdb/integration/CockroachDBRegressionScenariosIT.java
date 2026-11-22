@@ -29,10 +29,16 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.errors.ConnectException;
+import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.json.JsonConverter;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.jupiter.api.AfterEach;
@@ -1211,6 +1217,68 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
                 .as("source.schema enables JDBC sink routing via ${source.schema} (debezium/dbz#2432)")
                 .isEqualTo("public");
         assertThat(source.getString("table")).isEqualTo("accounts");
+    }
+
+    @Test
+    public void shouldStopOnAnEventThatItCannotProcess() throws Exception {
+        connection = openDatabase("failed_event_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS failed_event_orders (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO failed_event_orders VALUES (1, 'Alice')");
+        }
+
+        startTask(baseConnectorConfig("failed-event-test", "failed_event_testdb", "public.failed_event_orders"));
+        assertThat(pollForRecords(1, 45)).as("Should stream before the event").isNotEmpty();
+
+        // Something that is not a changefeed event arrives in the intermediate topic.
+        produceToTopic("failed-event-test.failed_event_testdb.public.failed_event_orders", "[2]", "{\"after\": {\"id\": 2,");
+
+        // event.processing.failure.handling.mode is fail by default: the task stops instead of going on
+        // without the event, and a restart could not get past the event either.
+        final PollOutcome outcome = pollUntilRecordsOrError(45);
+        assertThat(outcome.error).as("Task should stop on the event").isInstanceOf(ConnectException.class)
+                .isNotInstanceOf(RetriableException.class);
+        assertThat(messagesOf(outcome.error))
+                .contains("Error processing changefeed event for table failed_event_testdb.public.failed_event_orders");
+    }
+
+    @Test
+    public void shouldGoOnWithoutAnEventThatItCannotProcessWhenToldTo() throws Exception {
+        connection = openDatabase("skipped_event_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS skipped_event_orders (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO skipped_event_orders VALUES (1, 'Alice')");
+        }
+
+        final Map<String, String> config = baseConnectorConfig("skipped-event-test", "skipped_event_testdb", "public.skipped_event_orders");
+        config.put("event.processing.failure.handling.mode", "warn");
+        startTask(config);
+        assertThat(pollForRecords(1, 45)).as("Should stream before the event").isNotEmpty();
+
+        produceToTopic("skipped-event-test.skipped_event_testdb.public.skipped_event_orders", "[2]", "{\"after\": {\"id\": 2,");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO skipped_event_orders VALUES (3, 'Carol')");
+        }
+
+        assertThat(pollForRecords(r -> hasId(r, 3L), 1, 60)).as("Should receive the event after the one that was skipped").isNotEmpty();
+    }
+
+    private static void produceToTopic(String topic, String key, String value) throws Exception {
+        final Properties props = new Properties();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", ""));
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+        try (KafkaProducer<String, String> producer = new KafkaProducer<>(props)) {
+            producer.send(new ProducerRecord<>(topic, key, value)).get(30, TimeUnit.SECONDS);
+        }
+    }
+
+    private static String messagesOf(Throwable failure) {
+        final StringBuilder messages = new StringBuilder();
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            messages.append(cause.getMessage()).append('\n');
+        }
+        return messages.toString();
     }
 
     /** Counts the messages of an intermediate topic whose value contains the given text. */
