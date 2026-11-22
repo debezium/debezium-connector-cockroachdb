@@ -7,6 +7,8 @@ package io.debezium.connector.cockroachdb;
 
 import java.io.IOException;
 import java.sql.SQLException;
+import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 import io.debezium.connector.base.ChangeEventQueue;
@@ -29,10 +31,17 @@ import io.debezium.util.Collect;
  */
 public class CockroachDBErrorHandler extends ErrorHandler {
 
+    /**
+     * Whether the connector starts again with an initial scan when CockroachDB rejects the cursor,
+     * which is what {@code snapshot.mode=when_needed} asks for.
+     */
+    private final boolean scansAgainWhenTheCursorIsRejected;
+
     public CockroachDBErrorHandler(CockroachDBConnectorConfig connectorConfig,
                                    ChangeEventQueue<?> queue,
                                    ErrorHandler replacedErrorHandler) {
         super(CockroachDBConnector.class, connectorConfig, queue, replacedErrorHandler);
+        this.scansAgainWhenTheCursorIsRejected = connectorConfig.getSnapshotMode() == CockroachDBConnectorConfig.SnapshotMode.WHEN_NEEDED;
     }
 
     /**
@@ -49,6 +58,25 @@ public class CockroachDBErrorHandler extends ErrorHandler {
      */
     private static final String INVALID_PASSWORD = "28P01";
 
+    /**
+     * Texts of errors that no retry can fix and that CockroachDB reports without a specific SQLSTATE, like
+     * the errors that a retry can fix: a changefeed option that does not exist, a sink URI parameter that
+     * does not exist, and a sink that does not exist.
+     */
+    private static final List<String> PERMANENT_ERROR_TEXTS = List.of(
+            "invalid option \"",
+            "sink query parameters",
+            "unsupported sink:");
+
+    /**
+     * The text of the error for a changefeed whose cursor, or whose initial scan, is older than the garbage
+     * collection threshold. CockroachDB reports it without a specific SQLSTATE as well. No retry at the
+     * same cursor can fix it. With {@code snapshot.mode=when_needed} it stays retriable: the connector
+     * scans again where it meets the rejection of a cursor, and a restart does the same. An initial scan
+     * that ends with this error stops the task in every snapshot mode, with an error of its own.
+     */
+    private static final String CURSOR_TOO_OLD_TEXT = "must be after replica gc threshold";
+
     @Override
     protected Set<Class<? extends Exception>> communicationExceptions() {
         return Collect.unmodifiableSet(IOException.class, SQLException.class);
@@ -58,17 +86,31 @@ public class CockroachDBErrorHandler extends ErrorHandler {
      * Returns {@code true} if the exception, or any cause in its chain, is an SQL error that no retry
      * can fix.
      */
-    static boolean isPermanentError(Throwable throwable) {
+    boolean isPermanentError(Throwable throwable) {
         for (Throwable cause = throwable; cause != null; cause = cause.getCause()) {
             if (cause instanceof SQLException) {
                 final String sqlState = ((SQLException) cause).getSQLState();
                 if (INVALID_PASSWORD.equals(sqlState)
-                        || sqlState != null && sqlState.length() >= 2 && PERMANENT_SQL_STATE_CLASSES.contains(sqlState.substring(0, 2))) {
+                        || sqlState != null && sqlState.length() >= 2 && PERMANENT_SQL_STATE_CLASSES.contains(sqlState.substring(0, 2))
+                        || hasPermanentErrorText(cause.getMessage())) {
                     return true;
                 }
             }
         }
         return false;
+    }
+
+    private boolean hasPermanentErrorText(String message) {
+        if (message == null) {
+            return false;
+        }
+        final String normalized = message.toLowerCase(Locale.ROOT);
+        return PERMANENT_ERROR_TEXTS.stream().anyMatch(normalized::contains)
+                // A cursor that is older than one of the tables of the changefeed is reported without a specific
+                // SQLSTATE as well. The cursor does not move while the connector cannot start, so no retry can
+                // fix that either.
+                || !scansAgainWhenTheCursorIsRejected
+                        && (normalized.contains(CURSOR_TOO_OLD_TEXT) || CockroachDBStreamingChangeEventSource.isTableNewerThanCursorMessage(message));
     }
 
     /**

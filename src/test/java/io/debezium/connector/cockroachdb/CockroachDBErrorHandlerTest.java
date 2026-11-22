@@ -29,19 +29,24 @@ import io.debezium.pipeline.DataChangeEvent;
  */
 public class CockroachDBErrorHandlerTest {
 
-    private final CockroachDBErrorHandler errorHandler = new CockroachDBErrorHandler(
-            new CockroachDBConnectorConfig(Configuration.create()
-                    .with(CommonConnectorConfig.TOPIC_PREFIX, "test")
-                    .with("database.hostname", "localhost")
-                    .with("database.user", "root")
-                    .with("database.dbname", "testdb")
-                    .build()),
-            new ChangeEventQueue.Builder<DataChangeEvent>()
-                    .queueProvider(createDefaultQueueProvider(DEFAULT_MAX_QUEUE_SIZE))
-                    .pollInterval(Duration.ofMillis(500))
-                    .pollDispatchInterval(Duration.ofMillis(0))
-                    .build(),
-            null);
+    private final CockroachDBErrorHandler errorHandler = errorHandler("initial");
+
+    private static CockroachDBErrorHandler errorHandler(String snapshotMode) {
+        return new CockroachDBErrorHandler(
+                new CockroachDBConnectorConfig(Configuration.create()
+                        .with(CommonConnectorConfig.TOPIC_PREFIX, "test")
+                        .with("database.hostname", "localhost")
+                        .with("database.user", "root")
+                        .with("database.dbname", "testdb")
+                        .with("snapshot.mode", snapshotMode)
+                        .build()),
+                new ChangeEventQueue.Builder<DataChangeEvent>()
+                        .queueProvider(createDefaultQueueProvider(DEFAULT_MAX_QUEUE_SIZE))
+                        .pollInterval(Duration.ofMillis(500))
+                        .pollDispatchInterval(Duration.ofMillis(0))
+                        .build(),
+                null);
+    }
 
     @Test
     void sqlExceptionIsRetriable() {
@@ -87,6 +92,58 @@ public class CockroachDBErrorHandlerTest {
         assertThat(errorHandler.isRetriable(unknownDatabase)).isFalse();
         // The streaming source wraps the error.
         assertThat(errorHandler.isRetriable(new RuntimeException("Failed to stream changes from CockroachDB", missingPrivilege))).isFalse();
+    }
+
+    @Test
+    void errorsWithoutASpecificSqlStateThatNoRetryCanFixAreNotRetriable() {
+        // CockroachDB v25.4.21 and v26.4.1 report these with their uncategorized SQLSTATE, like an unreachable
+        // broker, so only the text tells them apart.
+        final SQLException unknownOption = new SQLException("ERROR: invalid option \"no_such_option\"", "XXUUU");
+        final SQLException unknownSinkParameter = new SQLException("ERROR: unknown kafka sink query parameters: no_such_param", "XXUUU");
+        final SQLException unknownSink = new SQLException("ERROR: unsupported sink: nosuch", "XXUUU");
+        final SQLException cursorTooOld = new SQLException("ERROR: could not create changefeed: cursor 1795332885584348201.0000000000 is "
+                + "older than the GC threshold 1795332894103672556: batch timestamp 1795332885.584348201,0 must be after replica GC "
+                + "threshold 1795332894.103672556,0 (r79: /{Table/106-Max})\n  Hint: use a more recent cursor", "XXUUU");
+
+        // A table that was created after the cursor: the cursor does not move while the connector cannot start.
+        final SQLException tableNewerThanTheCursor = new SQLException("ERROR: failed to resolve targets in the CHANGEFEED stmt: table "
+                + "\"e.public.created_later\" does not exist\n  Hint: do the targets exist at the specified cursor time "
+                + "1795343265.665877422,0?", "XXUUU");
+
+        assertThat(errorHandler.isRetriable(unknownOption)).isFalse();
+        assertThat(errorHandler.isRetriable(unknownSinkParameter)).isFalse();
+        assertThat(errorHandler.isRetriable(unknownSink)).isFalse();
+        assertThat(errorHandler.isRetriable(cursorTooOld)).isFalse();
+        assertThat(errorHandler.isRetriable(tableNewerThanTheCursor)).isFalse();
+        // With snapshot.mode=when_needed the connector scans again when CockroachDB rejects the cursor, so
+        // these two stay retriable.
+        final CockroachDBErrorHandler whenNeeded = errorHandler("when_needed");
+        assertThat(whenNeeded.isRetriable(cursorTooOld)).isTrue();
+        assertThat(whenNeeded.isRetriable(tableNewerThanTheCursor)).isTrue();
+        assertThat(whenNeeded.isRetriable(unknownOption)).isFalse();
+        // The streaming source wraps the error.
+        assertThat(errorHandler.isRetriable(new RuntimeException("Failed to stream changes from CockroachDB", unknownOption))).isFalse();
+        // The driver can leave the SQLSTATE out.
+        assertThat(errorHandler.isRetriable(new SQLException("ERROR: unsupported sink: nosuch"))).isFalse();
+    }
+
+    @Test
+    void otherErrorsWithoutASpecificSqlStateStayRetriable() {
+        // An operator can enable rangefeeds while the connector retries.
+        final SQLException rangefeedsDisabled = new SQLException("ERROR: rangefeeds require the kv.rangefeed.enabled setting. See "
+                + "https://www.cockroachlabs.com/docs/v25.4/create-and-configure-changefeeds.html#enable-rangefeeds", "XXUUU");
+        // A table that was dropped after the connector looked for its tables. The next start finds the tables again.
+        final SQLException tableGone = new SQLException("ERROR: failed to resolve targets in the CHANGEFEED stmt: table \"e.missing\" "
+                + "does not exist", "XXUUU");
+        final SQLException sinkDown = new SQLException("ERROR: kafka: client has run out of available brokers to talk to", "XXUUU");
+        // CockroachDB adds its hint about the cursor to every failure to look the tables up, also to one that passes.
+        final SQLException lookupInterrupted = new SQLException("ERROR: failed to resolve targets in the CHANGEFEED stmt: query execution "
+                + "canceled\n  Hint: do the targets exist at the specified cursor time 1795343265.665877422,0?", "XXUUU");
+
+        assertThat(errorHandler.isRetriable(rangefeedsDisabled)).isTrue();
+        assertThat(errorHandler.isRetriable(tableGone)).isTrue();
+        assertThat(errorHandler.isRetriable(sinkDown)).isTrue();
+        assertThat(errorHandler.isRetriable(lookupInterrupted)).isTrue();
     }
 
     @Test
