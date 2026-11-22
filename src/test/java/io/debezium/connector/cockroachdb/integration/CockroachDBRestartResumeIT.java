@@ -493,12 +493,115 @@ public class CockroachDBRestartResumeIT {
         assertThat(failure).as("the error of the task").isNotNull().contains("CHANGEFEED privilege");
     }
 
+    @Test
+    public void shouldEmitTheChangesThatAStoppedChangefeedHadNotDeliveredYet() throws Exception {
+        String hostBootstrap = kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", "");
+        Map<String, String> config = baseConfig(hostBootstrap);
+        config.put("name", "lowcursor-test");
+        config.put("database.server.name", "lowcursor-test");
+        config.put("topic.prefix", "lowcursor-test");
+        config.put("database.dbname", "lowcursor_testdb");
+        config.put("heartbeat.interval.ms", "1000");
+        config.put("cockroachdb.changefeed.max.tables.per.changefeed", "1");
+        config.put("table.include.list", "public.low_active,public.low_stopped");
+
+        String adminUrl = cockroachdb.getJdbcUrl().replace("/postgres", "/defaultdb");
+        try (Connection db = DriverManager.getConnection(adminUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
+                Statement stmt = db.createStatement()) {
+            stmt.execute("CREATE DATABASE IF NOT EXISTS lowcursor_testdb");
+            // One changefeed for each table. The connector reuses them. Both report a resolved timestamp
+            // every second, which the changefeeds that the connector creates do every 30 seconds.
+            for (String table : List.of("low_active", "low_stopped")) {
+                stmt.execute("CREATE TABLE lowcursor_testdb.public." + table + " (id INT PRIMARY KEY, name STRING)");
+                stmt.execute("CREATE CHANGEFEED FOR TABLE lowcursor_testdb.public." + table + " INTO '"
+                        + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=lowcursor-test.' "
+                        + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source', updated, "
+                        + "initial_scan = 'no', resolved = '1s', min_checkpoint_frequency = '1s'");
+            }
+        }
+        AtomicReference<Map<String, Object>> persistedOffset = new AtomicReference<>(null);
+
+        // --- Run 1: both changefeeds run. ---
+        task1 = new CockroachDBConnectorTask();
+        task1.initialize(contextReturning(persistedOffset));
+        startTask(task1, config);
+        Map<String, String> operations = new HashMap<>();
+        pollOperations(task1, operations, persistedOffset, 120, () -> hasResolvedCursor(persistedOffset.get()));
+        assertThat(hasResolvedCursor(persistedOffset.get())).as("Run 1 should leave an offset with a resolved timestamp").isTrue();
+
+        // --- One changefeed stops. The other one keeps running and keeps sending resolved timestamps. ---
+        BigDecimal changedAt;
+        String stoppedJob;
+        try (Connection db = DriverManager.getConnection(adminUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
+                Statement stmt = db.createStatement()) {
+            try (var rs = stmt.executeQuery("SELECT job_id::STRING FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' "
+                    + "AND description LIKE '%low_stopped%' AND description LIKE '%topic_prefix=lowcursor-test.''%'")) {
+                assertThat(rs.next()).as("changefeed of low_stopped").isTrue();
+                stoppedJob = rs.getString(1);
+            }
+            stmt.execute("PAUSE JOB " + stoppedJob);
+            waitForJobStatus(stmt, stoppedJob, "paused");
+            stmt.execute("INSERT INTO lowcursor_testdb.public.low_stopped VALUES (1, 'while its changefeed was stopped')");
+            try (var rs = stmt.executeQuery("SELECT crdb_internal_mvcc_timestamp::STRING FROM lowcursor_testdb.public.low_stopped WHERE id = 1")) {
+                assertThat(rs.next()).isTrue();
+                changedAt = new BigDecimal(rs.getString(1));
+            }
+            stmt.execute("INSERT INTO lowcursor_testdb.public.low_active VALUES (1, 'while the other changefeed was stopped')");
+        }
+        // The connector keeps running long enough for the running changefeed to report resolved timestamps
+        // that are later than the change.
+        pollOperations(task1, operations, persistedOffset, 60, () -> operations.containsKey("low_active#1"));
+        assertThat(operations).as("the running changefeed still delivers").containsKey("low_active#1");
+        pollOperations(task1, operations, persistedOffset, 12, () -> false);
+        assertThat(operations).as("the stopped changefeed does not deliver").doesNotContainKey("low_stopped#1");
+        task1.stop();
+        task1 = null;
+
+        // The stored cursor is where the next start creates a changefeed for the tables that have none. It
+        // must not be past a change that one of the changefeeds has not delivered.
+        BigDecimal storedCursor = new BigDecimal(String.valueOf(persistedOffset.get().get("offset.cursor")));
+        LOGGER.info("Stored cursor {}, change of the stopped changefeed at {}", storedCursor, changedAt);
+
+        // --- The stopped changefeed is canceled, so the next start replaces it. ---
+        try (Connection db = DriverManager.getConnection(adminUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
+                Statement stmt = db.createStatement()) {
+            stmt.execute("CANCEL JOB " + stoppedJob);
+            // A canceled job can stay in the status reverting for a while. It does not run again from there.
+            waitForJobStatus(stmt, stoppedJob, "reverting", "canceled");
+        }
+
+        // --- Run 2 creates a changefeed for the table that has none, at the stored cursor. ---
+        task2 = new CockroachDBConnectorTask();
+        task2.initialize(contextReturning(persistedOffset));
+        startTask(task2, config);
+        Map<String, String> afterRestart = new HashMap<>();
+        pollOperations(task2, afterRestart, persistedOffset, 60, () -> afterRestart.containsKey("low_stopped#1"));
+        LOGGER.info("Run 2 emitted: {}", afterRestart);
+
+        assertThat(afterRestart).as("the change that the stopped changefeed had not delivered").containsEntry("low_stopped#1", "c, snapshot=false");
+        assertThat(storedCursor).as("stored cursor when one changefeed had stopped").isLessThan(changedAt);
+    }
+
     private static String messagesOf(Throwable failure) {
         StringBuilder messages = new StringBuilder();
         for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
             messages.append(cause.getMessage()).append('\n');
         }
         return messages.toString();
+    }
+
+    private static void waitForJobStatus(Statement stmt, String jobId, String... expected) throws Exception {
+        String status = null;
+        for (int i = 0; i < 120; i++) {
+            try (var rs = stmt.executeQuery("SELECT status FROM [SHOW CHANGEFEED JOB " + jobId + "]")) {
+                status = rs.next() ? rs.getString(1) : null;
+            }
+            if (List.of(expected).contains(status)) {
+                return;
+            }
+            Thread.sleep(500);
+        }
+        throw new AssertionError("Changefeed job " + jobId + " is '" + status + "', expected one of " + List.of(expected));
     }
 
     private static boolean hasResolvedCursor(Map<String, Object> offset) {

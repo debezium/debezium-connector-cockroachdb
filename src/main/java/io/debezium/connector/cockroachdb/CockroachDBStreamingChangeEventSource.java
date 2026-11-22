@@ -146,6 +146,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     private final Map<TableId, BigDecimal> scanTimestamps = new HashMap<>();
 
+    /** The resolved timestamps that the topics of the tables delivered since the changefeeds were last set up. */
+    private ResolvedTimestamps resolvedTimestamps = new ResolvedTimestamps(List.of());
+
     /**
      * The tables whose changefeed started with an initial scan while the connector is in no scan phase,
      * for example a table that was created after the stored cursor. Until the first resolved timestamp of
@@ -353,6 +356,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
         scanTimestamps.clear();
         tablesInScan.clear();
+        resolvedTimestamps = new ResolvedTimestamps(tables);
         reusedCursorsRecorded = false;
         if (config.isSinklessChangefeed()) {
             // A sinkless changefeed is created and streamed in a single executeQuery during
@@ -728,6 +732,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
     }
 
+    /** Returns {@code true} if both cursors are decimal timestamps and the first one is the earlier one. */
+    private static boolean isEarlierThan(String cursor, String other) {
+        final BigDecimal first = parseDecimalTimestamp(cursor);
+        final BigDecimal second = parseDecimalTimestamp(other);
+        return first != null && second != null && first.compareTo(second) < 0;
+    }
+
     private static boolean isTimestampCursor(String cursor) {
         return cursor != null && !cursor.trim().isEmpty()
                 && !CockroachDBOffsetContext.CURSOR_INITIAL.equals(cursor)
@@ -909,6 +920,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     recordCursorsOfRunningJobs(jobs, topicPrefix, allIncludedTables);
                     reusedCursorsRecorded = true;
                     reportJobsWithoutUpdated(runningJobsWithout(jobs, topicPrefix, "updated"));
+                    reportJobsWithoutResolved(runningJobsWithout(jobs, topicPrefix, "resolved"));
                 }
                 changefeedJobIds.add(Long.parseLong(jobId));
                 return true;
@@ -932,6 +944,23 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 + "delivers more than once. A changefeed that the connector creates has the option. To add it to an existing "
                 + "changefeed, run PAUSE JOB <job_id>, wait until SHOW CHANGEFEED JOB <job_id> reports the status 'paused', and "
                 + "run ALTER CHANGEFEED <job_id> SET updated and RESUME JOB <job_id>.", String.join(", ", jobIds));
+    }
+
+    /**
+     * Names the reused changefeeds that were created without the {@code resolved} option. The stored
+     * cursor is the resolved timestamp that all changefeeds have reached (see
+     * {@link ResolvedTimestamps}), so it stays where it is for as long as one of them reports none.
+     */
+    private void reportJobsWithoutResolved(List<String> jobIds) {
+        if (jobIds.isEmpty() || isInitialOnly()) {
+            return;
+        }
+        LOGGER.warn("Reusing changefeed job(s) {}, created without the resolved option. Such a changefeed reports no resolved "
+                + "timestamps, so the connector does not know how far it has come, and the cursor in the connector's offsets "
+                + "does not advance. A changefeed that the connector creates has the option. To add it to an existing "
+                + "changefeed, run PAUSE JOB <job_id>, wait until SHOW CHANGEFEED JOB <job_id> reports the status 'paused', and "
+                + "run ALTER CHANGEFEED <job_id> SET resolved = '{}' and RESUME JOB <job_id>.",
+                String.join(", ", jobIds), config.getChangefeedResolvedInterval());
     }
 
     /**
@@ -1343,11 +1372,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
-     * Returns {@code true} if a {@code SHOW CHANGEFEED JOBS} description lists the given valueless
-     * option (for example {@code diff} or {@code mvcc_timestamp}) inside {@code WITH OPTIONS (...)}.
+     * Returns {@code true} if a {@code SHOW CHANGEFEED JOBS} description lists the given option inside
+     * {@code WITH OPTIONS (...)}, by its name alone (for example {@code diff} or {@code mvcc_timestamp})
+     * or with a value (for example {@code resolved = '10s'}).
      */
     static boolean changefeedHasOption(String description, String optionName) {
-        return changefeedOptions(description).stream().anyMatch(option -> optionName.equals(option.trim()));
+        return changefeedOptions(description).stream().anyMatch(option -> optionName.equals(option.split("=", 2)[0].trim()));
     }
 
     /**
@@ -1870,10 +1900,21 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 // The scan of a table whose changefeed started with one has ended as well.
                 tablesInScan.remove(table);
 
-                // Update offset with the resolved timestamp so offsets advance
-                offsetContext.setCursor(resolvedTs);
+                // Update offset with the resolved timestamp so offsets advance. With more than one
+                // changefeed, that is the timestamp that all of them have reached.
+                final String cursor = config.isSinklessChangefeed() ? resolvedTs : resolvedTimestamps.advance(table, resolvedTs);
+                if (cursor == null) {
+                    LOGGER.debug("Received resolved timestamp: {}. The cursor advances once every table has delivered one", resolvedTs);
+                }
+                else if (isEarlierThan(cursor, offsetContext.getCursor())) {
+                    // After a restart the topics can still hold resolved timestamps from before the stored cursor.
+                    LOGGER.debug("Received resolved timestamp: {}. The stored cursor {} is later and stays", resolvedTs, offsetContext.getCursor());
+                }
+                else {
+                    offsetContext.setCursor(cursor);
+                    LOGGER.debug("Received resolved timestamp: {}, cursor advanced to {}", resolvedTs, cursor);
+                }
                 offsetContext.setTimestamp(parseResolvedTimestamp(resolvedTs));
-                LOGGER.debug("Received resolved timestamp: {}, offset advanced", resolvedTs);
 
                 // Dispatch heartbeat to commit the advanced offset
                 dispatcher.dispatchHeartbeatEventAlsoToIncrementalSnapshot(currentPartition, offsetContext);

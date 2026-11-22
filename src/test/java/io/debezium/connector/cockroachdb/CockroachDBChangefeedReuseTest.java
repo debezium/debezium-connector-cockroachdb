@@ -407,6 +407,23 @@ public class CockroachDBChangefeedReuseTest {
     }
 
     @Test
+    void doesNotMoveTheStoredCursorBackwards() throws Exception {
+        // After a restart, the topics still hold resolved timestamps from before the cursor was stored: the
+        // connector reads the partitions of a topic at different speeds. The stored cursor stays valid.
+        final String stored = "1795243650000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored);
+        final CockroachDBStreamingChangeEventSource source = source(Map.of(), dispatcher());
+        source.createChangefeeds(connectionFor(cluster), List.of(ACCT), offsets, true);
+
+        source.processChangefeedEvent(null, "{\"resolved\":\"1795243640000000000.0000000000\"}", ACCT, offsets);
+        verify(offsets, never()).setCursor(anyString());
+
+        source.processChangefeedEvent(null, "{\"resolved\":\"1795243660000000000.0000000000\"}", ACCT, offsets);
+        verify(offsets).setCursor("1795243660000000000.0000000000");
+    }
+
+    @Test
     void doesNotTakeATableThatTheUserCouldNotSeeForOneThatDidNotExist() throws Exception {
         // The catalog as of the cursor lists the tables that the user could see then. In a database without
         // CONNECT for public, that leaves out a table on which the user had no privilege yet. A lookup by name
@@ -766,6 +783,32 @@ public class CockroachDBChangefeedReuseTest {
                     .satisfies(event -> assertThat(event.getFormattedMessage())
                             .contains("1012, 1013", "ALTER CHANGEFEED <job_id> SET updated")
                             .doesNotContain("1014"));
+        }
+        finally {
+            sourceLogger.detachAppender(log);
+        }
+    }
+
+    @Test
+    void namesEveryReusedChangefeedThatLacksTheResolvedOption() throws Exception {
+        // The stored cursor is the resolved timestamp that all changefeeds have reached. A changefeed that
+        // reports none keeps it where it is, so the connector names the jobs and the way to add the option.
+        final String withoutResolved = "CREATE CHANGEFEED FOR TABLE reprodb.public.orders INTO 'kafka://kafka:9092?topic_prefix=repro.' "
+                + "WITH OPTIONS (enriched_properties = 'source', envelope = 'enriched', full_table_name, updated)";
+        final Logger sourceLogger = (Logger) LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
+        final ListAppender<ILoggingEvent> log = new ListAppender<>();
+        log.start();
+        sourceLogger.addAppender(log);
+        try {
+            assertThat(source(Map.of("cockroachdb.changefeed.resolved.interval", "5s")).changefeedExists(connectionListingJobs(
+                    new String[]{ "1023", "running", scanning("acct", "1.0000000000") },
+                    new String[]{ "1024", "running", withoutResolved }), ACCT, List.of(ACCT, ORDERS))).isTrue();
+
+            assertThat(log.list).filteredOn(event -> event.getFormattedMessage().contains("without the resolved option"))
+                    .singleElement()
+                    .satisfies(event -> assertThat(event.getFormattedMessage())
+                            .contains("job(s) 1024,", "ALTER CHANGEFEED <job_id> SET resolved = '5s'")
+                            .doesNotContain("1023"));
         }
         finally {
             sourceLogger.detachAppender(log);
