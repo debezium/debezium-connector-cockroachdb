@@ -141,9 +141,8 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     + "'always': The connector creates a changefeed with initial_scan='yes' every time it starts, backfilling all existing rows before streaming.; "
                     + "'initial' (default): On first start (no prior offset), the changefeed is created with initial_scan='yes'. On restart with an existing offset, it resumes streaming with cursor=<offset>.; "
                     + "'initial_only': The changefeed is created with initial_scan='only'. All existing rows are backfilled, then the connector stops. "
-                    + "CockroachDB does not allow updated or diff together with initial_scan='only', so "
-                    + "cockroachdb.changefeed.include.updated and cockroachdb.changefeed.include.diff "
-                    + "are ignored in this mode. After a completed run, a restart does not scan again. "
+                    + "CockroachDB does not allow diff together with initial_scan='only', so "
+                    + "cockroachdb.changefeed.include.diff is ignored in this mode. After a completed run, a restart does not scan again. "
                     + "When every captured table is empty, that requires heartbeats (heartbeat.interval.ms), because no record carries the "
                     + "completed snapshot otherwise.; "
                     + "'no_data'/'never': The changefeed is created with initial_scan='no'. Only ongoing changes are streamed.; "
@@ -244,7 +243,10 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     + "from JDBC table discovery and identifies each event's table from the topic it arrives on, so it "
                     + "does not read the 'schema' block; any value beyond 'source' is passed through for other consumers "
                     + "but is not used by the connector. The connector reads the timestamp of the 'updated' option from "
-                    + "the 'source' block to tell rows of an initial scan from rows that are inserted afterwards.");
+                    + "the 'source' block to tell rows of an initial scan from rows that are inserted afterwards and to "
+                    + "recognize events that CockroachDB delivers more than once. The value must include 'source' for a "
+                    + "sinkless changefeed, where the connector also reads the table of each event from that block.")
+            .withValidation(CockroachDBConnectorConfig::validateEnrichedProperties);
 
     public static final Field CHANGEFEED_CURSOR = Field.create("cockroachdb.changefeed.cursor")
             .withDisplayName("Changefeed cursor")
@@ -985,6 +987,28 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
         return CONFIG_DEFINITION.configDef();
     }
 
+    /**
+     * The connector reads the {@code source} block of the changefeed events. A sinkless changefeed sends
+     * the events of all tables in one stream, and their table is in that block.
+     */
+    private static int validateEnrichedProperties(Configuration config, Field field, Field.ValidationOutput problems) {
+        final String value = config.getString(field);
+        if (hasSourceProperty(value)) {
+            return 0;
+        }
+        if ("sinkless".equals(config.getString(CHANGEFEED_SINK_TYPE))) {
+            problems.accept(field, value, "Must include 'source' for a sinkless changefeed: the connector reads the table of "
+                    + "each event from the source block.");
+            return 1;
+        }
+        return 0;
+    }
+
+    private static boolean hasSourceProperty(String enrichedProperties) {
+        return enrichedProperties != null
+                && Arrays.stream(enrichedProperties.split(",")).anyMatch(property -> "source".equals(property.trim()));
+    }
+
     private static int validateChangefeedSinkType(Configuration config, Field field, Field.ValidationOutput problems) {
         String value = config.getString(field);
         if (value != null && !value.equals("kafka") && !value.equals("sinkless")) {
@@ -1125,6 +1149,11 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public String getChangefeedEnrichedProperties() {
         return config.getString(CHANGEFEED_ENRICHED_PROPERTIES);
+    }
+
+    /** Returns {@code true} if the changefeed events carry the {@code source} block. */
+    public boolean hasEnrichedSourceProperty() {
+        return hasSourceProperty(getChangefeedEnrichedProperties());
     }
 
     public String getChangefeedCursor() {

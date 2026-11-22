@@ -140,6 +140,10 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     private static final Set<String> UNDEFINED_TABLE = Set.of("42P01", "3F000", "3D000");
 
+    /** Goes with the advice to add the source block to a changefeed: the statement must not take another block away. */
+    private static final String KEEP_ENRICHED_PROPERTIES = "ALTER CHANGEFEED replaces the value of enriched_properties, so name the "
+            + "properties that the changefeed sends already together with source, for example enriched_properties = 'schema,source'.";
+
     /**
      * The cursor of the changefeed that covers a table, for the changefeeds whose cursor is known. An
      * initial scan reads the tables as of the cursor (see {@link #isScanRow}).
@@ -364,6 +368,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             initialScanInProgress = isInitialScan(config.getInitialScanForSnapshotMode(hasPriorOffset));
             checkThatSinklessTablesExistedAt(connection, tables, offsetContext.getCursor(), hasPriorOffset);
             return;
+        }
+
+        if (!config.hasEnrichedSourceProperty()) {
+            LOGGER.warn("cockroachdb.changefeed.enriched.properties is '{}', without 'source'. The changefeed events then "
+                    + "have no source block, which is where the connector reads the timestamp of an event. Without it the "
+                    + "connector cannot tell the rows of an initial scan from the rows that are inserted during the scan, "
+                    + "and it cannot recognize an event that CockroachDB delivers more than once.",
+                    config.getChangefeedEnrichedProperties());
         }
 
         changefeedJobIds.clear();
@@ -912,6 +924,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     recordCursorsOfRunningJobs(jobs, topicPrefix, allIncludedTables);
                     reusedCursorsRecorded = true;
                     reportJobsWithoutUpdated(runningJobsWithout(jobs, topicPrefix, "updated"));
+                    reportJobsWithoutSourceBlock(runningJobsWithoutSourceBlock(jobs, topicPrefix));
                     reportJobsWithoutResolved(runningJobsWithout(jobs, topicPrefix, "resolved"));
                 }
                 changefeedJobIds.add(Long.parseLong(jobId));
@@ -959,6 +972,25 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 + "delivers more than once. A changefeed that the connector creates has the option. To add it to an existing "
                 + "changefeed, run PAUSE JOB <job_id>, wait until SHOW CHANGEFEED JOB <job_id> reports the status 'paused', and "
                 + "run ALTER CHANGEFEED <job_id> SET updated and RESUME JOB <job_id>.", String.join(", ", jobIds));
+    }
+
+    /**
+     * Names the reused changefeeds whose events have no source block, and says how to add it. The
+     * timestamp that the {@code updated} option adds to an event is in that block, so without it the
+     * connector is as limited as without the option (see {@link #reportJobsWithoutUpdated}).
+     */
+    private void reportJobsWithoutSourceBlock(List<String> jobIds) {
+        if (jobIds.isEmpty() || isInitialOnly()) {
+            return;
+        }
+        LOGGER.info("Reusing changefeed job(s) {}, whose enriched_properties option does not include source. Their events "
+                + "have no source block, which carries the timestamp of an event, so the connector cannot recognize the rows "
+                + "of an initial scan by their timestamp, and it cannot recognize an event that CockroachDB delivers more than "
+                + "once. A changefeed that the connector creates sends the block unless "
+                + "cockroachdb.changefeed.enriched.properties leaves it out. To add it to an existing changefeed, run "
+                + "PAUSE JOB <job_id>, wait until SHOW CHANGEFEED JOB <job_id> reports the status 'paused', and run "
+                + "ALTER CHANGEFEED <job_id> SET enriched_properties = 'source' and RESUME JOB <job_id>. " + KEEP_ENRICHED_PROPERTIES,
+                String.join(", ", jobIds));
     }
 
     /**
@@ -1055,6 +1087,19 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         return jobs.stream()
                 .filter(job -> "running".equals(job.status()) && descriptionHasTopicPrefix(job.description(), topicPrefix)
                         && changefeedUsesEnrichedEnvelope(job.description()) && !changefeedHasOption(job.description(), option))
+                .map(Job::jobId)
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Returns the ids of the running changefeed jobs with this connector's topic prefix and the
+     * enriched envelope whose events have no source block.
+     */
+    private static List<String> runningJobsWithoutSourceBlock(List<Job> jobs, String topicPrefix) {
+        return jobs.stream()
+                .filter(job -> "running".equals(job.status()) && descriptionHasTopicPrefix(job.description(), topicPrefix)
+                        && changefeedUsesEnrichedEnvelope(job.description()) && !changefeedSendsSourceBlock(job.description()))
                 .map(Job::jobId)
                 .distinct()
                 .collect(Collectors.toList());
@@ -1392,6 +1437,21 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * came from kafka (see {@link #completeInitialOnlySnapshot}).
      */
     private record PendingChangefeedEvent(String keyJson, String valueJson, TableId table, String consumerOffsetKey, long consumerOffset) {
+    }
+
+    /**
+     * Returns {@code true} if the {@code enriched_properties} option in a {@code SHOW CHANGEFEED JOBS}
+     * description includes {@code source}. Only then do the events of the changefeed carry the source
+     * block.
+     */
+    static boolean changefeedSendsSourceBlock(String description) {
+        for (String option : changefeedOptions(description)) {
+            final String[] nameAndValue = option.split("=", 2);
+            if (nameAndValue.length == 2 && "enriched_properties".equals(nameAndValue[0].trim())) {
+                return Arrays.stream(nameAndValue[1].replace("'", "").split(",")).anyMatch(property -> "source".equals(property.trim()));
+            }
+        }
+        return false;
     }
 
     static boolean changefeedUsesEnrichedEnvelope(String description) {
@@ -2210,10 +2270,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         // event by it to drop events that CockroachDB delivers more than once (see createEventId).
         if (!isInitialOnly()) {
             options.add("updated");
-        }
-        else if (config.isChangefeedIncludeUpdated()) {
-            LOGGER.warn("Ignoring cockroachdb.changefeed.include.updated because snapshot.mode=initial_only maps to "
-                    + "initial_scan='only', which CockroachDB does not allow together with updated.");
         }
         if (isDiffRequested()) {
             options.add("diff");
