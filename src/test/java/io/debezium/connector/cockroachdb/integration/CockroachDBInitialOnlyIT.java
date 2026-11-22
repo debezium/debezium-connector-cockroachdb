@@ -185,6 +185,51 @@ public class CockroachDBInitialOnlyIT {
         verifyInitialOnlyLifecycle(config, table);
     }
 
+    @Test
+    public void shouldEndWhenATableWasCreatedAfterTheConfiguredCursor() throws Exception {
+        // With cockroachdb.changefeed.cursor the scan reads the tables as of that time. CockroachDB rejects the
+        // cursor for a table that was created after it, so the connector scans such a table as of the current
+        // time. Its changefeed has to end with the scan like the other one, or the run never ends.
+        final String cursor;
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE cursor_old (id INT PRIMARY KEY, name STRING)");
+            stmt.execute("INSERT INTO cursor_old VALUES (1, 'old-1'), (2, 'old-2')");
+            try (ResultSet rs = stmt.executeQuery("SELECT cluster_logical_timestamp()::STRING")) {
+                assertThat(rs.next()).isTrue();
+                cursor = rs.getString(1);
+            }
+            stmt.execute("CREATE TABLE cursor_new (id INT PRIMARY KEY, name STRING)");
+            stmt.execute("INSERT INTO cursor_new VALUES (1, 'new-1'), (2, 'new-2')");
+        }
+        Map<String, String> config = kafkaInitialOnlyConfig("initial-only-cursor", "cursor_old");
+        config.put("table.include.list", "public.cursor_old,public.cursor_new");
+        config.put("cockroachdb.changefeed.cursor", cursor);
+
+        CockroachDBConnectorTask task = startTask(config, null);
+        List<String> rows = new ArrayList<>();
+        boolean completed = false;
+        long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(120);
+        while (System.currentTimeMillis() < deadline && !completed) {
+            List<SourceRecord> polled = task.poll();
+            if (polled == null || polled.isEmpty()) {
+                Thread.sleep(200);
+                continue;
+            }
+            for (SourceRecord r : polled) {
+                if (op(r) != null) {
+                    assertThat(op(r)).as("initial_only rows are snapshot reads").isEqualTo("r");
+                    rows.add(r.topic().substring(r.topic().lastIndexOf('.') + 1) + "#" + id(r));
+                    completed |= "last".equals(snapshot(r));
+                }
+            }
+        }
+
+        assertThat(rows).as("the rows of both tables").containsExactlyInAnyOrder("cursor_old#1", "cursor_old#2", "cursor_new#1", "cursor_new#2");
+        assertThat(completed).as("the run ended: the last record carries the completed snapshot").isTrue();
+        assertThat(jobStatuses(connection, "cursor_new")).as("the changefeed of the table that was created later").containsExactly("succeeded");
+        assertThat(jobStatuses(connection, "cursor_old")).as("the changefeed of the other table").containsExactly("succeeded");
+    }
+
     /**
      * When the job status query keeps failing, the task fails and the runtime restarts it. The restarted
      * task must reuse the job that is still scanning and wait for it, without another changefeed and
