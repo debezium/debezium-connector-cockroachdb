@@ -23,6 +23,8 @@ import java.util.function.BooleanSupplier;
 
 import org.apache.kafka.common.metrics.PluginMetrics;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.errors.ConnectException;
+import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTaskContext;
 import org.apache.kafka.connect.storage.OffsetStorageReader;
@@ -63,6 +65,8 @@ public class CockroachDBSinklessIT {
 
     private Connection connection;
     private CockroachDBConnectorTask task;
+    /** The offset that the task finds when it starts. A test that restarts the connector sets it. */
+    private final AtomicReference<Map<String, Object>> storedOffset = new AtomicReference<>(null);
 
     @BeforeEach
     public void setUp() throws Exception {
@@ -184,6 +188,53 @@ public class CockroachDBSinklessIT {
         final Struct value = (Struct) inserted.value();
         assertThat(value.getString("op")).as("A row inserted after the scan is a create").isEqualTo("c");
         assertThat(value.getStruct("source").getString("snapshot")).as("A create is not a snapshot record").isIn(null, "false");
+    }
+
+    @Test
+    public void shouldStopWhenATableWasCreatedAfterTheStoredCursor() throws Exception {
+        Map<String, String> config = sinklessConfig();
+        config.put("heartbeat.interval.ms", "1000");
+        // A table of its own: the tests of this class share the database.
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE sinkless_before_restart (id INT PRIMARY KEY, name STRING)");
+            stmt.execute("INSERT INTO sinkless_before_restart VALUES (1, 'Alice')");
+        }
+
+        // --- Run 1 stores a resolved timestamp. ---
+        startTask(config);
+        List<SourceRecord> firstRun = new ArrayList<>();
+        pollUntil(firstRun, 120, () -> countOp(firstRun, "r") >= 1 && hasResolvedCursor(firstRun));
+        assertThat(hasResolvedCursor(firstRun)).as("Run 1 should leave an offset with a resolved timestamp").isTrue();
+        storedOffset.set(new HashMap<>(firstRun.get(firstRun.size() - 1).sourceOffset()));
+        task.stop();
+
+        // --- A table is created while the connector is stopped. The connector captures every table. ---
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE sinkless_created_later (id INT PRIMARY KEY, name STRING)");
+        }
+
+        // --- Run 2: CockroachDB rejects the stored cursor for the new table, and for a sinkless changefeed
+        // that means for the one statement that covers all tables. No retry can fix that. ---
+        task = new CockroachDBConnectorTask();
+        task.initialize(createMockContext());
+        task.start(config);
+        Throwable failure = null;
+        for (int i = 0; i < 60 && failure == null; i++) {
+            try {
+                task.poll();
+                Thread.sleep(1000);
+            }
+            catch (ConnectException e) {
+                failure = e;
+            }
+        }
+        assertThat(failure).as("Task should stop").isInstanceOf(ConnectException.class).isNotInstanceOf(RetriableException.class);
+        assertThat(failure.getCause()).hasMessageContaining("sinkless_created_later] did not exist at the stored cursor");
+    }
+
+    private static boolean hasResolvedCursor(List<SourceRecord> records) {
+        return !records.isEmpty()
+                && String.valueOf(records.get(records.size() - 1).sourceOffset().get("offset.cursor")).matches("\\d+\\.\\d+");
     }
 
     @Test
@@ -338,13 +389,17 @@ public class CockroachDBSinklessIT {
                 return new OffsetStorageReader() {
                     @Override
                     public <T> Map<String, Object> offset(Map<String, T> partition) {
-                        return null;
+                        return storedOffset.get();
                     }
 
                     @Override
                     public <T> Map<Map<String, T>, Map<String, Object>> offsets(
                                                                                 Collection<Map<String, T>> partitions) {
-                        return new HashMap<>();
+                        Map<Map<String, T>, Map<String, Object>> result = new HashMap<>();
+                        if (storedOffset.get() != null) {
+                            partitions.forEach(partition -> result.put(partition, storedOffset.get()));
+                        }
+                        return result;
                     }
                 };
             }
