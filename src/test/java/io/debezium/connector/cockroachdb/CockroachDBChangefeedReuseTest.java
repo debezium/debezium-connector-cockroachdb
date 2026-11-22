@@ -17,6 +17,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
@@ -180,6 +181,44 @@ public class CockroachDBChangefeedReuseTest {
     }
 
     @Test
+    void doesNotTakeAChangefeedWithALongerTopicPrefixForItsOwn() throws Exception {
+        // Another connector with the topic prefix "repro.v2" captures the same table. Its sink URI contains
+        // "topic_prefix=repro.", the text that this connector looks for, as the start of "topic_prefix=repro.v2.".
+        final String other = "CREATE CHANGEFEED FOR TABLE reprodb.public.acct INTO 'kafka://kafka:9092?topic_prefix=repro.v2.' "
+                + "WITH OPTIONS (cursor = '9.0000000000', enriched_properties = 'source', envelope = 'enriched', full_table_name, "
+                + "initial_scan = 'yes', resolved = '3s', updated)";
+        CockroachDBStreamingChangeEventSource source = source(Map.of());
+
+        assertThat(source.changefeedExists(connectionListing("1015", "running", other), ACCT, List.of(ACCT))).isFalse();
+
+        // Next to the connector's own changefeed, the other one must not lend its cursor either.
+        assertThat(source.changefeedExists(connectionListingJobs(
+                new String[]{ "1016", "running", scanning("acct", "1.0000000000") },
+                new String[]{ "1015", "running", other }), ACCT, List.of(ACCT))).isTrue();
+        assertThat(source.scanTimestamp(ACCT)).isEqualByComparingTo("1");
+    }
+
+    @Test
+    void recognizesItsTopicPrefixAmongOtherSinkParameters() {
+        assertThat(CockroachDBStreamingChangeEventSource.descriptionHasTopicPrefix(
+                "CREATE CHANGEFEED FOR TABLE d.public.t INTO 'kafka://kafka:9092?topic_prefix=repro.' WITH OPTIONS (updated)", "repro.")).isTrue();
+        assertThat(CockroachDBStreamingChangeEventSource.descriptionHasTopicPrefix(
+                "CREATE CHANGEFEED FOR TABLE d.public.t INTO 'kafka://kafka:9092?tls_enabled=true&topic_prefix=repro.&ca_cert=redacted' WITH OPTIONS (updated)",
+                "repro.")).isTrue();
+        assertThat(CockroachDBStreamingChangeEventSource.descriptionHasTopicPrefix(
+                "CREATE CHANGEFEED FOR TABLE d.public.t INTO 'kafka://kafka:9092?topic_prefix=repro.v2.' WITH OPTIONS (updated)", "repro.")).isFalse();
+        assertThat(CockroachDBStreamingChangeEventSource.descriptionHasTopicPrefix(
+                "CREATE CHANGEFEED FOR TABLE d.public.t INTO 'kafka://kafka:9092?topic_prefix=repro.v2.&tls_enabled=true' WITH OPTIONS (updated)",
+                "repro.")).isFalse();
+        // A prefix without a trailing separator, as cockroachdb.changefeed.sink.topic.prefix allows.
+        assertThat(CockroachDBStreamingChangeEventSource.descriptionHasTopicPrefix(
+                "CREATE CHANGEFEED FOR TABLE d.public.t INTO 'kafka://kafka:9092?topic_prefix=env-prod-' WITH OPTIONS (updated)", "env-prod-")).isTrue();
+        assertThat(CockroachDBStreamingChangeEventSource.descriptionHasTopicPrefix(
+                "CREATE CHANGEFEED FOR TABLE d.public.t INTO 'kafka://kafka:9092?topic_prefix=env-prod-2-' WITH OPTIONS (updated)", "env-prod-")).isFalse();
+        assertThat(CockroachDBStreamingChangeEventSource.descriptionHasTopicPrefix(null, "repro.")).isFalse();
+    }
+
+    @Test
     void namesEveryReusedChangefeedThatLacksTheUpdatedOption() throws Exception {
         // A changefeed that an earlier version of the connector created has no updated option unless
         // cockroachdb.changefeed.include.updated was enabled. The notice names the jobs and the way to add it.
@@ -220,7 +259,13 @@ public class CockroachDBChangefeedReuseTest {
     }
 
     private static CockroachDBStreamingChangeEventSource defaultSource() {
-        return new CockroachDBStreamingChangeEventSource(new CockroachDBConnectorConfig(baseConfig().build()), null, null, null, null);
+        return source(Map.of());
+    }
+
+    private static CockroachDBStreamingChangeEventSource source(Map<String, String> settings) {
+        Configuration.Builder config = baseConfig();
+        settings.forEach((key, value) -> config.with(key, value));
+        return new CockroachDBStreamingChangeEventSource(new CockroachDBConnectorConfig(config.build()), null, null, null, null);
     }
 
     private static Configuration.Builder baseConfig() {

@@ -705,6 +705,31 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
     }
 
     @Test
+    public void shouldCreateItsOwnChangefeedNextToOneWithALongerTopicPrefix() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("nested-prefix-test", "nested_prefix_testdb", "public.nested_prefix_events");
+        connection = openDatabase("nested_prefix_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS nested_prefix_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO nested_prefix_events VALUES (1, 'Alice')");
+            // The changefeed of another connector on the same table. Its topic prefix starts with the
+            // prefix of this connector, so its sink URI contains "topic_prefix=nested-prefix-test.".
+            stmt.execute("CREATE CHANGEFEED FOR TABLE nested_prefix_testdb.public.nested_prefix_events INTO '"
+                    + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=nested-prefix-test.v2.' "
+                    + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source,schema', updated, resolved = '2s'");
+        }
+
+        startTask(config);
+
+        assertThat(pollForRecords(1, 45)).as("Should receive the scan row from the connector's own changefeed").isNotEmpty();
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery("SELECT count(*) FROM [SHOW CHANGEFEED JOBS] "
+                        + "WHERE status = 'running' AND description LIKE '%topic_prefix=nested-prefix-test.''%'")) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getInt(1)).as("The connector should have created a changefeed with its own topic prefix").isEqualTo(1);
+        }
+    }
+
+    @Test
     public void shouldCreateChangefeedsWhenTheSessionDefaultsToReadCommitted() throws Exception {
         connection = openDatabase("read_committed_testdb");
         try (Statement stmt = connection.createStatement()) {
