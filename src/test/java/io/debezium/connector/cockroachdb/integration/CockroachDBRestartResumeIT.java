@@ -6,10 +6,12 @@
 package io.debezium.connector.cockroachdb.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Collection;
 import java.util.HashMap;
@@ -27,6 +29,7 @@ import java.util.regex.Pattern;
 import org.apache.kafka.common.metrics.PluginMetrics;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
+import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTaskContext;
 import org.apache.kafka.connect.storage.OffsetStorageReader;
@@ -579,6 +582,126 @@ public class CockroachDBRestartResumeIT {
 
         assertThat(afterRestart).as("the change that the stopped changefeed had not delivered").containsEntry("low_stopped#1", "c, snapshot=false");
         assertThat(storedCursor).as("stored cursor when one changefeed had stopped").isLessThan(changedAt);
+    }
+
+    @Test
+    public void shouldStopWhenCockroachDbNoLongerHasTheChangesSinceTheStoredCursor() throws Exception {
+        Map<String, String> config = expiredCursorConfig("expired-cursor-test", "expired_cursor_testdb", "initial");
+        AtomicReference<Map<String, Object>> persistedOffset = runUntilTheStoredCursorExpires(config, "expired_cursor_testdb");
+
+        task2 = new CockroachDBConnectorTask();
+        task2.initialize(contextReturning(persistedOffset));
+        startTask(task2, config);
+
+        // CockroachDB accepts a changefeed into a sink at such a cursor and fails its job afterwards. Without a
+        // look at the job nothing would arrive, and nothing would say so.
+        assertThatThrownBy(() -> pollOperations(task2, new HashMap<>(), persistedOffset, 90, () -> false))
+                .isInstanceOf(ConnectException.class)
+                .isNotInstanceOf(RetriableException.class)
+                .satisfies(failure -> assertThat(messagesOf(failure)).contains("GC threshold", "when_needed"));
+    }
+
+    @Test
+    public void shouldScanAgainWhenTheStoredCursorExpiredAndTheSnapshotModeAllowsIt() throws Exception {
+        Map<String, String> config = expiredCursorConfig("expired-rescan-test", "expired_rescan_testdb", "when_needed");
+        AtomicReference<Map<String, Object>> persistedOffset = runUntilTheStoredCursorExpires(config, "expired_rescan_testdb");
+
+        task2 = new CockroachDBConnectorTask();
+        task2.initialize(contextReturning(persistedOffset));
+        startTask(task2, config);
+
+        Map<String, String> operations = new HashMap<>();
+        pollOperations(task2, operations, persistedOffset, 90, () -> operations.containsKey("expired_orders#2"));
+        LOGGER.info("Run 2 emitted: {}", operations);
+        assertThat(operations).as("row that is in the table now").containsEntry("expired_orders#2", "r, snapshot=true");
+    }
+
+    private Map<String, String> expiredCursorConfig(String name, String database, String snapshotMode) {
+        Map<String, String> config = baseConfig(kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", ""));
+        config.put("name", name);
+        config.put("database.server.name", name);
+        config.put("topic.prefix", name);
+        config.put("database.dbname", database);
+        config.put("snapshot.mode", snapshotMode);
+        config.put("heartbeat.interval.ms", "1000");
+        config.put("table.include.list", "public.expired_orders");
+        return config;
+    }
+
+    /**
+     * Runs the connector until it has stored a resolved timestamp, stops it, and lets the garbage collection
+     * of CockroachDB pass that timestamp. A running changefeed protects its changes from the garbage
+     * collection, so the changefeed of the run is canceled first.
+     */
+    private AtomicReference<Map<String, Object>> runUntilTheStoredCursorExpires(Map<String, String> config, String database) throws Exception {
+        String adminUrl = cockroachdb.getJdbcUrl().replace("/postgres", "/defaultdb");
+        String table = database + ".public.expired_orders";
+        try (Connection db = DriverManager.getConnection(adminUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
+                Statement stmt = db.createStatement()) {
+            stmt.execute("CREATE DATABASE IF NOT EXISTS " + database);
+            stmt.execute("CREATE TABLE " + table + " (id INT PRIMARY KEY, name STRING)");
+            stmt.execute("INSERT INTO " + table + " VALUES (1, 'before the first run')");
+        }
+        AtomicReference<Map<String, Object>> persistedOffset = new AtomicReference<>(null);
+
+        task1 = new CockroachDBConnectorTask();
+        task1.initialize(contextReturning(persistedOffset));
+        startTask(task1, config);
+        Map<String, String> firstRun = new HashMap<>();
+        pollOperations(task1, firstRun, persistedOffset, 120, () -> firstRun.containsKey("expired_orders#1") && hasResolvedCursor(persistedOffset.get()));
+        assertThat(firstRun).as("Run 1 should emit the row of its table").containsKey("expired_orders#1");
+        assertThat(hasResolvedCursor(persistedOffset.get())).as("Run 1 should leave an offset with a resolved timestamp").isTrue();
+        task1.stop();
+        task1 = null;
+        String storedCursor = String.valueOf(persistedOffset.get().get("offset.cursor"));
+
+        try (Connection db = DriverManager.getConnection(adminUrl, cockroachdb.getUsername(), cockroachdb.getPassword());
+                Statement stmt = db.createStatement()) {
+            String job;
+            try (var rs = stmt.executeQuery("SELECT job_id::STRING FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' "
+                    + "AND description LIKE '%topic_prefix=" + config.get("topic.prefix") + ".''%'")) {
+                assertThat(rs.next()).as("changefeed of run 1").isTrue();
+                job = rs.getString(1);
+            }
+            // A canceled job gives up its protection once CockroachDB has adopted it again, which it does
+            // every 30 seconds by default.
+            stmt.execute("SET CLUSTER SETTING jobs.registry.interval.adopt = '1s'");
+            stmt.execute("SET CLUSTER SETTING jobs.registry.interval.cancel = '1s'");
+            stmt.execute("CANCEL JOB " + job);
+            waitForJobStatus(stmt, job, "reverting", "canceled");
+
+            stmt.execute("ALTER TABLE " + table + " CONFIGURE ZONE USING gc.ttlseconds = 1");
+            for (int i = 0; i < 20; i++) {
+                stmt.execute("UPDATE " + table + " SET name = 'version " + i + "' WHERE id = 1");
+            }
+            stmt.execute("DELETE FROM " + table + " WHERE id = 1");
+            stmt.execute("INSERT INTO " + table + " VALUES (2, 'after the stored cursor')");
+            try {
+                // Later versions ask for this before they run the function below.
+                stmt.execute("SET allow_unsafe_internals = true");
+            }
+            catch (SQLException e) {
+                LOGGER.debug("This version has no allow_unsafe_internals setting: {}", e.getMessage());
+            }
+            boolean expired = false;
+            for (int i = 0; i < 90 && !expired; i++) {
+                Thread.sleep(2000);
+                stmt.execute("SELECT crdb_internal.kv_enqueue_replica(range_id, 'mvccGC', true) FROM [SHOW RANGES FROM TABLE " + table + "]");
+                try (var rs = stmt.executeQuery("SELECT count(*) FROM " + table + " AS OF SYSTEM TIME '" + storedCursor + "'")) {
+                    rs.next();
+                }
+                catch (SQLException e) {
+                    expired = e.getMessage().contains("GC threshold");
+                }
+            }
+            // The scan of a new changefeed must not run into the garbage collection as well, and the other
+            // tests get the cluster as they expect it.
+            stmt.execute("ALTER TABLE " + table + " CONFIGURE ZONE USING gc.ttlseconds = 14400");
+            stmt.execute("RESET CLUSTER SETTING jobs.registry.interval.adopt");
+            stmt.execute("RESET CLUSTER SETTING jobs.registry.interval.cancel");
+            assertThat(expired).as("The garbage collection should pass the stored cursor " + storedCursor).isTrue();
+        }
+        return persistedOffset;
     }
 
     private static String messagesOf(Throwable failure) {
