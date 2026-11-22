@@ -59,7 +59,6 @@ public class CockroachDBIncrementalSnapshotIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBIncrementalSnapshotIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final String DATABASE_NAME = "inc_snap_testdb";
     private static final String TABLE_NAME = "snap_products";
     private static final String SIGNAL_TABLE = "debezium_signal";
@@ -74,8 +73,7 @@ public class CockroachDBIncrementalSnapshotIT {
             .withListener("kafka:19092");
 
     @Container
-    private static final CockroachContainer cockroachdb = new CockroachContainer(
-            DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
+    private static final CockroachContainer cockroachdb = new CockroachContainer(CockroachDBTestImage.NAME)
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 

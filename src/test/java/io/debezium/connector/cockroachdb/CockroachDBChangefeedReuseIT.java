@@ -26,6 +26,7 @@ import org.testcontainers.utility.DockerImageName;
 
 import io.debezium.config.Configuration;
 import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
+import io.debezium.connector.cockroachdb.integration.CockroachDBTestImage;
 import io.debezium.junit.logging.LogInterceptor;
 import io.debezium.relational.TableId;
 import io.debezium.util.Clock;
@@ -38,7 +39,6 @@ import io.debezium.util.Clock;
 @Testcontainers
 public class CockroachDBChangefeedReuseIT {
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final String TOPIC_PREFIX = "reuse";
     private static final Network NETWORK = Network.newNetwork();
 
@@ -49,7 +49,7 @@ public class CockroachDBChangefeedReuseIT {
             .withListener("kafka:19092");
 
     @Container
-    private static final CockroachContainer cockroachdb = new CockroachContainer(DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
+    private static final CockroachContainer cockroachdb = new CockroachContainer(CockroachDBTestImage.NAME)
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 

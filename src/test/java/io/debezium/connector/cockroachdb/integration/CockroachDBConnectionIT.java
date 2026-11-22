@@ -35,7 +35,6 @@ import io.debezium.connector.cockroachdb.CockroachDBConnector;
 @Testcontainers
 public class CockroachDBConnectionIT {
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final Network NETWORK = Network.newNetwork();
 
     @Container
@@ -46,8 +45,7 @@ public class CockroachDBConnectionIT {
             .withListener("kafka:19092");
 
     @Container
-    private static final CockroachContainer cockroachdb = new CockroachContainer(
-            DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
+    private static final CockroachContainer cockroachdb = new CockroachContainer(CockroachDBTestImage.NAME)
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 

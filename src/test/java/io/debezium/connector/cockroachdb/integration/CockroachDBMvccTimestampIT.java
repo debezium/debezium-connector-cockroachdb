@@ -31,7 +31,6 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.cockroachdb.CockroachContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -52,14 +51,12 @@ import io.debezium.engine.format.Json;
 @Testcontainers
 public class CockroachDBMvccTimestampIT {
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final String DATABASE_NAME = "mvcc_ts_db";
     private static final String TABLE_NAME = "mvcc_orders";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Container
-    private static final CockroachContainer cockroachdb = new CockroachContainer(
-            DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION));
+    private static final CockroachContainer cockroachdb = new CockroachContainer(CockroachDBTestImage.NAME);
 
     private Connection connection;
     private Path offsetFile;
