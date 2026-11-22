@@ -53,8 +53,6 @@ public abstract class AbstractCockroachDBPipelineIT {
 
     protected static final Logger LOGGER = LoggerFactory.getLogger(AbstractCockroachDBPipelineIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
-
     private static final Network NETWORK = Network.newNetwork();
 
     @Container
@@ -64,8 +62,7 @@ public abstract class AbstractCockroachDBPipelineIT {
             .withNetworkAliases("kafka");
 
     @Container
-    protected static final CockroachContainer cockroachdb = new CockroachContainer(
-            DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
+    protected static final CockroachContainer cockroachdb = new CockroachContainer(CockroachDBTestImage.NAME)
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 

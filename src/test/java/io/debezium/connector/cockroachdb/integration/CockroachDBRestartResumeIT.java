@@ -56,7 +56,6 @@ public class CockroachDBRestartResumeIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBRestartResumeIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final String DATABASE_NAME = "restartresume_testdb";
     private static final String TABLE_NAME = "restartresume_orders";
 
@@ -69,8 +68,7 @@ public class CockroachDBRestartResumeIT {
             .withNetworkAliases("kafka");
 
     @Container
-    private static final CockroachContainer cockroachdb = new CockroachContainer(
-            DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
+    private static final CockroachContainer cockroachdb = new CockroachContainer(CockroachDBTestImage.NAME)
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 
