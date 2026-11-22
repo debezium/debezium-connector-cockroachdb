@@ -569,13 +569,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     /**
      * Checks whether a running changefeed job already exists for the given table
      * using the same topic prefix as this connector instance.
-     * Matches the fully-qualified table name and a {@code topic_prefix=} marker in the
+     * Matches the fully-qualified table name and the topic prefix of the sink URI in the
      * changefeed job description to avoid false positives from changefeeds created by
      * other connector instances targeting the same tables with different topic prefixes.
      */
     boolean changefeedExists(CockroachDBConnection connection, TableId table, List<TableId> allIncludedTables) {
         String topicPrefix = resolveTopicPrefix();
-        String sinkMarker = "topic_prefix=" + topicPrefix;
 
         // Read every job first, so a missing-option error can name all of this connector's jobs that
         // lack the option, not just the one that covers this table.
@@ -584,7 +583,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             String jobId = job.jobId();
             String status = job.status();
             String description = job.description();
-            if (description != null && descriptionCapturesTable(description, table) && description.contains(sinkMarker)) {
+            if (description != null && descriptionCapturesTable(description, table) && descriptionHasTopicPrefix(description, topicPrefix)) {
                 if (!"running".equals(status)) {
                     throw new IllegalStateException("Found changefeed job " + jobId + " covering table " + table
                             + " with topic prefix '" + topicPrefix + "' in status '" + status + "'. Starting anyway would "
@@ -617,14 +616,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 // configuration promises, so fail fast instead of silently emitting updates
                 // without them.
                 if (isDiffRequested() && !changefeedHasDiffOption(description)) {
-                    throw new IllegalStateException(missingOptionError(runningJobsWithout(jobs, sinkMarker, "diff"), jobId, table,
+                    throw new IllegalStateException(missingOptionError(runningJobsWithout(jobs, topicPrefix, "diff"), jobId, table,
                             topicPrefix, "diff", "cockroachdb.changefeed.include.diff",
                             "Update events from such a changefeed cannot carry a before image."));
                 }
                 // Likewise, a reused changefeed without mvcc_timestamp cannot deliver the
                 // per-row commit timestamp emitted as source.ts_hlc.
                 if (isMvccTimestampRequested() && !changefeedHasOption(description, "mvcc_timestamp")) {
-                    throw new IllegalStateException(missingOptionError(runningJobsWithout(jobs, sinkMarker, "mvcc_timestamp"), jobId,
+                    throw new IllegalStateException(missingOptionError(runningJobsWithout(jobs, topicPrefix, "mvcc_timestamp"), jobId,
                             table, topicPrefix, "mvcc_timestamp", "cockroachdb.changefeed.include.mvcc.timestamp",
                             "Events from such a changefeed cannot carry the row's MVCC timestamp."));
                 }
@@ -646,9 +645,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                             jobId, extraTables, jobId);
                 }
                 if (!reusedCursorsRecorded) {
-                    recordCursorsOfRunningJobs(jobs, sinkMarker, allIncludedTables);
+                    recordCursorsOfRunningJobs(jobs, topicPrefix, allIncludedTables);
                     reusedCursorsRecorded = true;
-                    reportJobsWithoutUpdated(runningJobsWithout(jobs, sinkMarker, "updated"));
+                    reportJobsWithoutUpdated(runningJobsWithout(jobs, topicPrefix, "updated"));
                 }
                 changefeedJobIds.add(Long.parseLong(jobId));
                 return true;
@@ -679,10 +678,10 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * tables that it covers. The jobs do not have to line up with the connector's own groups of tables,
      * for example after {@code cockroachdb.changefeed.max.tables.per.changefeed} was changed.
      */
-    private void recordCursorsOfRunningJobs(List<Job> jobs, String sinkMarker, List<TableId> includedTables) {
+    private void recordCursorsOfRunningJobs(List<Job> jobs, String topicPrefix, List<TableId> includedTables) {
         for (Job job : jobs) {
             final String description = job.description();
-            if (!"running".equals(job.status()) || description == null || !description.contains(sinkMarker)) {
+            if (!"running".equals(job.status()) || !descriptionHasTopicPrefix(description, topicPrefix)) {
                 continue;
             }
             final BigDecimal cursor = changefeedCursor(description);
@@ -697,6 +696,29 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 }
             }
         }
+    }
+
+    /**
+     * Returns {@code true} if the sink URI in a {@code SHOW CHANGEFEED JOBS} description has exactly the
+     * given topic prefix. The prefix is the value of the {@code topic_prefix} parameter, which ends at the
+     * next parameter or at the end of the URI. Looking for the text {@code topic_prefix=<prefix>} alone
+     * would also accept a longer prefix that starts with it, for example {@code crdb.v2.} for
+     * {@code crdb.}, which is the changefeed of another connector.
+     */
+    static boolean descriptionHasTopicPrefix(String description, String topicPrefix) {
+        if (description == null) {
+            return false;
+        }
+        final String parameter = "topic_prefix=" + topicPrefix;
+        for (int start = description.indexOf(parameter); start >= 0; start = description.indexOf(parameter, start + 1)) {
+            final int end = start + parameter.length();
+            final boolean startsParameter = start > 0 && (description.charAt(start - 1) == '?' || description.charAt(start - 1) == '&');
+            final boolean endsValue = end == description.length() || description.charAt(end) == '&' || description.charAt(end) == '\'';
+            if (startsParameter && endsValue) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -747,9 +769,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * Returns the ids of the running changefeed jobs with this connector's topic prefix and the
      * enriched envelope that do not use the given option.
      */
-    private static List<String> runningJobsWithout(List<Job> jobs, String sinkMarker, String option) {
+    private static List<String> runningJobsWithout(List<Job> jobs, String topicPrefix, String option) {
         return jobs.stream()
-                .filter(job -> "running".equals(job.status()) && job.description() != null && job.description().contains(sinkMarker)
+                .filter(job -> "running".equals(job.status()) && descriptionHasTopicPrefix(job.description(), topicPrefix)
                         && changefeedUsesEnrichedEnvelope(job.description()) && !changefeedHasOption(job.description(), option))
                 .map(Job::jobId)
                 .distinct()
