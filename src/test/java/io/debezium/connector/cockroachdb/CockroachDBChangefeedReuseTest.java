@@ -289,6 +289,51 @@ public class CockroachDBChangefeedReuseTest {
     }
 
     @Test
+    void waitsUntilACanceledChangefeedHasStopped() throws Exception {
+        // A job whose cancellation was requested writes to the intermediate topics until CockroachDB carries
+        // the cancellation out. A changefeed that is created in the meantime would write the same events.
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } });
+        final ResultSet canceling = jobRows(new String[]{ "1031", "cancel-requested", scanning("acct", "1.0000000000") });
+        final ResultSet gone = jobRows();
+        when(cluster.executeQuery(contains("SHOW CHANGEFEED JOBS"))).thenReturn(canceling, gone);
+        final CockroachDBStreamingChangeEventSource source = source(Map.of());
+        source.cancellationWaitIntervalMs = 0;
+
+        source.createChangefeeds(connectionFor(cluster), List.of(ACCT), offsetsAt(null), false);
+
+        verify(cluster, times(2)).executeQuery(contains("SHOW CHANGEFEED JOBS"));
+        assertThat(createdChangefeeds(cluster)).hasSize(1);
+    }
+
+    @Test
+    void doesNotStartNextToAChangefeedThatIsStillBeingCanceled() throws Exception {
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } });
+        when(cluster.executeQuery(contains("SHOW CHANGEFEED JOBS")))
+                .thenAnswer(invocation -> jobRows(new String[]{ "1032", "cancel-requested", scanning("acct", "1.0000000000") }));
+        final CockroachDBStreamingChangeEventSource source = source(Map.of());
+        source.cancellationWaitIntervalMs = 0;
+
+        assertThatThrownBy(() -> source.createChangefeeds(connectionFor(cluster), List.of(ACCT), offsetsAt(null), false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("1032")
+                .hasMessageContaining("still being canceled");
+        assertThat(createdChangefeeds(cluster)).isEmpty();
+    }
+
+    @Test
+    void doesNotWaitForACanceledChangefeedOfAnotherConnector() throws Exception {
+        final String other = "CREATE CHANGEFEED FOR TABLE reprodb.public.acct INTO 'kafka://kafka:9092?topic_prefix=other.' "
+                + "WITH OPTIONS (enriched_properties = 'source', envelope = 'enriched', full_table_name, resolved = '3s', updated)";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } },
+                new String[]{ "1033", "cancel-requested", other });
+
+        source(Map.of()).createChangefeeds(connectionFor(cluster), List.of(ACCT), offsetsAt(null), false);
+
+        verify(cluster, times(1)).executeQuery(contains("SHOW CHANGEFEED JOBS"));
+        assertThat(createdChangefeeds(cluster)).hasSize(1);
+    }
+
+    @Test
     void listsTheChangefeedJobsOncePerStart() throws Exception {
         final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" }, { "public", "orders" } },
                 new String[]{ "1021", "running", scanning("acct", "1.0000000000") },
