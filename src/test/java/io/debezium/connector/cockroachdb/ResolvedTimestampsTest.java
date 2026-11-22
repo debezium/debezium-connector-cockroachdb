@@ -69,6 +69,21 @@ class ResolvedTimestampsTest {
     }
 
     @Test
+    void tellsHowFarEachTableHasCome() {
+        final ResolvedTimestamps resolved = new ResolvedTimestamps(List.of(ORDERS, ITEMS, STOCK));
+        assertThat(resolved.latest()).isEmpty();
+
+        resolved.advance(ORDERS, "1700000000000000020.0000000000");
+        resolved.advance(ITEMS, "1700000000000000030.0000000000");
+        resolved.advance(ORDERS, "1700000000000000010.0000000000");
+
+        // The table that has delivered no resolved timestamp is not listed.
+        assertThat(resolved.latest()).containsOnlyKeys(ORDERS, ITEMS);
+        assertThat(resolved.latest().get(ORDERS)).isEqualByComparingTo("1700000000000000020");
+        assertThat(resolved.latest().get(ITEMS)).isEqualByComparingTo("1700000000000000030");
+    }
+
+    @Test
     void takesTheResolvedTimestampOfASingleChangefeedAsItIs() {
         // One table: every resolved timestamp is the cursor.
         assertThat(new ResolvedTimestamps(List.of(ORDERS)).advance(ORDERS, "1700000000000000010.0000000000"))

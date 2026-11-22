@@ -7,8 +7,10 @@ package io.debezium.connector.cockroachdb;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -378,6 +380,9 @@ public class CockroachDBChangefeedReuseTest {
         // All rows of the new table were written after the cursor. The scan returns them.
         assertThat(created.get(1)).contains("\"orders\"", "initial_scan = 'yes'", "cursor = '1795243641446371339.0000000000'")
                 .doesNotContain("\"acct\"");
+        // The offsets remember where the changefeed of the new table started, for as long as the cursor is behind that.
+        verify(offsets).setChangefeedStart("repro.reprodb.public.orders", "1795243641446371339.0000000000", true);
+        verify(offsets, never()).setChangefeedStart(eq("repro.reprodb.public.acct"), anyString(), anyBoolean());
     }
 
     @Test
@@ -396,9 +401,44 @@ public class CockroachDBChangefeedReuseTest {
     }
 
     @Test
-    void doesNotMoveTheStoredCursorBackwards() throws Exception {
-        // After a restart, the topics still hold resolved timestamps from before the cursor was stored: the
-        // connector reads the partitions of a topic at different speeds. The stored cursor stays valid.
+    void remembersTheStartOfAReusedChangefeedThatStartedLaterThanTheStoredCursor() throws Exception {
+        // The run that created the changefeed of orders can have ended before a record stored its start in
+        // the offsets. The description of the job has the cursor and tells whether it began with a scan.
+        final String stored = "1795243600000000000.0000000000";
+        final String later = "1795243620000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } },
+                new String[]{ "1031", "running", scanning("acct", "1795243500000000000.0000000000") },
+                new String[]{ "1032", "running", scanning("orders", later) });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.acct:0");
+        final CockroachDBStreamingChangeEventSource source = source(Map.of());
+
+        source.createChangefeeds(connectionFor(cluster), List.of(ACCT, ORDERS), offsets, true);
+
+        assertThat(createdChangefeeds(cluster)).isEmpty();
+        verify(offsets).setChangefeedStart("repro.reprodb.public.orders", later, true);
+        // The changefeed of acct started before the stored cursor, so a new one for acct can start at the cursor.
+        verify(offsets, never()).setChangefeedStart(eq("repro.reprodb.public.acct"), anyString(), anyBoolean());
+        // The scan of orders can still be running.
+        assertThat(source.extractOperation(ORDERS, insertWithoutSourceBlock())).isEqualTo(Envelope.Operation.READ);
+        assertThat(source.extractOperation(ACCT, insertWithoutSourceBlock())).isEqualTo(Envelope.Operation.CREATE);
+
+        // A changefeed that began without a scan, and offsets without a cursor to compare with.
+        final Statement withoutScan = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } },
+                new String[]{ "1033", "running", scanning("orders", later).replace("initial_scan = 'yes'", "initial_scan = 'no'") });
+        final CockroachDBOffsetContext resumed = offsetsAt(stored);
+        source(Map.of()).createChangefeeds(connectionFor(withoutScan), List.of(ORDERS), resumed, true);
+        verify(resumed).setChangefeedStart("repro.reprodb.public.orders", later, false);
+        final CockroachDBOffsetContext firstStart = offsetsAt(null);
+        source(Map.of()).createChangefeeds(connectionFor(cluster), List.of(ACCT, ORDERS), firstStart, false);
+        verify(firstStart, never()).setChangefeedStart(anyString(), anyString(), anyBoolean());
+    }
+
+    @Test
+    void followsAChangefeedThatIsBehindTheStoredCursor() throws Exception {
+        // The stored cursor can be ahead of a changefeed. An earlier version of the connector stored the
+        // resolved timestamp of any changefeed, and an operator can create the changefeed of an added table
+        // with an earlier cursor. A new changefeed at the stored cursor would skip what that changefeed has not
+        // emitted yet, so the cursor moves back to the resolved timestamp that all changefeeds have reached.
         final String stored = "1795243650000000000.0000000000";
         final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } });
         final CockroachDBOffsetContext offsets = offsetsAt(stored);
@@ -406,10 +446,8 @@ public class CockroachDBChangefeedReuseTest {
         source.createChangefeeds(connectionFor(cluster), List.of(ACCT), offsets, true);
 
         source.processChangefeedEvent(null, "{\"resolved\":\"1795243640000000000.0000000000\"}", ACCT, offsets);
-        verify(offsets, never()).setCursor(anyString());
 
-        source.processChangefeedEvent(null, "{\"resolved\":\"1795243660000000000.0000000000\"}", ACCT, offsets);
-        verify(offsets).setCursor("1795243660000000000.0000000000");
+        verify(offsets).setCursor("1795243640000000000.0000000000");
     }
 
     @Test
@@ -471,6 +509,371 @@ public class CockroachDBChangefeedReuseTest {
     }
 
     @Test
+    void startsATableAgainWhereItsChangefeedStartedWhileTheCursorIsBehindThatStart() throws Exception {
+        // orders was created while the connector was stopped, and its changefeed started with a scan. That
+        // changefeed ended before the cursor had reached the scan, so the cursor is still older than the table.
+        // A scan as of now would miss the rows that were deleted since the changefeed ended.
+        final String stored = "1795243600000000000.0000000000";
+        final String firstScan = "1795243620000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.acct:0", "repro.reprodb.public.orders:0");
+        when(offsets.getChangefeedStart("repro.reprodb.public.orders")).thenReturn(new CockroachDBOffsetContext.ChangefeedStart(firstScan, true));
+
+        source(Map.of()).createChangefeeds(connectionFor(cluster), List.of(ACCT, ORDERS), offsets, true);
+
+        final List<String> created = createdChangefeeds(cluster);
+        assertThat(created).hasSize(2);
+        assertThat(created).anySatisfy(statement -> assertThat(statement)
+                .contains("\"orders\"", "initial_scan = 'yes'", "cursor = '" + firstScan + "'").doesNotContain("\"acct\""));
+        assertThat(created).anySatisfy(statement -> assertThat(statement)
+                .contains("\"acct\"", "initial_scan = 'no'", "cursor = '" + stored + "'").doesNotContain("\"orders\""));
+    }
+
+    @Test
+    void startsATableAgainAtTheStartOfItsChangefeedWhileTheCursorIsOlderThanItsPrivilege() throws Exception {
+        // The changefeed of orders started at a later time than the cursor, because the privilege on orders is
+        // newer than the cursor. It ended before the cursor had reached that time. CockroachDB still rejects
+        // the cursor for orders, and the offsets hold a position in its topic, so its changes are owed.
+        final String stored = "1795243600000000000.0000000000";
+        final String firstStart = "1795243620000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" }, { "public", "orders" } });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.acct:0", "repro.reprodb.public.orders:0");
+        when(offsets.getChangefeedStart("repro.reprodb.public.orders")).thenReturn(new CockroachDBOffsetContext.ChangefeedStart(firstStart, false));
+
+        source(Map.of()).createChangefeeds(connectionFor(cluster), List.of(ACCT, ORDERS), offsets, true);
+
+        final List<String> created = createdChangefeeds(cluster);
+        assertThat(created).hasSize(2);
+        assertThat(created).anySatisfy(statement -> assertThat(statement)
+                .contains("\"orders\"", "initial_scan = 'no'", "cursor = '" + firstStart + "'").doesNotContain("\"acct\""));
+        assertThat(created).anySatisfy(statement -> assertThat(statement)
+                .contains("\"acct\"", "initial_scan = 'no'", "cursor = '" + stored + "'").doesNotContain("\"orders\""));
+    }
+
+    @Test
+    void forgetsTheStartOfAChangefeedOnceTheCursorHasReachedIt() throws Exception {
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } });
+        final CockroachDBOffsetContext offsets = offsetsAt(null);
+        final CockroachDBStreamingChangeEventSource source = source(Map.of(), dispatcher());
+        source.createChangefeeds(connectionFor(cluster), List.of(ACCT), offsets, false);
+
+        source.processChangefeedEvent(null, "{\"resolved\":\"1795243660000000000.0000000000\"}", ACCT, offsets);
+
+        verify(offsets).setCursor("1795243660000000000.0000000000");
+        verify(offsets).removeChangefeedStartsUpTo("1795243660000000000.0000000000");
+    }
+
+    @Test
+    void keepsHowFarATableHasComeWhenTheCursorMovesBackBehindIt() throws Exception {
+        // The changefeed of acct had ended, so this start created one at the stored cursor. The changefeed of
+        // orders is behind the stored cursor, and the cursor moves back to what that one has reached. A
+        // changefeed for acct that started there would go back further than acct has to: to a time that can be
+        // older than what CockroachDB still has of acct, or older than acct or the privilege on it. So the
+        // offsets keep how far acct has come.
+        final String stored = "1795243650000000000.0000000000";
+        final String behind = "1795243640000000000.0000000000";
+        final String reached = "1795243660000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" }, { "public", "orders" } },
+                new String[]{ "1041", "running", streaming("orders") });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.acct:0", "repro.reprodb.public.orders:0");
+        final CockroachDBStreamingChangeEventSource source = source(Map.of(), dispatcher());
+        source.createChangefeeds(connectionFor(cluster), List.of(ACCT, ORDERS), offsets, true);
+        assertThat(createdChangefeeds(cluster)).singleElement().satisfies(statement -> assertThat(statement)
+                .contains("\"acct\"", "cursor = '" + stored + "'", "initial_scan = 'no'"));
+        verify(offsets, never()).setChangefeedStart(anyString(), anyString(), anyBoolean());
+
+        source.processChangefeedEvent(null, "{\"resolved\":\"" + reached + "\"}", ACCT, offsets);
+        source.processChangefeedEvent(null, "{\"resolved\":\"" + behind + "\"}", ORDERS, offsets);
+
+        verify(offsets).setCursor(behind);
+        verify(offsets).setChangefeedStart("repro.reprodb.public.acct", reached, false);
+        // orders is the table that is behind: a changefeed for it starts at the cursor.
+        verify(offsets, never()).setChangefeedStart(eq("repro.reprodb.public.orders"), anyString(), anyBoolean());
+    }
+
+    @Test
+    void keepsTheStartOfAChangefeedThatHasDeliveredNothingYetWhenTheCursorMovesBack() throws Exception {
+        // The topic of acct still held a resolved timestamp of the changefeed that had ended. The new
+        // changefeed of acct has delivered nothing yet, so where it started is what counts for acct.
+        final String stored = "1795243650000000000.0000000000";
+        final String behind = "1795243640000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" }, { "public", "orders" } },
+                new String[]{ "1042", "running", streaming("orders") });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.acct:0", "repro.reprodb.public.orders:0");
+        final CockroachDBStreamingChangeEventSource source = source(Map.of(), dispatcher());
+        source.createChangefeeds(connectionFor(cluster), List.of(ACCT, ORDERS), offsets, true);
+
+        source.processChangefeedEvent(null, "{\"resolved\":\"1795243645000000000.0000000000\"}", ACCT, offsets);
+        source.processChangefeedEvent(null, "{\"resolved\":\"" + behind + "\"}", ORDERS, offsets);
+
+        verify(offsets).setCursor(behind);
+        verify(offsets).setChangefeedStart("repro.reprodb.public.acct", stored, false);
+    }
+
+    @Test
+    void keepsHowFarAReusedChangefeedHasComeWhenTheCursorMovesBackBehindIt() throws Exception {
+        // The changefeed of orders started before the stored cursor, so the restart that finds it running
+        // stores nothing about it. That changes when the cursor moves back to a time before that start. The
+        // scan with which the changefeed began is through by then: orders has delivered a resolved timestamp.
+        final String stored = "1795243650000000000.0000000000";
+        final String startOfOrders = "1795243645000000000.0000000000";
+        final String behind = "1795243640000000000.0000000000";
+        final String reached = "1795243660000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" }, { "public", "orders" } },
+                new String[]{ "1043", "running", streaming("acct") },
+                new String[]{ "1044", "running", scanning("orders", startOfOrders) });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.acct:0", "repro.reprodb.public.orders:0");
+        final CockroachDBStreamingChangeEventSource source = source(Map.of(), dispatcher());
+        source.createChangefeeds(connectionFor(cluster), List.of(ACCT, ORDERS), offsets, true);
+        assertThat(createdChangefeeds(cluster)).isEmpty();
+        verify(offsets, never()).setChangefeedStart(anyString(), anyString(), anyBoolean());
+
+        source.processChangefeedEvent(null, "{\"resolved\":\"" + reached + "\"}", ORDERS, offsets);
+        source.processChangefeedEvent(null, "{\"resolved\":\"" + behind + "\"}", ACCT, offsets);
+
+        verify(offsets).setCursor(behind);
+        verify(offsets).setChangefeedStart("repro.reprodb.public.orders", reached, false);
+        assertThat(source.extractOperation(ORDERS, insertWithoutSourceBlock())).isEqualTo(Envelope.Operation.CREATE);
+    }
+
+    @Test
+    void keepsHowFarATableHasComeAlsoWhenTheStartOfItsChangefeedIsUnknown() throws Exception {
+        // Neither description has a cursor. acct can be newer than what the changefeed of orders has reached.
+        final String stored = "1795243650000000000.0000000000";
+        final String behind = "1795243640000000000.0000000000";
+        final String reached = "1795243660000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" }, { "public", "orders" } },
+                new String[]{ "1045", "running", streaming("acct") },
+                new String[]{ "1046", "running", streaming("orders") });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.acct:0", "repro.reprodb.public.orders:0");
+        final CockroachDBStreamingChangeEventSource source = source(Map.of(), dispatcher());
+        source.createChangefeeds(connectionFor(cluster), List.of(ACCT, ORDERS), offsets, true);
+
+        source.processChangefeedEvent(null, "{\"resolved\":\"" + reached + "\"}", ACCT, offsets);
+        source.processChangefeedEvent(null, "{\"resolved\":\"" + behind + "\"}", ORDERS, offsets);
+
+        verify(offsets).setChangefeedStart("repro.reprodb.public.acct", reached, false);
+        verify(offsets, never()).setChangefeedStart(eq("repro.reprodb.public.orders"), anyString(), anyBoolean());
+    }
+
+    @Test
+    void storesTheCursorAndThePointsOfTheOtherTablesTogetherWhenTheCursorMovesBack() throws Exception {
+        // The same with the offsets as Kafka Connect stores them.
+        final String stored = "1795243650000000000.0000000000";
+        final String behind = "1795243640000000000.0000000000";
+        final String reached = "1795243660000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" }, { "public", "orders" } },
+                new String[]{ "1047", "running", streaming("acct") },
+                new String[]{ "1048", "running", streaming("orders") });
+        final CockroachDBOffsetContext offsets = new CockroachDBOffsetContext(connectorConfig(Map.of()));
+        offsets.setCursor(stored);
+        offsets.setConsumerOffset("repro.reprodb.public.acct:0", 5L);
+        offsets.setConsumerOffset("repro.reprodb.public.orders:0", 5L);
+        final CockroachDBStreamingChangeEventSource source = source(Map.of(), dispatcher());
+        source.createChangefeeds(connectionFor(cluster), List.of(ACCT, ORDERS), offsets, true);
+
+        source.processChangefeedEvent(null, "{\"resolved\":\"" + reached + "\"}", ACCT, offsets);
+        source.processChangefeedEvent(null, "{\"resolved\":\"" + behind + "\"}", ORDERS, offsets);
+
+        assertThat(offsets.getOffset().get("offset.cursor")).isEqualTo(behind);
+        assertThat(offsets.getOffset().get("changefeed.start.repro.reprodb.public.acct")).isEqualTo(reached);
+        assertThat(offsets.getOffset()).doesNotContainKey("changefeed.start.repro.reprodb.public.orders");
+
+        // The changefeed of orders catches up. Once the cursor has reached the point of acct, acct starts at the cursor again.
+        source.processChangefeedEvent(null, "{\"resolved\":\"1795243670000000000.0000000000\"}", ORDERS, offsets);
+        assertThat(offsets.getOffset().get("offset.cursor")).isEqualTo(reached);
+        assertThat(offsets.getOffset()).doesNotContainKey("changefeed.start.repro.reprodb.public.acct");
+    }
+
+    @Test
+    void keepsALaterPointThatTheOffsetsHoldForATable() throws Exception {
+        // In an earlier run the cursor moved back, and the offsets kept how far orders had come. That is later
+        // than the start of its changefeed, so its scan is through, and a changefeed that takes its place can
+        // start at that point without a scan.
+        final String stored = "1795243600000000000.0000000000";
+        final String startOfOrders = "1795243620000000000.0000000000";
+        final String reached = "1795243630000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } },
+                new String[]{ "1049", "running", scanning("orders", startOfOrders) });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.orders:0");
+        when(offsets.getChangefeedStart("repro.reprodb.public.orders")).thenReturn(new CockroachDBOffsetContext.ChangefeedStart(reached, false));
+        final CockroachDBStreamingChangeEventSource source = source(Map.of());
+
+        source.createChangefeeds(connectionFor(cluster), List.of(ORDERS), offsets, true);
+
+        verify(offsets, never()).setChangefeedStart(anyString(), anyString(), anyBoolean());
+        assertThat(source.extractOperation(ORDERS, insertWithoutSourceBlock())).isEqualTo(Envelope.Operation.CREATE);
+    }
+
+    @Test
+    void doesNotTakeAScanThatIsThroughForOneThatStillRuns() throws Exception {
+        // The offsets hold the start of the changefeed of orders without a scan: orders had delivered a resolved
+        // timestamp, so the scan with which the changefeed began was through. The description of the job still
+        // says initial_scan = 'yes'. That must not bring the scan back.
+        final String stored = "1795243600000000000.0000000000";
+        final String startOfOrders = "1795243620000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } },
+                new String[]{ "1050", "running", scanning("orders", startOfOrders) });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.orders:0");
+        when(offsets.getChangefeedStart("repro.reprodb.public.orders")).thenReturn(new CockroachDBOffsetContext.ChangefeedStart(startOfOrders, false));
+        final CockroachDBStreamingChangeEventSource source = source(Map.of());
+
+        source.createChangefeeds(connectionFor(cluster), List.of(ORDERS), offsets, true);
+
+        verify(offsets, never()).setChangefeedStart(anyString(), anyString(), anyBoolean());
+        assertThat(source.extractOperation(ORDERS, insertWithoutSourceBlock())).isEqualTo(Envelope.Operation.CREATE);
+    }
+
+    @Test
+    void replacesALaterStartWithAScanThatTheOffsetsHoldForAnotherChangefeed() throws Exception {
+        // A later point without a scan says how far the table has come. A later start with a scan is the start
+        // of another changefeed of the table, and the one that runs now started earlier.
+        final String stored = "1795243600000000000.0000000000";
+        final String startOfOrders = "1795243620000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } },
+                new String[]{ "1053", "running", scanning("orders", startOfOrders) });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.orders:0");
+        when(offsets.getChangefeedStart("repro.reprodb.public.orders"))
+                .thenReturn(new CockroachDBOffsetContext.ChangefeedStart("1795243630000000000.0000000000", true));
+
+        source(Map.of()).createChangefeeds(connectionFor(cluster), List.of(ORDERS), offsets, true);
+
+        verify(offsets).setChangefeedStart("repro.reprodb.public.orders", startOfOrders, true);
+    }
+
+    @Test
+    void dropsTheScanOfAStartOnceTheTableHasDeliveredAResolvedTimestamp() throws Exception {
+        // The first resolved timestamp of a changefeed that began with a scan is the timestamp of the scan. It
+        // says that the scan is through.
+        final String stored = "1795243650000000000.0000000000";
+        final String startOfOrders = "1795243645000000000.0000000000";
+        final String behind = "1795243640000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" }, { "public", "orders" } },
+                new String[]{ "1054", "running", streaming("acct") },
+                new String[]{ "1055", "running", scanning("orders", startOfOrders) });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.acct:0", "repro.reprodb.public.orders:0");
+        final CockroachDBStreamingChangeEventSource source = source(Map.of(), dispatcher());
+        source.createChangefeeds(connectionFor(cluster), List.of(ACCT, ORDERS), offsets, true);
+
+        source.processChangefeedEvent(null, "{\"resolved\":\"" + startOfOrders + "\"}", ORDERS, offsets);
+        source.processChangefeedEvent(null, "{\"resolved\":\"" + behind + "\"}", ACCT, offsets);
+
+        verify(offsets).setChangefeedStart("repro.reprodb.public.orders", startOfOrders, false);
+    }
+
+    @Test
+    void keepsTheScanOfAChangefeedThatStartsAgainWithOne() throws Exception {
+        // With snapshot.mode=always every changefeed that a start creates scans. The offsets held the start of
+        // orders without a scan, and the changefeed that starts there again begins with one.
+        final String stored = "1795243600000000000.0000000000";
+        final String startOfOrders = "1795243620000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" }, { "public", "orders" } });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.orders:0");
+        when(offsets.getChangefeedStart("repro.reprodb.public.orders")).thenReturn(new CockroachDBOffsetContext.ChangefeedStart(startOfOrders, false));
+
+        source(Map.of("snapshot.mode", "always")).createChangefeeds(connectionFor(cluster), List.of(ORDERS), offsets, true);
+
+        assertThat(createdChangefeeds(cluster)).singleElement().satisfies(statement -> assertThat(statement)
+                .contains("\"orders\"", "cursor = '" + startOfOrders + "'", "initial_scan = 'yes'"));
+        verify(offsets).setChangefeedStart("repro.reprodb.public.orders", startOfOrders, true);
+    }
+
+    @Test
+    void keepsTheScanOfAStoredStartWhenTheChangefeedWasAltered() throws Exception {
+        // ALTER CHANGEFEED takes the initial_scan option out of the description of a job and keeps the cursor.
+        // It is the statement that adds an option to a reused changefeed. The description then does not tell
+        // how the changefeed began, and the offsets do.
+        final String stored = "1795243600000000000.0000000000";
+        final String later = "1795243620000000000.0000000000";
+        final String altered = scanning("orders", later).replace("initial_scan = 'yes', ", "");
+        assertThat(altered).doesNotContain("initial_scan").contains("cursor = '" + later + "'");
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } },
+                new String[]{ "1051", "running", altered });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.orders:0");
+        when(offsets.getChangefeedStart("repro.reprodb.public.orders")).thenReturn(new CockroachDBOffsetContext.ChangefeedStart(later, true));
+        final CockroachDBStreamingChangeEventSource source = source(Map.of());
+
+        source.createChangefeeds(connectionFor(cluster), List.of(ORDERS), offsets, true);
+
+        verify(offsets, never()).setChangefeedStart(eq("repro.reprodb.public.orders"), anyString(), eq(false));
+        // The scan can still be running.
+        assertThat(source.extractOperation(ORDERS, insertWithoutSourceBlock())).isEqualTo(Envelope.Operation.READ);
+
+        // A stored start without a scan stays one without a scan.
+        final CockroachDBOffsetContext withoutScan = offsetsAt(stored, "repro.reprodb.public.orders:0");
+        when(withoutScan.getChangefeedStart("repro.reprodb.public.orders")).thenReturn(new CockroachDBOffsetContext.ChangefeedStart(later, false));
+        final CockroachDBStreamingChangeEventSource resumed = source(Map.of());
+        resumed.createChangefeeds(connectionFor(cluster), List.of(ORDERS), withoutScan, true);
+        verify(withoutScan, never()).setChangefeedStart(eq("repro.reprodb.public.orders"), anyString(), eq(true));
+        assertThat(resumed.extractOperation(ORDERS, insertWithoutSourceBlock())).isEqualTo(Envelope.Operation.CREATE);
+    }
+
+    @Test
+    void takesAnAlteredChangefeedWithoutAStoredStartForOneThatBeganWithAScan() throws Exception {
+        // Neither the description nor the offsets tell how the changefeed began. A changefeed that takes its
+        // place has to deliver what a scan that was not through yet had left, so it scans.
+        final String stored = "1795243600000000000.0000000000";
+        final String later = "1795243620000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } },
+                new String[]{ "1052", "running", scanning("orders", later).replace("initial_scan = 'yes', ", "") });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.orders:0");
+
+        source(Map.of()).createChangefeeds(connectionFor(cluster), List.of(ORDERS), offsets, true);
+
+        verify(offsets).setChangefeedStart("repro.reprodb.public.orders", later, true);
+
+        // An earlier start that the offsets hold for another changefeed of the table says nothing about this one.
+        final CockroachDBOffsetContext earlier = offsetsAt(stored, "repro.reprodb.public.orders:0");
+        when(earlier.getChangefeedStart("repro.reprodb.public.orders"))
+                .thenReturn(new CockroachDBOffsetContext.ChangefeedStart("1795243610000000000.0000000000", false));
+        source(Map.of()).createChangefeeds(connectionFor(cluster), List.of(ORDERS), earlier, true);
+        verify(earlier).setChangefeedStart("repro.reprodb.public.orders", later, true);
+    }
+
+    @Test
+    void readsFromTheDescriptionOfAJobWhetherItsChangefeedBeganWithAScan() {
+        final String scanning = scanning("orders", "1795243620000000000.0000000000");
+        assertThat(CockroachDBStreamingChangeEventSource.scanAtStartOf(scanning))
+                .isEqualTo(CockroachDBStreamingChangeEventSource.ScanAtStart.YES);
+        assertThat(CockroachDBStreamingChangeEventSource.scanAtStartOf(scanning.replace("initial_scan = 'yes'", "initial_scan")))
+                .isEqualTo(CockroachDBStreamingChangeEventSource.ScanAtStart.YES);
+        // A changefeed that ends after its scan begins with one as well.
+        assertThat(CockroachDBStreamingChangeEventSource.scanAtStartOf(scanning.replace("initial_scan = 'yes'", "initial_scan = 'only'")))
+                .isEqualTo(CockroachDBStreamingChangeEventSource.ScanAtStart.YES);
+        assertThat(CockroachDBStreamingChangeEventSource.scanAtStartOf(scanning.replace("initial_scan = 'yes'", "initial_scan = 'no'")))
+                .isEqualTo(CockroachDBStreamingChangeEventSource.ScanAtStart.NO);
+        assertThat(CockroachDBStreamingChangeEventSource.scanAtStartOf(scanning.replace("initial_scan = 'yes'", "no_initial_scan")))
+                .isEqualTo(CockroachDBStreamingChangeEventSource.ScanAtStart.NO);
+        // ALTER CHANGEFEED leaves no option about the scan in the description.
+        assertThat(CockroachDBStreamingChangeEventSource.scanAtStartOf(scanning.replace("initial_scan = 'yes', ", "")))
+                .isEqualTo(CockroachDBStreamingChangeEventSource.ScanAtStart.UNKNOWN);
+        assertThat(CockroachDBStreamingChangeEventSource.scanAtStartOf(null)).isEqualTo(CockroachDBStreamingChangeEventSource.ScanAtStart.UNKNOWN);
+    }
+
+    @Test
+    void keepsTheStartOfTheScanThatAnswersARejectedCursor() throws Exception {
+        // snapshot.mode=when_needed answers a stored cursor that CockroachDB rejects with a new initial scan, as
+        // of the current time. The stored cursor stays the rejected one until the scan is through. A changefeed
+        // that has to be created again in that time starts with that scan again, and not with a scan as of a
+        // later time, which would not show the rows that were deleted in between.
+        final String stored = "1795243600000000000.0000000000";
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } });
+        when(cluster.execute(anyString())).thenAnswer(invocation -> {
+            final String statement = invocation.getArgument(0);
+            if (statement.startsWith("CREATE CHANGEFEED") && statement.contains("cursor = '" + stored + "'")) {
+                throw new SQLException("ERROR: batch timestamp 1795243600.000000000,0 must be after replica GC threshold 1795243630.000000000,0");
+            }
+            return false;
+        });
+        final CockroachDBOffsetContext offsets = offsetsAt(stored, "repro.reprodb.public.acct:0");
+
+        source(Map.of("snapshot.mode", "when_needed")).createChangefeeds(connectionFor(cluster), List.of(ACCT), offsets, true);
+
+        assertThat(createdChangefeeds(cluster)).hasSize(2);
+        verify(offsets).setChangefeedStart("repro.reprodb.public.acct", "1795243641446371339.0000000000", true);
+    }
+
+    @Test
     void scansATableThatDidNotExistAtTheStoredCursorInEverySnapshotMode() throws Exception {
         final String stored = "1795243600000000000.0000000000";
         for (String snapshotMode : List.of("no_data", "when_needed", "always")) {
@@ -516,6 +919,8 @@ public class CockroachDBChangefeedReuseTest {
         assertThat(created.get(1)).contains("\"orders\"", "cursor = '" + stored + "'").doesNotContain("\"acct\"");
         assertThat(created.get(2)).contains("\"orders\"", "initial_scan = 'no'", "cursor = '1795243641446371339.0000000000'")
                 .doesNotContain("\"acct\"");
+        // The offsets remember that start: until the cursor has reached it, CockroachDB rejects the cursor for orders.
+        verify(offsets).setChangefeedStart("repro.reprodb.public.orders", "1795243641446371339.0000000000", false);
     }
 
     @Test
@@ -895,9 +1300,13 @@ public class CockroachDBChangefeedReuseTest {
     }
 
     private static CockroachDBStreamingChangeEventSource source(Map<String, String> settings, EventDispatcher<CockroachDBPartition, TableId> dispatcher) {
+        return new CockroachDBStreamingChangeEventSource(connectorConfig(settings), dispatcher, null, null, null);
+    }
+
+    private static CockroachDBConnectorConfig connectorConfig(Map<String, String> settings) {
         Configuration.Builder config = baseConfig();
         settings.forEach((key, value) -> config.with(key, value));
-        return new CockroachDBStreamingChangeEventSource(new CockroachDBConnectorConfig(config.build()), dispatcher, null, null, null);
+        return new CockroachDBConnectorConfig(config.build());
     }
 
     private static Configuration.Builder baseConfig() {
