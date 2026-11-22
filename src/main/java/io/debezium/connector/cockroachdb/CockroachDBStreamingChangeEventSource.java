@@ -48,8 +48,10 @@ import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.SslConfigs;
+import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.connect.errors.ConnectException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,6 +59,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.debezium.DebeziumException;
+import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.connector.SnapshotRecord;
 import io.debezium.connector.cockroachdb.connection.CockroachDBConnection;
@@ -1420,7 +1423,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         dispatcher.alwaysDispatchHeartbeatEvent(currentPartition, offsetContext);
     }
 
-    private void dispatchPendingInitialOnlyEvent(CockroachDBOffsetContext offsetContext) {
+    private void dispatchPendingInitialOnlyEvent(CockroachDBOffsetContext offsetContext) throws InterruptedException {
         PendingChangefeedEvent pending = pendingInitialOnlyEvent;
         if (pending == null) {
             return;
@@ -1617,6 +1620,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             }
 
             LOGGER.debug("Stopped consuming from Kafka topics: {}", topicNames);
+        }
+        catch (InterruptedException e) {
+            // The task is stopping.
+            throw e;
+        }
+        catch (InterruptException e) {
+            // The Kafka consumer reports the interruption of a stopping task with an exception of its own.
+            throw new InterruptedException("Interrupted while reading the intermediate topics");
         }
         catch (Exception e) {
             LOGGER.error("Error consuming from Kafka topics {}: {}", topicNames, e.getMessage(), e);
@@ -1881,7 +1892,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * Handles deduplication, resolved-timestamp filtering, and dispatching.
      */
     void processChangefeedEvent(String keyJson, String valueJson, TableId table,
-                                CockroachDBOffsetContext offsetContext) {
+                                CockroachDBOffsetContext offsetContext)
+            throws InterruptedException {
         if (valueJson == null || valueJson.trim().isEmpty()) {
             return;
         }
@@ -1948,8 +1960,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
             io.debezium.relational.Table tableObj = schema.tableFor(table);
             if (tableObj == null) {
-                LOGGER.warn("No schema found for table {}, skipping event", table);
-                return;
+                throw new IllegalStateException("No schema found for table " + table);
             }
 
             // Detect schema changes by comparing event fields against registered columns.
@@ -2001,14 +2012,59 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             // Only now: an event that was skipped or that failed must not make its copy look processed.
             rememberDispatched(rowId, eventId);
         }
-        catch (DebeziumException e) {
-            // Deliberate failure (for example a schema refresh that failed after reconnect):
-            // propagate so the task restarts and replays the event instead of skipping it.
+        catch (InterruptedException e) {
+            // The task is stopping.
+            throw e;
+        }
+        catch (DebeziumException | ConnectException e) {
+            // The dispatcher reports the interruption of a stopping task, for example while it waits for
+            // room in the queue, like an event that it cannot process.
+            if (isCausedByInterruption(e)) {
+                throw new InterruptedException("Interrupted while dispatching a changefeed event");
+            }
+            // Deliberate failures: a schema refresh that failed after reconnect, or the answer of the
+            // dispatcher to an event that it cannot process while
+            // event.processing.failure.handling.mode is fail. Propagate so the task stops, and the
+            // event is read again after a restart instead of being skipped.
             throw e;
         }
         catch (Exception e) {
-            LOGGER.error("Error processing changefeed event for table {}: {}",
-                    table, e.getMessage(), e);
+            handleEventProcessingFailure(table, e);
+        }
+    }
+
+    private static boolean isCausedByInterruption(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof InterruptedException || cause instanceof InterruptException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Applies {@code event.processing.failure.handling.mode} to an event that the connector cannot
+     * process, like the dispatcher does for the events that it cannot process. With the default,
+     * {@code fail}, the task stops. The event is not skipped: it is read again after a restart.
+     */
+    private void handleEventProcessingFailure(TableId table, Exception failure) {
+        switch (config.getEventProcessingFailureHandlingMode()) {
+            case FAIL:
+                // The failure is attached as a suppressed exception, not as the cause. The error handler
+                // takes an I/O exception anywhere in the cause chain for a communication problem and
+                // restarts the task. A JSON parsing error is an I/O exception, and a restart would fail
+                // on the same event again.
+                final DebeziumException stop = new DebeziumException("Error processing changefeed event for table " + table + ": " + failure
+                        + ". Set " + CommonConnectorConfig.EVENT_PROCESSING_FAILURE_HANDLING_MODE.name()
+                        + " to warn or skip to continue without such an event.");
+                stop.addSuppressed(failure);
+                throw stop;
+            case WARN:
+                LOGGER.warn("Error processing changefeed event for table {}, skipping the event: {}", table, failure.getMessage(), failure);
+                break;
+            default:
+                LOGGER.debug("Error processing changefeed event for table {}, skipping the event: {}", table, failure.getMessage(), failure);
+                break;
         }
     }
 
