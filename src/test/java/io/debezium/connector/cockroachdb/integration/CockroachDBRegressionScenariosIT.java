@@ -1220,6 +1220,29 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
     }
 
     @Test
+    public void shouldStopWhenItsChangefeedIsCanceled() throws Exception {
+        connection = openDatabase("canceled_job_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS canceled_job_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO canceled_job_events VALUES (1, 'Alice')");
+        }
+
+        startTask(baseConnectorConfig("canceled-job-test", "canceled_job_testdb", "public.canceled_job_events"));
+        assertThat(pollForRecords(1, 45)).as("Should stream before the changefeed is canceled").isNotEmpty();
+
+        final String jobId = runningChangefeedJobFor("canceled_job_events");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CANCEL JOB " + jobId);
+        }
+
+        // Without its changefeed the connector receives nothing more, so it has to say so.
+        final PollOutcome outcome = pollUntilRecordsOrError(90);
+        assertThat(outcome.error).as("Task should stop when its changefeed has ended").isInstanceOf(ConnectException.class)
+                .isNotInstanceOf(RetriableException.class);
+        assertThat(messagesOf(outcome.error)).contains("Changefeed job " + jobId, "Restart the connector");
+    }
+
+    @Test
     public void shouldStopOnAnEventThatItCannotProcess() throws Exception {
         connection = openDatabase("failed_event_testdb");
         try (Statement stmt = connection.createStatement()) {

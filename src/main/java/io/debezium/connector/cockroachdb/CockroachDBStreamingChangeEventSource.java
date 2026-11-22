@@ -188,8 +188,47 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     /** How often an initial_only run logs the changefeed jobs it is still waiting for. */
     private static final long INITIAL_ONLY_WAIT_LOG_INTERVAL_MS = 30_000;
 
-    /** Changefeed jobs this run created or reused in kafka mode; initial_only waits for them to succeed. */
-    private final List<Long> changefeedJobIds = new ArrayList<>();
+    /**
+     * The changefeed jobs that this run created or reused in kafka mode, with their tables. An
+     * initial_only run waits for them to succeed. The other modes check that they keep running (see
+     * {@link #checkChangefeedJobs}).
+     */
+    private final Map<Long, List<TableId>> changefeedJobs = new LinkedHashMap<>();
+
+    /** How often the connector asks CockroachDB while it streams whether its changefeed jobs still run. */
+    private static final long CHANGEFEED_JOB_CHECK_INTERVAL_MS = 30_000;
+
+    /**
+     * How soon after the start the connector asks for the first time. A changefeed that cannot start, for
+     * example at a cursor that is older than the garbage collection threshold, fails within seconds.
+     */
+    private static final long FIRST_CHANGEFEED_JOB_CHECK_DELAY_MS = 5_000;
+
+    /**
+     * How long the connector waits for the answer to the job status query. The query runs on the thread
+     * that reads the intermediate topics. Without a limit, a connection whose other end is gone without
+     * notice would hold that thread until the TCP timeout.
+     */
+    static final int CHANGEFEED_JOB_QUERY_TIMEOUT_MS = 60_000;
+
+    private long nextChangefeedJobCheck;
+
+    /** The changefeed jobs that were paused at the last check, so that each pause is reported once. */
+    private final Set<Long> pausedChangefeedJobs = new HashSet<>();
+
+    /**
+     * The changefeed jobs that the connector created with a new initial scan in place of a job that had
+     * failed at its cursor. When such a job fails in the same way, no further scan is started.
+     */
+    private final Set<Long> replacementChangefeedJobs = new HashSet<>();
+
+    /**
+     * How often, and at which interval, a start waits for a changefeed job whose cancellation was
+     * requested. Such a job keeps writing until CockroachDB carries the cancellation out, which takes
+     * seconds.
+     */
+    private static final int CANCELLATION_WAIT_ATTEMPTS = 60;
+    long cancellationWaitIntervalMs = 1_000;
     /**
      * In initial_only mode the latest changefeed event is held back, so the final event of the scan can
      * carry the completed snapshot in its offset (see {@link #completeInitialOnlySnapshot}).
@@ -359,7 +398,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                            List<TableId> tables,
                            CockroachDBOffsetContext offsetContext,
                            boolean hasPriorOffset)
-            throws SQLException {
+            throws SQLException, InterruptedException {
 
         scanTimestamps.clear();
         tablesInScan.clear();
@@ -381,7 +420,10 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     config.getChangefeedEnrichedProperties());
         }
 
-        changefeedJobIds.clear();
+        changefeedJobs.clear();
+        pausedChangefeedJobs.clear();
+        replacementChangefeedJobs.clear();
+        nextChangefeedJobCheck = 0;
         int maxPerChangefeed = config.getChangefeedMaxTablesPerChangefeed();
         List<List<TableId>> groups = partitionTables(tables, maxPerChangefeed);
 
@@ -400,7 +442,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         // The jobs are listed once, and every table is checked before a changefeed is created. The running
         // changefeeds do not have to cover all tables, for example after a table was added to
         // table.include.list: a table that no running changefeed covers gets one.
-        final List<Job> jobs = listChangefeedJobs(connection);
+        final List<Job> jobs = jobsWithoutPendingCancellation(connection);
         final Set<String> checkedJobs = new HashSet<>();
         final List<TableId> uncovered = new ArrayList<>();
         for (TableId table : tables) {
@@ -570,7 +612,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
         LOGGER.debug("Changefeed query: {}", query);
         stmt.execute(query);
-        recordCreatedJobId(stmt);
+        recordCreatedJobId(stmt, tables);
         recordScanTimestamp(tables, scanCursor);
         if (!isInitialOnly()) {
             tablesInScan.addAll(tables);
@@ -664,7 +706,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         LOGGER.debug("Changefeed query: {}", query);
         try {
             stmt.execute(query);
-            recordCreatedJobId(stmt);
+            recordCreatedJobId(stmt, tables);
             recordScanTimestamp(tables, startCursor);
             return false;
         }
@@ -677,7 +719,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             String recoveryQuery = buildSinkChangefeedQuery(tables, recoveryCursor, false);
             LOGGER.debug("Invalid-cursor recovery changefeed query: {}", recoveryQuery);
             stmt.execute(recoveryQuery);
-            recordCreatedJobId(stmt);
+            recordCreatedJobId(stmt, tables);
             recordScanTimestamp(tables, recoveryCursor);
             return true;
         }
@@ -869,6 +911,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             String description = job.description();
             if (description != null && descriptionCapturesTable(description, table) && descriptionHasTopicPrefix(description, topicPrefix)) {
                 if (!checkedJobs.add(jobId)) {
+                    rememberTableOfJob(jobId, table);
                     return true;
                 }
                 if (!"running".equals(status)) {
@@ -960,11 +1003,19 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     reportJobsWithoutSourceBlock(runningJobsWithoutSourceBlock(jobs, topicPrefix));
                     reportJobsWithoutResolved(runningJobsWithout(jobs, topicPrefix, "resolved"));
                 }
-                changefeedJobIds.add(Long.parseLong(jobId));
+                rememberTableOfJob(jobId, table);
                 return true;
             }
         }
         return false;
+    }
+
+    /** Remembers that the reused changefeed job covers the table. */
+    private void rememberTableOfJob(String jobId, TableId table) {
+        final List<TableId> tables = changefeedJobs.computeIfAbsent(Long.parseLong(jobId), id -> new ArrayList<>());
+        if (!tables.contains(table)) {
+            tables.add(table);
+        }
     }
 
     /**
@@ -1069,6 +1120,34 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
+     * Lists the changefeed jobs, and waits for the jobs of this connector whose cancellation was
+     * requested. Such a job keeps writing to the intermediate topics until CockroachDB carries the
+     * cancellation out. A changefeed that the connector created in the meantime for the same tables
+     * would write the same events next to it.
+     */
+    private List<Job> jobsWithoutPendingCancellation(CockroachDBConnection connection) throws InterruptedException {
+        final String topicPrefix = resolveTopicPrefix();
+        List<String> canceling = List.of();
+        for (int attempt = 0; attempt <= CANCELLATION_WAIT_ATTEMPTS; attempt++) {
+            final List<Job> jobs = listChangefeedJobs(connection);
+            canceling = jobs.stream()
+                    .filter(job -> "cancel-requested".equals(job.status()) && descriptionHasTopicPrefix(job.description(), topicPrefix))
+                    .map(Job::jobId)
+                    .collect(Collectors.toList());
+            if (canceling.isEmpty()) {
+                return jobs;
+            }
+            if (attempt == 0) {
+                LOGGER.info("Waiting until CockroachDB has canceled changefeed job(s) {}, which can still write to the "
+                        + "intermediate topics", canceling);
+            }
+            Thread.sleep(cancellationWaitIntervalMs);
+        }
+        throw new IllegalStateException("Changefeed job(s) " + canceling + " with topic prefix '" + topicPrefix + "' are still being "
+                + "canceled. Start the connector when SHOW CHANGEFEED JOBS reports them as canceled.");
+    }
+
+    /**
      * Lists the changefeed jobs that could belong to this connector. A failed query reconnects and is
      * retried once. If that fails too, the task fails: creating a changefeed without knowing whether one
      * already runs could start a second one that double-produces into the same topics
@@ -1101,7 +1180,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         // so a restart would create an identical twin that double-produces once the paused
         // job resumes (debezium/dbz#2462). Canceled and failed jobs are correctly ignored.
         String query = "SELECT job_id, status, description FROM [SHOW CHANGEFEED JOBS] "
-                + "WHERE status IN ('running', 'paused', 'pause-requested')";
+                + "WHERE status IN ('running', 'paused', 'pause-requested', 'cancel-requested')";
         List<Job> jobs = new ArrayList<>();
         try (Statement stmt = connection.connection().createStatement();
                 ResultSet rs = stmt.executeQuery(query)) {
@@ -1230,10 +1309,10 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /** Records the job id that {@code CREATE CHANGEFEED ... INTO} returns. */
-    private void recordCreatedJobId(Statement stmt) throws SQLException {
+    private void recordCreatedJobId(Statement stmt, List<TableId> tables) throws SQLException {
         try (ResultSet rs = stmt.getResultSet()) {
             if (rs != null && rs.next()) {
-                changefeedJobIds.add(rs.getLong(1));
+                changefeedJobs.put(rs.getLong(1), new ArrayList<>(tables));
             }
         }
     }
@@ -1252,7 +1331,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 return false;
             }
             nextInitialOnlyJobCheck = now + INITIAL_ONLY_JOB_CHECK_INTERVAL_MS;
-            if (!changefeedJobsSucceeded(changefeedJobIds)) {
+            if (!changefeedJobsSucceeded(new ArrayList<>(changefeedJobs.keySet()))) {
                 return false;
             }
             List<TopicPartition> partitions = new ArrayList<>();
@@ -1274,7 +1353,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 }
             }
             initialOnlyEndOffsets = toRead;
-            LOGGER.info("Changefeed job(s) {} finished the initial scan, reading the intermediate topics up to {}", changefeedJobIds, toRead);
+            LOGGER.info("Changefeed job(s) {} finished the initial scan, reading the intermediate topics up to {}", changefeedJobs.keySet(), toRead);
         }
         Set<TopicPartition> assigned = consumer.assignment();
         for (Map.Entry<TopicPartition, Long> entry : initialOnlyEndOffsets.entrySet()) {
@@ -1303,21 +1382,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         if (jobIds.isEmpty()) {
             throw new IllegalStateException("snapshot.mode=initial_only found no changefeed job to wait for");
         }
-        Map<Long, JobStatus> statuses;
-        try {
-            statuses = queryChangefeedJobStatuses(jobIds);
-        }
-        catch (SQLException first) {
-            LOGGER.warn("Checking changefeed job(s) {} failed ({}); reconnecting and retrying", jobIds, first.getMessage());
-            try {
-                reconnectSchemaRefreshConnection();
-                statuses = queryChangefeedJobStatuses(jobIds);
-            }
-            catch (SQLException second) {
-                // The SQLException in the cause chain makes the error handler treat the failure as retriable
-                throw new DebeziumException("Checking changefeed job(s) " + jobIds + " failed after reconnecting", second);
-            }
-        }
+        Map<Long, JobStatus> statuses = changefeedJobStatuses(jobIds);
         Map<Long, String> waiting = new LinkedHashMap<>();
         for (Long jobId : jobIds) {
             JobStatus jobStatus = statuses.get(jobId);
@@ -1359,13 +1424,156 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     /**
      * Returns the status and error of each given changefeed job, keyed by job id.
      */
+    /**
+     * Reads the status of the given changefeed jobs. A failed query reconnects and is retried once.
+     */
+    private Map<Long, JobStatus> changefeedJobStatuses(List<Long> jobIds) {
+        try {
+            return queryChangefeedJobStatuses(jobIds);
+        }
+        catch (SQLException first) {
+            LOGGER.warn("Checking changefeed job(s) {} failed ({}); reconnecting and retrying", jobIds, first.getMessage());
+            try {
+                reconnectSchemaRefreshConnection();
+                return queryChangefeedJobStatuses(jobIds);
+            }
+            catch (SQLException second) {
+                // The SQLException in the cause chain makes the error handler treat the failure as retriable
+                throw new DebeziumException("Checking changefeed job(s) " + jobIds + " failed after reconnecting", second);
+            }
+        }
+    }
+
+    /**
+     * Asks CockroachDB from time to time whether the changefeed jobs that fill the intermediate topics
+     * still run. CockroachDB reports the end of a changefeed job nowhere else: its topics just stay
+     * silent, and the connector would wait for events that never come.
+     * <p>A job that has ended, because it failed or because it was canceled, stops the task. The next
+     * start creates a changefeed for its tables at the stored cursor, which is never ahead of what the
+     * job delivered (see {@link ResolvedTimestamps}). A paused job is reported once, since it
+     * delivers again when it is resumed.
+     * <p>CockroachDB accepts a changefeed into a sink at a cursor that is older than the garbage
+     * collection threshold and fails its job afterwards, unlike a sinkless changefeed, whose statement it
+     * rejects. With {@code snapshot.mode=when_needed} the connector then creates a new changefeed with an
+     * initial scan for the tables of that job. With the other modes the task stops.
+     */
+    void checkChangefeedJobs(CockroachDBOffsetContext offsetContext) throws SQLException {
+        if (changefeedJobs.isEmpty()) {
+            return;
+        }
+        final long now = clock.currentTimeInMillis();
+        if (nextChangefeedJobCheck == 0) {
+            nextChangefeedJobCheck = now + FIRST_CHANGEFEED_JOB_CHECK_DELAY_MS;
+            return;
+        }
+        if (now < nextChangefeedJobCheck) {
+            return;
+        }
+        nextChangefeedJobCheck = now + CHANGEFEED_JOB_CHECK_INTERVAL_MS;
+
+        final List<Long> jobIds = new ArrayList<>(changefeedJobs.keySet());
+        final Map<Long, JobStatus> statuses = changefeedJobStatuses(jobIds);
+        final Set<Long> replacements = new HashSet<>();
+        for (Long jobId : jobIds) {
+            final JobStatus jobStatus = statuses.get(jobId);
+            final String status = jobStatus == null ? "unknown" : jobStatus.status();
+            final List<TableId> tables = changefeedJobs.get(jobId);
+            if ("running".equals(status)) {
+                if (pausedChangefeedJobs.remove(jobId)) {
+                    LOGGER.info("Changefeed job {} runs again", jobId);
+                }
+                continue;
+            }
+            if ("paused".equals(status) || "pause-requested".equals(status)) {
+                if (pausedChangefeedJobs.add(jobId)) {
+                    LOGGER.warn("Changefeed job {} is paused. The connector receives no changes of the table(s) {} until the job "
+                            + "runs again (RESUME JOB {}).", jobId, tables, jobId);
+                }
+                continue;
+            }
+            if ("cancel-requested".equals(status)) {
+                // The job writes until CockroachDB carries the cancellation out, which takes seconds. The
+                // task stops when the job has stopped, so that a restart does not find it still writing.
+                nextChangefeedJobCheck = now + FIRST_CHANGEFEED_JOB_CHECK_DELAY_MS;
+                continue;
+            }
+            final String error = jobStatus == null || jobStatus.error() == null ? "" : jobStatus.error();
+            // A job that fails goes through the status reverting, with its error set already.
+            if (("failed".equals(status) || "reverting".equals(status)) && isInvalidCursorMessage(error)) {
+                if (replacementChangefeedJobs.contains(jobId)) {
+                    throw new DebeziumException("Changefeed job " + jobId + " for the table(s) " + tables + ", which the connector "
+                            + "created with a new initial scan in place of a job that had failed at its cursor, failed as well: "
+                            + error + ". The connector does not start a further scan.");
+                }
+                if (config.getSnapshotMode() == CockroachDBConnectorConfig.SnapshotMode.WHEN_NEEDED) {
+                    LOGGER.warn("Changefeed job {} failed because CockroachDB no longer has the changes since its cursor, and "
+                            + "snapshot.mode=when_needed is configured. Creating a changefeed with an initial scan for the "
+                            + "table(s) {}. Existing rows will be re-read and duplicate events can be emitted. Deletes that "
+                            + "occurred since that cursor cannot be recovered by this snapshot and will be lost. "
+                            + "CockroachDB error: {}", jobId, tables, error);
+                    changefeedJobs.remove(jobId);
+                    final Set<Long> jobsBefore = new HashSet<>(changefeedJobs.keySet());
+                    createChangefeedWithInitialScan(tables);
+                    changefeedJobs.keySet().stream().filter(id -> !jobsBefore.contains(id)).forEach(replacements::add);
+                    replacementChangefeedJobs.addAll(replacements);
+                    continue;
+                }
+                throw new DebeziumException("Changefeed job " + jobId + " for the table(s) " + tables + " failed because CockroachDB "
+                        + "no longer has the changes since its cursor: " + error + ". Reconfigure the connector to use the snapshot "
+                        + "mode when_needed, which starts again with an initial scan in this case.");
+            }
+            throw new DebeziumException("Changefeed job " + jobId + " for the table(s) " + tables + " has ended with the status '"
+                    + status + "'" + (error.isEmpty() ? "" : ": " + error) + ". The connector receives no more changes of these "
+                    + "tables. Restart the connector to create a changefeed for them. It starts at the cursor in the connector's "
+                    + "offsets, or like on a first start if the offsets hold none.");
+        }
+        final List<TableId> captured = changefeedJobs.values().stream().flatMap(List::stream).collect(Collectors.toList());
+        if (!replacements.isEmpty() && tablesInScan.containsAll(captured)) {
+            // With this replacement every captured table is being scanned, so this is a scan phase of the
+            // connector, like the scan with which snapshot.mode=when_needed answers a cursor that CockroachDB
+            // rejects at the start. With more than one changefeed, the jobs do not always fail before the same
+            // look at them. While the changefeed of another table goes on, or the scan of its replacement is
+            // through, the scan concerns its own tables only.
+            initialScanInProgress = true;
+            initializeSnapshotLifecycle(captured, offsetContext);
+        }
+    }
+
+    /**
+     * Creates a changefeed that starts with an initial scan, for tables whose changefeed failed because
+     * CockroachDB no longer has the changes since its cursor.
+     */
+    void createChangefeedWithInitialScan(List<TableId> tables) throws SQLException {
+        try (Statement stmt = jobConnection().createStatement()) {
+            createScanningChangefeed(stmt, tables, currentClusterTimestamp(stmt.getConnection()));
+            LOGGER.info("Created changefeed for tables: {}", tables);
+        }
+    }
+
+    /** The connection on which the connector reads the status of its changefeed jobs and replaces a failed one. */
+    Connection jobConnection() throws SQLException {
+        return schemaRefreshConnection.connection();
+    }
+
     Map<Long, JobStatus> queryChangefeedJobStatuses(List<Long> jobIds) throws SQLException {
-        String ids = jobIds.stream().map(String::valueOf).collect(Collectors.joining(", "));
-        Map<Long, JobStatus> statuses = new HashMap<>();
-        try (Statement stmt = schemaRefreshConnection.connection().createStatement();
+        final Connection connection = jobConnection();
+        final String ids = jobIds.stream().map(String::valueOf).collect(Collectors.joining(", "));
+        final Map<Long, JobStatus> statuses = new HashMap<>();
+        final int networkTimeout = connection.getNetworkTimeout();
+        connection.setNetworkTimeout(Runnable::run, CHANGEFEED_JOB_QUERY_TIMEOUT_MS);
+        try (Statement stmt = connection.createStatement();
                 ResultSet rs = stmt.executeQuery("SELECT job_id, status, error FROM [SHOW CHANGEFEED JOBS] WHERE job_id IN (" + ids + ")")) {
             while (rs.next()) {
                 statuses.put(rs.getLong(1), new JobStatus(rs.getString(2), rs.getString(3)));
+            }
+        }
+        finally {
+            try {
+                connection.setNetworkTimeout(Runnable::run, networkTimeout);
+            }
+            catch (SQLException e) {
+                // A connection that timed out is closed. The caller replaces it.
+                LOGGER.debug("Could not restore the network timeout of the connection: {}", e.getMessage());
             }
         }
         return statuses;
@@ -1716,6 +1924,9 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                         running.set(false);
                         break;
                     }
+                }
+                else if (context.isRunning() && running.get()) {
+                    checkChangefeedJobs(offsetContext);
                 }
 
                 metronome.pause();
