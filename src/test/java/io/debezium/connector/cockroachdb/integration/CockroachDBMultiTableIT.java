@@ -53,7 +53,6 @@ public class CockroachDBMultiTableIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBMultiTableIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final String DATABASE_NAME = "multi_table_testdb";
     private static final String ORDERS_TABLE = "mt_orders";
     private static final String CUSTOMERS_TABLE = "mt_customers";
@@ -70,8 +69,7 @@ public class CockroachDBMultiTableIT {
             .withListener("kafka:19092");
 
     @Container
-    private static final CockroachContainer cockroachdb = new CockroachContainer(
-            DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
+    private static final CockroachContainer cockroachdb = new CockroachContainer(CockroachDBTestImage.NAME)
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 

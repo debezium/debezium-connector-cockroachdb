@@ -54,7 +54,6 @@ public class CockroachDBEndToEndIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBEndToEndIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final String DATABASE_NAME = "e2e_testdb";
     private static final String TABLE_NAME = "e2e_orders";
 
@@ -68,8 +67,7 @@ public class CockroachDBEndToEndIT {
             .withListener("kafka:19092");
 
     @Container
-    private static final CockroachContainer cockroachdb = new CockroachContainer(
-            DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
+    private static final CockroachContainer cockroachdb = new CockroachContainer(CockroachDBTestImage.NAME)
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 

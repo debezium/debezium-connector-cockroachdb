@@ -47,7 +47,6 @@ public class CockroachDBStreamingIT {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBStreamingIT.class);
 
-    private static final String COCKROACHDB_VERSION = System.getProperty("cockroachdb.version", "v25.4.21");
     private static final String DATABASE_NAME = "streaming_testdb";
     private static final String TABLE_NAME = "orders";
     private static final String TOPIC_PREFIX = "streaming-test";
@@ -62,8 +61,7 @@ public class CockroachDBStreamingIT {
             .withListener("kafka:19092");
 
     @Container
-    private static final CockroachContainer cockroachdb = new CockroachContainer(
-            DockerImageName.parse("cockroachdb/cockroach:" + COCKROACHDB_VERSION))
+    private static final CockroachContainer cockroachdb = new CockroachContainer(CockroachDBTestImage.NAME)
             .withNetwork(NETWORK)
             .withNetworkAliases("cockroachdb");
 
