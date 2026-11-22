@@ -11,11 +11,9 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.connect.data.Struct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.debezium.connector.SnapshotRecord;
 import io.debezium.pipeline.CommonOffsetContext;
 import io.debezium.pipeline.source.snapshot.incremental.IncrementalSnapshotContext;
 import io.debezium.pipeline.source.snapshot.incremental.SignalBasedIncrementalSnapshotContext;
@@ -113,11 +111,6 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
     }
 
     @Override
-    public Struct getSourceInfo() {
-        return sourceInfo.struct();
-    }
-
-    @Override
     public void event(DataCollectionId collectionId, Instant ts) {
         setTimestamp(ts);
         if (collectionId instanceof TableId) {
@@ -144,11 +137,6 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
      */
     public boolean isSnapshotCompleted() {
         return snapshotCompleted;
-    }
-
-    @Override
-    public void markSnapshotRecord(SnapshotRecord record) {
-        sourceInfo.setSnapshot(record);
     }
 
     @Override
