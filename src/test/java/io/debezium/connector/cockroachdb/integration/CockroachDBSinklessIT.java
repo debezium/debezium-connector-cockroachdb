@@ -6,6 +6,7 @@
 package io.debezium.connector.cockroachdb.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -38,6 +39,11 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import io.debezium.connector.cockroachdb.CockroachDBConnectorTask;
+import io.debezium.connector.common.BaseSourceTask;
+
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 
 /**
  * End-to-end integration test for the connector's <b>sinkless</b> changefeed delivery mode
@@ -188,6 +194,28 @@ public class CockroachDBSinklessIT {
         final Struct value = (Struct) inserted.value();
         assertThat(value.getString("op")).as("A row inserted after the scan is a create").isEqualTo("c");
         assertThat(value.getStruct("source").getString("snapshot")).as("A create is not a snapshot record").isIn(null, "false");
+    }
+
+    @Test
+    public void shouldRefuseToStartWithoutTheSourceBlock() throws Exception {
+        // A sinkless changefeed sends the events of all tables in one stream, and the table of an event is in
+        // its source block. Without the block the connector could not process any event.
+        Map<String, String> config = sinklessConfig();
+        config.put("cockroachdb.changefeed.enriched.properties", "schema");
+
+        task = new CockroachDBConnectorTask();
+        task.initialize(createMockContext());
+        final var taskLogger = ((LoggerContext) LoggerFactory.getILoggerFactory()).getLogger(BaseSourceTask.class);
+        final ListAppender<ILoggingEvent> log = new ListAppender<>();
+        log.start();
+        taskLogger.addAppender(log);
+        try {
+            assertThatThrownBy(() -> task.start(config)).isInstanceOf(ConnectException.class);
+            assertThat(log.list).anyMatch(event -> event.getFormattedMessage().contains("Must include 'source' for a sinkless changefeed"));
+        }
+        finally {
+            taskLogger.detachAppender(log);
+        }
     }
 
     @Test

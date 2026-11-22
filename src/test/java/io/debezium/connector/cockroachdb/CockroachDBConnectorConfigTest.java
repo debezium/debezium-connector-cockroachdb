@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.kafka.common.config.ConfigDef;
@@ -475,6 +476,79 @@ public class CockroachDBConnectorConfigTest {
     public void shouldAcceptEmptyStringForSinkTlsFile() {
         Configuration config = baseProps()
                 .with("cockroachdb.changefeed.sink.tls.ca.cert.file", "")
+                .build();
+        assertThat(config.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                CockroachDBConnectorConfigTest::failOnProblem)).isTrue();
+    }
+
+    @Test
+    public void shouldRejectASinklessChangefeedWithoutTheSourceProperty() {
+        // A sinkless changefeed sends the events of all tables in one stream. The table of an event is in
+        // its source block.
+        Configuration config = baseProps()
+                .with("cockroachdb.changefeed.sink.type", "sinkless")
+                .with("cockroachdb.changefeed.enriched.properties", "schema")
+                .build();
+        StringBuilder problemMessage = new StringBuilder();
+        boolean ok = config.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                (String message) -> problemMessage.append(message));
+        assertThat(ok).isFalse();
+        assertThat(problemMessage.toString()).contains("cockroachdb.changefeed.enriched.properties", "'source'", "sinkless");
+    }
+
+    @Test
+    public void shouldRejectARowTimestampWithoutTheSourceProperty() {
+        // source.ts_hlc is read from the source block of the changefeed event.
+        for (String property : List.of("cockroachdb.changefeed.include.updated", "cockroachdb.changefeed.include.mvcc.timestamp")) {
+            Configuration config = baseProps()
+                    .with(property, "true")
+                    .with("cockroachdb.changefeed.enriched.properties", "")
+                    .build();
+            StringBuilder problemMessage = new StringBuilder();
+            boolean ok = config.validateAndRecord(
+                    CockroachDBConnectorConfig.ALL_FIELDS,
+                    (String message) -> problemMessage.append(message));
+            assertThat(ok).as(property).isFalse();
+            assertThat(problemMessage.toString()).contains("'source'", property);
+        }
+    }
+
+    @Test
+    public void shouldAcceptARowTimestampWithoutTheSourcePropertyInTheSnapshotModeThatIgnoresIt() {
+        // snapshot.mode=initial_only ignores both properties, because CockroachDB does not allow their
+        // options together with initial_scan='only'.
+        Configuration config = baseProps()
+                .with("snapshot.mode", "initial_only")
+                .with("cockroachdb.changefeed.include.updated", "true")
+                .with("cockroachdb.changefeed.include.mvcc.timestamp", "true")
+                .with("cockroachdb.changefeed.enriched.properties", "schema")
+                .build();
+        assertThat(config.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                CockroachDBConnectorConfigTest::failOnProblem)).isTrue();
+    }
+
+    @Test
+    public void shouldAcceptEnrichedPropertiesThatIncludeSource() {
+        for (String properties : List.of("source", "source,schema", "schema, source")) {
+            Configuration config = baseProps()
+                    .with("cockroachdb.changefeed.sink.type", "sinkless")
+                    .with("cockroachdb.changefeed.include.updated", "true")
+                    .with("cockroachdb.changefeed.enriched.properties", properties)
+                    .build();
+            assertThat(config.validateAndRecord(
+                    CockroachDBConnectorConfig.ALL_FIELDS,
+                    CockroachDBConnectorConfigTest::failOnProblem)).as(properties).isTrue();
+        }
+    }
+
+    @Test
+    public void shouldAcceptAKafkaChangefeedWithoutTheSourceProperty() {
+        // The connector knows the table of an event from its topic. It warns at startup about the timestamps.
+        Configuration config = baseProps()
+                .with("cockroachdb.changefeed.enriched.properties", "schema")
                 .build();
         assertThat(config.validateAndRecord(
                 CockroachDBConnectorConfig.ALL_FIELDS,

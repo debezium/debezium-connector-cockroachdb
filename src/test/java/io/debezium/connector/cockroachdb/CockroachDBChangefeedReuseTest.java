@@ -790,6 +790,112 @@ public class CockroachDBChangefeedReuseTest {
     }
 
     @Test
+    void refusesAReusedChangefeedWithoutUpdatedWhenItsTimestampIsToBeEmitted() throws Exception {
+        // cockroachdb.changefeed.include.updated promises the timestamp of the updated option as source.ts_hlc.
+        final String withoutUpdated = "CREATE CHANGEFEED FOR TABLE reprodb.public.orders INTO 'kafka://kafka:9092?topic_prefix=repro.' "
+                + "WITH OPTIONS (enriched_properties = 'source', envelope = 'enriched', full_table_name, resolved = '3s')";
+
+        assertThatThrownBy(() -> sourceWith("cockroachdb.changefeed.include.updated")
+                .changefeedExists(connectionListing("1026", "running", withoutUpdated), ORDERS, List.of(ORDERS)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("does not use the updated option")
+                .hasMessageContaining("cockroachdb.changefeed.include.updated is enabled")
+                .hasMessageContaining("ALTER CHANGEFEED 1026 SET updated");
+    }
+
+    @Test
+    void reusesAChangefeedWithoutUpdatedWhenTheMvccTimestampIsEmittedInstead() throws Exception {
+        // With both properties enabled, source.ts_hlc carries the MVCC timestamp, which this changefeed has.
+        final String withMvccTimestamp = "CREATE CHANGEFEED FOR TABLE reprodb.public.orders INTO 'kafka://kafka:9092?topic_prefix=repro.' "
+                + "WITH OPTIONS (enriched_properties = 'source', envelope = 'enriched', full_table_name, mvcc_timestamp, resolved = '3s')";
+
+        assertThat(source(Map.of("cockroachdb.changefeed.include.updated", "true", "cockroachdb.changefeed.include.mvcc.timestamp", "true"))
+                .changefeedExists(connectionListing("1027", "running", withMvccTimestamp), ORDERS, List.of(ORDERS))).isTrue();
+    }
+
+    @Test
+    void refusesAReusedChangefeedWithoutTheSourceBlockWhenATimestampIsToBeEmitted() throws Exception {
+        // The timestamp that is emitted as source.ts_hlc is in the source block of the changefeed events, which
+        // CockroachDB sends only with enriched_properties = 'source'. The option of the changefeed counts, not
+        // the property of the connector, which is used only when the connector creates a changefeed.
+        final String withoutSource = "CREATE CHANGEFEED FOR TABLE reprodb.public.orders INTO 'kafka://kafka:9092?topic_prefix=repro.' "
+                + "WITH OPTIONS (enriched_properties = 'schema', envelope = 'enriched', full_table_name, mvcc_timestamp, resolved = '3s', updated)";
+
+        for (String property : List.of("cockroachdb.changefeed.include.updated", "cockroachdb.changefeed.include.mvcc.timestamp")) {
+            assertThatThrownBy(() -> sourceWith(property).changefeedExists(connectionListing("1028", "running", withoutSource), ORDERS, List.of(ORDERS)))
+                    .as(property)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("does not use the enriched_properties = 'source' option")
+                    .hasMessageContaining(property + " is enabled")
+                    // ALTER CHANGEFEED replaces the value, so the statement keeps the block that the changefeed sends already.
+                    .hasMessageContaining("ALTER CHANGEFEED 1028 SET enriched_properties = 'schema,source' and RESUME JOB 1028")
+                    .hasMessageContaining("replaces the value of enriched_properties");
+        }
+    }
+
+    @Test
+    void addsTheSourceBlockToTheBlocksThatAChangefeedSendsAlready() {
+        final String options = "CREATE CHANGEFEED FOR TABLE reprodb.public.orders INTO 'kafka://kafka:9092?topic_prefix=repro.' WITH OPTIONS (";
+        assertThat(CockroachDBStreamingChangeEventSource.enrichedPropertiesWithSource(options + "enriched_properties = 'schema', envelope = 'enriched')"))
+                .isEqualTo("schema,source");
+        assertThat(CockroachDBStreamingChangeEventSource.enrichedPropertiesWithSource(options + "envelope = 'enriched', updated)"))
+                .isEqualTo("source");
+        assertThat(CockroachDBStreamingChangeEventSource.enrichedPropertiesWithSource(options + "enriched_properties = 'source,schema', updated)"))
+                .isEqualTo("source,schema");
+        assertThat(CockroachDBStreamingChangeEventSource.enrichedPropertiesWithSource(null)).isEqualTo("source");
+    }
+
+    @Test
+    void namesEveryReusedChangefeedThatSendsNoSourceBlock() throws Exception {
+        final String withoutSource = "CREATE CHANGEFEED FOR TABLE reprodb.public.orders INTO 'kafka://kafka:9092?topic_prefix=repro.' "
+                + "WITH OPTIONS (envelope = 'enriched', full_table_name, resolved = '3s', updated)";
+        final String withSourceAndSchema = "CREATE CHANGEFEED FOR TABLE reprodb.public.acct INTO 'kafka://kafka:9092?topic_prefix=repro.' "
+                + "WITH OPTIONS (enriched_properties = 'schema,source', envelope = 'enriched', full_table_name, resolved = '3s', updated)";
+        final Logger sourceLogger = (Logger) LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
+        final ListAppender<ILoggingEvent> log = new ListAppender<>();
+        log.start();
+        sourceLogger.addAppender(log);
+        try {
+            assertThat(source(Map.of()).changefeedExists(connectionListingJobs(
+                    new String[]{ "1029", "running", withSourceAndSchema },
+                    new String[]{ "1030", "running", withoutSource }), ACCT, List.of(ACCT, ORDERS))).isTrue();
+
+            assertThat(log.list).filteredOn(event -> event.getFormattedMessage().contains("does not include source"))
+                    .singleElement()
+                    .satisfies(event -> assertThat(event.getFormattedMessage())
+                            .contains("job(s) 1030,", "ALTER CHANGEFEED <job_id> SET enriched_properties = 'source'",
+                                    "replaces the value of enriched_properties", "enriched_properties = 'schema,source'")
+                            .doesNotContain("1029"));
+        }
+        finally {
+            sourceLogger.detachAppender(log);
+        }
+    }
+
+    @Test
+    void warnsWhenTheEnrichedPropertiesLeaveOutTheSourceBlock() throws Exception {
+        // The timestamp of an event is in its source block.
+        final Statement cluster = clusterListing("1795243641446371339.0000000000", new String[][]{ { "public", "acct" } });
+        final Logger sourceLogger = (Logger) LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
+        final ListAppender<ILoggingEvent> log = new ListAppender<>();
+        log.start();
+        sourceLogger.addAppender(log);
+        try {
+            source(Map.of("cockroachdb.changefeed.enriched.properties", "schema"))
+                    .createChangefeeds(connectionFor(cluster), List.of(ACCT), offsetsAt(null), false);
+            source(Map.of("cockroachdb.changefeed.enriched.properties", "schema, source"))
+                    .createChangefeeds(connectionFor(cluster), List.of(ACCT), offsetsAt(null), false);
+
+            assertThat(log.list).filteredOn(event -> event.getFormattedMessage().contains("without 'source'"))
+                    .singleElement()
+                    .satisfies(event -> assertThat(event.getFormattedMessage()).contains("cockroachdb.changefeed.enriched.properties is 'schema'"));
+        }
+        finally {
+            sourceLogger.detachAppender(log);
+        }
+    }
+
+    @Test
     void namesEveryReusedChangefeedThatLacksTheResolvedOption() throws Exception {
         // The stored cursor is the resolved timestamp that all changefeeds have reached. A changefeed that
         // reports none keeps it where it is, so the connector names the jobs and the way to add the option.

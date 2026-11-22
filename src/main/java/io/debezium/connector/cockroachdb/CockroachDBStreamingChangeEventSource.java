@@ -140,6 +140,10 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     private static final Set<String> UNDEFINED_TABLE = Set.of("42P01", "3F000", "3D000");
 
+    /** Goes with the advice to add the source block to a changefeed: the statement must not take another block away. */
+    private static final String KEEP_ENRICHED_PROPERTIES = "ALTER CHANGEFEED replaces the value of enriched_properties, so name the "
+            + "properties that the changefeed sends already together with source, for example enriched_properties = 'schema,source'.";
+
     /**
      * The cursor of the changefeed that covers a table, for the changefeeds whose cursor is known. An
      * initial scan reads the tables as of the cursor (see {@link #isScanRow}).
@@ -364,6 +368,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             initialScanInProgress = isInitialScan(config.getInitialScanForSnapshotMode(hasPriorOffset));
             checkThatSinklessTablesExistedAt(connection, tables, offsetContext.getCursor(), hasPriorOffset);
             return;
+        }
+
+        if (!config.hasEnrichedSourceProperty()) {
+            LOGGER.warn("cockroachdb.changefeed.enriched.properties is '{}', without 'source'. The changefeed events then "
+                    + "have no source block, which is where the connector reads the timestamp of an event. Without it the "
+                    + "connector cannot tell the rows of an initial scan from the rows that are inserted during the scan, "
+                    + "and it cannot recognize an event that CockroachDB delivers more than once.",
+                    config.getChangefeedEnrichedProperties());
         }
 
         changefeedJobIds.clear();
@@ -899,6 +911,28 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                             table, topicPrefix, "mvcc_timestamp", "cockroachdb.changefeed.include.mvcc.timestamp",
                             "Events from such a changefeed cannot carry the row's MVCC timestamp."));
                 }
+                // And one without updated cannot deliver the timestamp that
+                // cockroachdb.changefeed.include.updated promises as source.ts_hlc, unless the MVCC
+                // timestamp is emitted there instead.
+                if (config.isChangefeedIncludeUpdated() && !isInitialOnly() && !isMvccTimestampRequested()
+                        && !changefeedHasOption(description, "updated")) {
+                    throw new IllegalStateException(missingOptionError(runningJobsWithout(jobs, topicPrefix, "updated"), jobId, table,
+                            topicPrefix, "updated", "cockroachdb.changefeed.include.updated",
+                            "Events from such a changefeed cannot carry the timestamp of the updated option."));
+                }
+                // The timestamp of either option is in the source block of the events, which a changefeed
+                // sends only when its enriched_properties option includes source. The option of the
+                // changefeed counts here, not cockroachdb.changefeed.enriched.properties, which the
+                // connector uses only for the changefeeds that it creates.
+                if (isRowTimestampRequested() && !isInitialOnly() && !changefeedSendsSourceBlock(description)) {
+                    throw new IllegalStateException(missingOptionError(runningJobsWithoutSourceBlock(jobs, topicPrefix), jobId, table,
+                            topicPrefix, "enriched_properties = 'source'",
+                            "enriched_properties = '" + enrichedPropertiesWithSource(description) + "'",
+                            config.isChangefeedIncludeUpdated() ? "cockroachdb.changefeed.include.updated"
+                                    : "cockroachdb.changefeed.include.mvcc.timestamp",
+                            "Events from such a changefeed have no source block, which carries the timestamp.")
+                            + " " + KEEP_ENRICHED_PROPERTIES);
+                }
                 if (!config.isChangefeedIncludeDiff() && changefeedHasDiffOption(description)) {
                     LOGGER.warn("Reusing changefeed for table {} that was created with the diff option while "
                             + "cockroachdb.changefeed.include.diff is disabled; update events will carry before images.",
@@ -920,6 +954,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     recordCursorsOfRunningJobs(jobs, topicPrefix, allIncludedTables);
                     reusedCursorsRecorded = true;
                     reportJobsWithoutUpdated(runningJobsWithout(jobs, topicPrefix, "updated"));
+                    reportJobsWithoutSourceBlock(runningJobsWithoutSourceBlock(jobs, topicPrefix));
                     reportJobsWithoutResolved(runningJobsWithout(jobs, topicPrefix, "resolved"));
                 }
                 changefeedJobIds.add(Long.parseLong(jobId));
@@ -944,6 +979,25 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 + "delivers more than once. A changefeed that the connector creates has the option. To add it to an existing "
                 + "changefeed, run PAUSE JOB <job_id>, wait until SHOW CHANGEFEED JOB <job_id> reports the status 'paused', and "
                 + "run ALTER CHANGEFEED <job_id> SET updated and RESUME JOB <job_id>.", String.join(", ", jobIds));
+    }
+
+    /**
+     * Names the reused changefeeds whose events have no source block, and says how to add it. The
+     * timestamp that the {@code updated} option adds to an event is in that block, so without it the
+     * connector is as limited as without the option (see {@link #reportJobsWithoutUpdated}).
+     */
+    private void reportJobsWithoutSourceBlock(List<String> jobIds) {
+        if (jobIds.isEmpty() || isInitialOnly()) {
+            return;
+        }
+        LOGGER.info("Reusing changefeed job(s) {}, whose enriched_properties option does not include source. Their events "
+                + "have no source block, which carries the timestamp of an event, so the connector cannot recognize the rows "
+                + "of an initial scan by their timestamp, and it cannot recognize an event that CockroachDB delivers more than "
+                + "once. A changefeed that the connector creates sends the block unless "
+                + "cockroachdb.changefeed.enriched.properties leaves it out. To add it to an existing changefeed, run "
+                + "PAUSE JOB <job_id>, wait until SHOW CHANGEFEED JOB <job_id> reports the status 'paused', and run "
+                + "ALTER CHANGEFEED <job_id> SET enriched_properties = 'source' and RESUME JOB <job_id>. " + KEEP_ENRICHED_PROPERTIES,
+                String.join(", ", jobIds));
     }
 
     /**
@@ -1069,6 +1123,19 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
+     * Returns the ids of the running changefeed jobs with this connector's topic prefix and the
+     * enriched envelope whose events have no source block.
+     */
+    private static List<String> runningJobsWithoutSourceBlock(List<Job> jobs, String topicPrefix) {
+        return jobs.stream()
+                .filter(job -> "running".equals(job.status()) && descriptionHasTopicPrefix(job.description(), topicPrefix)
+                        && changefeedUsesEnrichedEnvelope(job.description()) && !changefeedSendsSourceBlock(job.description()))
+                .map(Job::jobId)
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
+    /**
      * Builds the error for reused changefeeds that lack an option the configuration needs, naming every
      * affected job. CockroachDB can add the option with ALTER CHANGEFEED once the job is paused; PAUSE
      * JOB only requests the pause, so the operator has to wait for the paused status first
@@ -1076,13 +1143,23 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     static String missingOptionError(List<String> jobIds, String matchedJobId, TableId table, String topicPrefix, String option,
                                      String property, String consequence) {
+        return missingOptionError(jobIds, matchedJobId, table, topicPrefix, option, option, property, consequence);
+    }
+
+    /**
+     * Like {@link #missingOptionError(List, String, TableId, String, String, String, String)}, for an
+     * option whose value depends on the changefeed: {@code optionOfTheJob} is what {@code ALTER
+     * CHANGEFEED} has to set for the matched job. It is named when that job is the only one.
+     */
+    static String missingOptionError(List<String> jobIds, String matchedJobId, TableId table, String topicPrefix, String option,
+                                     String optionOfTheJob, String property, String consequence) {
         String waitForPause = "reports the status 'paused' (ALTER CHANGEFEED rejects a job that is not paused yet), run ";
         if (jobIds.size() <= 1) {
             String id = matchedJobId;
             return "Found existing running changefeed job " + id + " for table " + table + " using topic prefix '" + topicPrefix
                     + "' that does not use the " + option + " option, but " + property + " is enabled. " + consequence
                     + " To add the option to the existing changefeed, run PAUSE JOB " + id + ", wait until SHOW CHANGEFEED JOB " + id + " "
-                    + waitForPause + "ALTER CHANGEFEED " + id + " SET " + option + " and RESUME JOB " + id + ", and then restart the "
+                    + waitForPause + "ALTER CHANGEFEED " + id + " SET " + optionOfTheJob + " and RESUME JOB " + id + ", and then restart the "
                     + "connector. Alternatively, cancel the job (CANCEL JOB " + id + ") and restart the connector so that it creates a "
                     + "changefeed with " + option + ", or disable " + property + ".";
         }
@@ -1378,6 +1455,42 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     static boolean changefeedHasOption(String description, String optionName) {
         return changefeedOptions(description).stream().anyMatch(option -> optionName.equals(option.split("=", 2)[0].trim()));
+    }
+
+    /**
+     * Returns {@code true} if the {@code enriched_properties} option in a {@code SHOW CHANGEFEED JOBS}
+     * description includes {@code source}. Only then do the events of the changefeed carry the source
+     * block.
+     */
+    static boolean changefeedSendsSourceBlock(String description) {
+        for (String option : changefeedOptions(description)) {
+            final String[] nameAndValue = option.split("=", 2);
+            if (nameAndValue.length == 2 && "enriched_properties".equals(nameAndValue[0].trim())) {
+                return Arrays.stream(nameAndValue[1].replace("'", "").split(",")).anyMatch(property -> "source".equals(property.trim()));
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns the value of {@code enriched_properties} that adds {@code source} to the properties that a
+     * changefeed has according to its {@code SHOW CHANGEFEED JOBS} description. {@code ALTER CHANGEFEED}
+     * replaces the value of the option, so a statement that names {@code source} alone would take away a
+     * block that the changefeed sends to other consumers.
+     */
+    static String enrichedPropertiesWithSource(String description) {
+        final List<String> properties = new ArrayList<>();
+        for (String option : changefeedOptions(description)) {
+            final String[] nameAndValue = option.split("=", 2);
+            if (nameAndValue.length == 2 && "enriched_properties".equals(nameAndValue[0].trim())) {
+                Arrays.stream(nameAndValue[1].replace("'", "").split(",")).map(String::trim)
+                        .filter(property -> !property.isEmpty() && !properties.contains(property)).forEach(properties::add);
+            }
+        }
+        if (!properties.contains("source")) {
+            properties.add("source");
+        }
+        return String.join(",", properties);
     }
 
     /**
