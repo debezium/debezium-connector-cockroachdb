@@ -8,6 +8,7 @@ package io.debezium.connector.cockroachdb.connection;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.Optional;
 import java.util.Properties;
 
@@ -182,6 +183,29 @@ public class CockroachDBConnection extends JdbcConnection {
             props.setProperty("tcpKeepAlive", "true");
         }
 
+        return props;
+    }
+
+    /**
+     * Opens a connection for the validation of a configuration: one attempt, without the statements of
+     * {@code database.initial.statements}, and with a limit on every step. A node that accepts connections
+     * while its cluster is not available never answers, and a thread that waited for it without a limit
+     * would stay behind after every validation.
+     *
+     * @param timeout the time that the validation waits for the connection check
+     */
+    public static Connection connectOnce(CockroachDBConnectorConfig config, Duration timeout) throws SQLException {
+        return DriverManager.getConnection(buildConnectionUrl(config), buildValidationProperties(config, timeout));
+    }
+
+    static Properties buildValidationProperties(CockroachDBConnectorConfig config, Duration timeout) {
+        final Properties props = buildConnectionProperties(config);
+        // One second more than the validation waits: the validation reports its own timeout, and the attempt
+        // ends right after it.
+        final long limit = (timeout.toMillis() + 999) / 1000 + 1;
+        final long connect = config.getConnectionTimeoutMs() / 1000;
+        props.setProperty("connectTimeout", String.valueOf(connect > 0 ? Math.min(connect, limit) : limit));
+        props.setProperty("socketTimeout", String.valueOf(limit));
         return props;
     }
 
