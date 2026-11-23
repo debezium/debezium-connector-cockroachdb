@@ -344,6 +344,33 @@ public class CockroachDBConnectorConfigTest {
     }
 
     @Test
+    public void shouldNotExposeTheConnectionValidationTimeoutInSeconds() {
+        // The property had no effect: nothing has read it since the connector stopped testing its connection
+        // before each use.
+        CockroachDBConnector connector = new CockroachDBConnector();
+        ConfigDef configDef = connector.config();
+
+        assertThat(configDef.names()).doesNotContain("connection.validation.timeout.seconds");
+    }
+
+    @Test
+    public void shouldHandleStaleConnectionValidationTimeoutInSeconds() {
+        Map<String, String> props = new HashMap<>();
+        props.put("database.hostname", "localhost");
+        props.put("database.user", "root");
+        props.put("database.dbname", "defaultdb");
+        props.put("topic.prefix", "test");
+        props.put("connection.validation.timeout.seconds", "5");
+
+        Configuration configuration = Configuration.from(props);
+        CockroachDBConnectorConfig config = new CockroachDBConnectorConfig(configuration);
+        assertThat(config.getLogicalName()).isEqualTo("test");
+        assertThat(configuration.validateAndRecord(
+                CockroachDBConnectorConfig.ALL_FIELDS,
+                CockroachDBConnectorConfigTest::failOnProblem)).isTrue();
+    }
+
+    @Test
     public void shouldDefaultSinkTopicPrefixToEmpty() {
         Map<String, String> props = new HashMap<>();
         props.put("database.hostname", "localhost");

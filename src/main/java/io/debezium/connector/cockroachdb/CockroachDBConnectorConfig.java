@@ -506,15 +506,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withValidation(Field::isPositiveInteger)
             .withDescription("Maximum number of connection retry attempts before giving up.");
 
-    public static final Field CONNECTION_VALIDATION_TIMEOUT_S = Field.create("connection.validation.timeout.seconds")
-            .withDisplayName("Connection validation timeout (seconds)")
-            .withType(Type.INT)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTION_ADVANCED))
-            .withDefault(5)
-            .withWidth(Width.SHORT)
-            .withImportance(Importance.LOW)
-            .withDescription("Timeout in seconds for validating that an existing JDBC connection is still usable.");
-
     /**
      * Prefix for passthrough properties applied to the connector's internal changefeed
      * Kafka consumer, with the prefix stripped.
@@ -547,8 +538,7 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     STATUS_UPDATE_INTERVAL_MS,
                     CONNECTION_TIMEOUT_MS,
                     CONNECTION_RETRY_DELAY_MS,
-                    CONNECTION_MAX_RETRIES,
-                    CONNECTION_VALIDATION_TIMEOUT_S)
+                    CONNECTION_MAX_RETRIES)
             .group(Field.Group.CONNECTION_ADVANCED_SSL,
                     SSL_MODE,
                     SSL_CLIENT_CERT,
@@ -1195,10 +1185,6 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public int getConnectionMaxRetries() {
         return config.getInteger(CONNECTION_MAX_RETRIES);
-    }
-
-    public int getConnectionValidationTimeoutSeconds() {
-        return config.getInteger(CONNECTION_VALIDATION_TIMEOUT_S);
     }
 
     public String getChangefeedKafkaBootstrapServers() {
