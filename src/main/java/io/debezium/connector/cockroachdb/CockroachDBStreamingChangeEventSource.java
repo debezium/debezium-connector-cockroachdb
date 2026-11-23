@@ -2806,6 +2806,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 .collect(Collectors.joining(", ")));
 
         String sinkUri = config.getChangefeedSinkUri();
+        if (sinkUri == null || sinkUri.isBlank()) {
+            // Without the property the connector can read an existing changefeed, and it cannot create one.
+            throw new DebeziumException("The connector has to create a changefeed for " + tables + ", and "
+                    + CockroachDBConnectorConfig.CHANGEFEED_SINK_URI.name() + " is not set. Set it to the sink of the "
+                    + "changefeed, for example kafka://<host>:<port>.");
+        }
         sinkUri = injectSinkTlsParams(sinkUri);
         // Use the resolved topic prefix verbatim so the user controls the separator. With
         // full_table_name, CockroachDB names topics <prefix><database>.<schema>.<table>, which is

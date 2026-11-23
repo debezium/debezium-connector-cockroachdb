@@ -6,6 +6,7 @@
 package io.debezium.connector.cockroachdb;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -19,6 +20,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import io.debezium.DebeziumException;
 import io.debezium.config.Configuration;
 import io.debezium.relational.TableId;
 
@@ -66,6 +68,23 @@ public class CockroachDBMultiTableTest {
                 query.indexOf("FOR TABLE ") + "FOR TABLE ".length(),
                 query.indexOf(" INTO "));
         assertThat(tablesPart.split(",")).hasSize(1);
+    }
+
+    @Test
+    public void shouldNameTheSinkUriWhenAChangefeedHasToBeCreatedWithoutIt() {
+        // The connector runs without the property when it reuses an existing changefeed and takes the Kafka
+        // bootstrap servers from their own property. To create a changefeed it needs the sink.
+        Configuration config = baseConfig().edit()
+                .without(CockroachDBConnectorConfig.CHANGEFEED_SINK_URI.name())
+                .with(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS, "kafka:9092")
+                .build();
+        CockroachDBStreamingChangeEventSource source = createSource(config);
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+
+        assertThatThrownBy(() -> source.buildSinkChangefeedQuery(tables, null, false))
+                .isInstanceOf(DebeziumException.class)
+                .hasMessageContaining(CockroachDBConnectorConfig.CHANGEFEED_SINK_URI.name())
+                .hasMessageContaining("testdb.public.orders");
     }
 
     @Test
