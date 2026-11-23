@@ -12,8 +12,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
+import org.apache.kafka.common.config.Config;
+import org.apache.kafka.common.config.ConfigValue;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -25,6 +28,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 import io.debezium.connector.cockroachdb.CockroachDBConnector;
+import io.debezium.connector.cockroachdb.CockroachDBConnectorConfig;
 
 /**
  * Integration test for CockroachDB connector connection functionality.
@@ -168,6 +172,79 @@ public class CockroachDBConnectionIT {
         connector.stop();
     }
 
+    @Test
+    public void shouldAcceptAConfigurationWhoseConnectionWorks() {
+        final Config result = new CockroachDBConnector().validate(getConnectorConfig());
+
+        assertNoErrors(result);
+    }
+
+    @Test
+    public void shouldNotRequirePrivilegesForTheConnectionCheck() throws Exception {
+        // CockroachDB checks the changefeed privileges when the changefeed is created. The validation
+        // only needs a user that can log in.
+        try (var stmt = connection.createStatement()) {
+            stmt.execute("CREATE USER IF NOT EXISTS validation_only");
+        }
+        final Map<String, String> config = getConnectorConfig();
+        config.put("database.user", "validation_only");
+
+        final Config result = new CockroachDBConnector().validate(config);
+
+        assertNoErrors(result);
+    }
+
+    @Test
+    public void shouldNotRunTheInitialStatementsWhenTheConfigurationIsValidated() throws Exception {
+        // A validation changes nothing in the database.
+        final Map<String, String> config = getConnectorConfig();
+        config.put(CockroachDBConnectorConfig.ON_CONNECT_STATEMENTS.name(), "CREATE TABLE IF NOT EXISTS validation_side_effect (id INT PRIMARY KEY)");
+
+        final Config result = new CockroachDBConnector().validate(config);
+
+        assertNoErrors(result);
+        try (var stmt = connection.createStatement();
+                var rs = stmt.executeQuery("SELECT count(*) FROM information_schema.tables WHERE table_name = 'validation_side_effect'")) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getInt(1)).as("Tables that the validation created").isZero();
+        }
+    }
+
+    @Test
+    public void shouldReportADatabaseThatDoesNotExistWhenTheConfigurationIsValidated() {
+        // CockroachDB accepts a connection to a database that does not exist, so a connection alone does not show it.
+        final Map<String, String> config = getConnectorConfig();
+        config.put("database.dbname", "no_such_database");
+
+        final Config result = new CockroachDBConnector().validate(config);
+
+        assertThat(errorsOf(result, "database.hostname"))
+                .anyMatch(message -> message.startsWith("Unable to connect: ") && message.contains("no_such_database"));
+    }
+
+    @Test
+    public void shouldReportAUserThatCannotLogInWhenTheConfigurationIsValidated() {
+        final Map<String, String> config = getConnectorConfig();
+        config.put("database.user", "no_such_user");
+
+        final Config result = new CockroachDBConnector().validate(config);
+
+        assertThat(errorsOf(result, "database.hostname"))
+                .anyMatch(message -> message.startsWith("Unable to connect: ") && message.contains("no_such_user"));
+    }
+
+    private static void assertNoErrors(Config result) {
+        assertThat(result.configValues()).allSatisfy(value -> assertThat(value.errorMessages()).as(value.name()).isEmpty());
+    }
+
+    private static List<String> errorsOf(Config result, String property) {
+        return result.configValues().stream()
+                .filter(value -> value.name().equals(property))
+                .map(ConfigValue::errorMessages)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("The validation result has no entry for " + property));
+    }
+
     private Map<String, String> getConnectorConfig() {
         Map<String, String> config = new HashMap<>();
         config.put("name", "cockroachdb-connection-test");
@@ -181,6 +258,7 @@ public class CockroachDBConnectionIT {
         config.put("topic.prefix", "cockroachdb");
         config.put("schema.history.internal.kafka.bootstrap.servers", kafka.getBootstrapServers());
         config.put("schema.history.internal.kafka.topic", "schema-changes.testdb");
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_SINK_URI.name(), "kafka://kafka:19092");
         return config;
     }
 }

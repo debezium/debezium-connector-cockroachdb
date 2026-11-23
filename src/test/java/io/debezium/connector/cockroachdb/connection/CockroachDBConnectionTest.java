@@ -8,6 +8,7 @@ package io.debezium.connector.cockroachdb.connection;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
@@ -273,6 +274,24 @@ public class CockroachDBConnectionTest {
         assertThat(props.getProperty("password")).isEqualTo("secret");
         assertThat(props.getProperty("connectTimeout")).as("milliseconds convert to seconds").isEqualTo("30");
         assertThat(props.getProperty("tcpKeepAlive")).as("keepalive defaults on").isEqualTo("true");
+    }
+
+    @Test
+    public void shouldLimitEveryStepOfAConnectionForAValidation() {
+        // One second more than the validation waits, and never more than the configured connection timeout.
+        Properties props = CockroachDBConnection.buildValidationProperties(config, Duration.ofMillis(4500));
+
+        assertThat(props.getProperty("socketTimeout")).isEqualTo("6");
+        assertThat(props.getProperty("connectTimeout")).isEqualTo("6");
+        assertThat(props.getProperty("user")).isEqualTo("root");
+
+        Map<String, String> shortConnectTimeout = new HashMap<>(config.getConfig().asMap());
+        shortConnectTimeout.put(CockroachDBConnectorConfig.CONNECTION_TIMEOUT_MS.name(), "2000");
+        props = CockroachDBConnection.buildValidationProperties(
+                new CockroachDBConnectorConfig(Configuration.from(shortConnectTimeout)), Duration.ofMillis(4500));
+
+        assertThat(props.getProperty("socketTimeout")).isEqualTo("6");
+        assertThat(props.getProperty("connectTimeout")).isEqualTo("2");
     }
 
     @Test
