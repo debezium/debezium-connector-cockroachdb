@@ -16,13 +16,21 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 
 import io.debezium.DebeziumException;
 import io.debezium.config.Configuration;
 import io.debezium.relational.TableId;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 
 /**
  * Unit tests for multi-table changefeed support.
@@ -85,6 +93,102 @@ public class CockroachDBMultiTableTest {
                 .isInstanceOf(DebeziumException.class)
                 .hasMessageContaining(CockroachDBConnectorConfig.CHANGEFEED_SINK_URI.name())
                 .hasMessageContaining("testdb.public.orders");
+    }
+
+    @Test
+    public void shouldLeaveSplitColumnFamiliesOutOfTheStatement() {
+        // With this option CockroachDB sends one event per column family for a table with more than one, with
+        // the columns of that family only, and the connector reads every event as a complete row. The rest of
+        // the list goes into the statement as it is written. A plain quoted value ends at its quote, also after
+        // a backslash, and a value with the prefix e takes a backslash in front of a quote as an escape.
+        final Map<String, String> listAndWhatIsLeft = Map.ofEntries(
+                Map.entry("split_column_families", ""),
+                Map.entry("min_checkpoint_frequency = '10s', split_column_families", "min_checkpoint_frequency = '10s', "),
+                Map.entry("split_column_families, min_checkpoint_frequency = '10s'", "min_checkpoint_frequency = '10s', "),
+                Map.entry(" SPLIT_COLUMN_FAMILIES , protect_data_from_gc_on_pause", "protect_data_from_gc_on_pause, "),
+                Map.entry("\"split_column_families\"", ""),
+                Map.entry("'split_column_families'", ""),
+                Map.entry("metrics_label = 'a, b', split_column_families", "metrics_label = 'a, b', "),
+                Map.entry("metrics_label = 'a\\', split_column_families", "metrics_label = 'a\\', "),
+                Map.entry("metrics_label = e'a\\'b', split_column_families", "metrics_label = e'a\\'b', "),
+                Map.entry("metrics_label = 'it''s', split_column_families, diff", "metrics_label = 'it''s', diff, "));
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+
+        listAndWhatIsLeft.forEach((sinkOptions, left) -> {
+            Configuration config = baseConfig().edit().with(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS, sinkOptions).build();
+
+            assertThat(createSource(config).buildSinklessChangefeedQuery(tables, null, false)).as("options %s", sinkOptions)
+                    .contains(" WITH " + left + "envelope = 'enriched'")
+                    .doesNotContainIgnoringCase("split_column_families");
+        });
+    }
+
+    @Test
+    public void shouldWarnThatSplitColumnFamiliesIsLeftOut() {
+        final Logger logger = ((LoggerContext) LoggerFactory.getILoggerFactory()).getLogger(CockroachDBStreamingChangeEventSource.class);
+        final ListAppender<ILoggingEvent> log = new ListAppender<>();
+        log.start();
+        logger.addAppender(log);
+        try {
+            createSource(baseConfig().edit().with(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS, "min_checkpoint_frequency = '10s'").build());
+            assertThat(log.list).noneMatch(event -> event.getFormattedMessage().contains("split_column_families"));
+
+            createSource(baseConfig().edit()
+                    .with(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS, "min_checkpoint_frequency = '10s', split_column_families").build());
+            assertThat(log.list).filteredOn(event -> event.getLevel() == Level.WARN)
+                    .anyMatch(event -> event.getFormattedMessage().contains(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS.name())
+                            && event.getFormattedMessage().contains("split_column_families")
+                            && event.getFormattedMessage().contains("more than one column family"));
+        }
+        finally {
+            logger.detachAppender(log);
+        }
+    }
+
+    @Test
+    public void shouldNotTakeAQuotedValueForTheOptionSplitColumnFamilies() {
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+        for (String sinkOptions : List.of(
+                "metrics_label = 'a, split_column_families, b'",
+                "metrics_label = e'a\\', split_column_families, b'",
+                "metrics_label = e'a''b\\', split_column_families, c'",
+                "metrics_label = 'it''s, split_column_families'",
+                "metrics_label = 'split_column_families'",
+                "min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause")) {
+            Configuration config = baseConfig().edit().with(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS, sinkOptions).build();
+
+            // The list goes into the statement as it is written.
+            assertThat(createSource(config).buildSinklessChangefeedQuery(tables, null, false)).contains(" WITH " + sinkOptions + ", ");
+        }
+    }
+
+    @Test
+    public void shouldRemoveOnlyTheOptionSplitColumnFamiliesFromTheSinkOptions() {
+        // A list without the option is returned as it is.
+        for (String sinkOptions : List.of(
+                "min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause",
+                // The prefix E also makes a backslash an escape.
+                "metrics_label = E'a\\', split_column_families, b', diff",
+                // A comma in a quoted identifier separates nothing either.
+                "metrics_label = \"a, split_column_families, b\", diff",
+                // A quote that never ends takes the rest of the list.
+                "metrics_label = 'a, split_column_families",
+                "  ",
+                "diff,")) {
+            assertThat(CockroachDBStreamingChangeEventSource.withoutSplitColumnFamilies(sinkOptions)).isSameAs(sinkOptions);
+        }
+        // A name in upper case or in quotes, and the option with a value that it does not take.
+        assertThat(CockroachDBStreamingChangeEventSource.withoutSplitColumnFamilies("Split_Column_Families = 'x', \"Quoted_Name\""))
+                .isEqualTo(" \"Quoted_Name\"");
+        // Options on several lines.
+        assertThat(CockroachDBStreamingChangeEventSource.withoutSplitColumnFamilies("min_checkpoint_frequency = '10s',\n  split_column_families\n"))
+                .isEqualTo("min_checkpoint_frequency = '10s'");
+        // The option more than once, and a comma at the end.
+        assertThat(CockroachDBStreamingChangeEventSource.withoutSplitColumnFamilies("split_column_families, diff, split_column_families,"))
+                .isEqualTo(" diff,");
+        // What follows the option stays in the list, also a value that never ends.
+        assertThat(CockroachDBStreamingChangeEventSource.withoutSplitColumnFamilies("split_column_families, metrics_label = e'a\\"))
+                .isEqualTo(" metrics_label = e'a\\");
     }
 
     @Test

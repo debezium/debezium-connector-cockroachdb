@@ -402,7 +402,8 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     + "to the WITH clause of CREATE CHANGEFEED exactly as they are written here. CockroachDB takes most "
                     + "option values as quoted strings. Example: min_checkpoint_frequency = '10s', "
                     + "protect_data_from_gc_on_pause. An option that the connector sets itself, such as envelope, "
-                    + "cursor, initial_scan, or resolved, keeps the connector's value.");
+                    + "cursor, initial_scan, or resolved, keeps the connector's value. The option split_column_families "
+                    + "is left out, because the connector cannot read a changefeed that is split by column family.");
 
     public static final Field CHANGEFEED_KAFKA_SINK_CONFIG = Field.create("cockroachdb.changefeed.kafka.sink.config")
             .withDisplayName("Changefeed kafka sink config")

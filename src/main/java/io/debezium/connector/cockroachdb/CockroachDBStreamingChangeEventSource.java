@@ -96,9 +96,21 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
 
+    /**
+     * With this changefeed option CockroachDB sends one event per column family for a table that has more
+     * than one, and an event carries the columns of that family only. The connector reads every event as a
+     * complete row, so it does not pass the option on.
+     */
+    private static final String SPLIT_COLUMN_FAMILIES = "split_column_families";
+
+    private static final String NO_CHANGEFEED_PER_COLUMN_FAMILY = "The connector cannot read a changefeed that is split by "
+            + "column family, so it cannot capture a table with more than one column family.";
+
     private static final int MAX_DEDUP_CACHE_SIZE = 10_000;
 
     private final CockroachDBConnectorConfig config;
+    /** The list of {@code cockroachdb.changefeed.sink.options}, as it goes into a statement. */
+    private final String changefeedSinkOptions;
     private final EventDispatcher<CockroachDBPartition, TableId> dispatcher;
     private final CockroachDBSchema schema;
     private final Clock clock;
@@ -280,6 +292,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                                  Clock clock,
                                                  SnapshotProgressListener<CockroachDBPartition> snapshotProgressListener) {
         this.config = Objects.requireNonNull(config, "config must not be null");
+        this.changefeedSinkOptions = sinkOptionsOfTheChangefeed(config.getChangefeedSinkOptions());
         this.dispatcher = dispatcher;
         this.schema = schema;
         this.clock = clock;
@@ -2854,9 +2867,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         // their quotes would break every quoted value, for example min_checkpoint_frequency = '10s'.
         // They come first: when an option is given twice, CockroachDB uses the last value, so an option
         // that the connector sets itself keeps the connector's value.
-        String sinkOptions = config.getChangefeedSinkOptions();
-        if (sinkOptions != null && !sinkOptions.trim().isEmpty()) {
-            options.add(sinkOptions.trim());
+        if (changefeedSinkOptions != null && !changefeedSinkOptions.trim().isEmpty()) {
+            options.add(changefeedSinkOptions.trim());
         }
         // The connector parses only the enriched envelope (it relies on the 'op' and 'ts_ns' fields
         // it provides), so the envelope is fixed rather than configurable.
@@ -2903,6 +2915,85 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             options.add("kafka_sink_config='" + sanitizeLiteral(kafkaSinkConfig) + "'");
         }
         return String.join(", ", options);
+    }
+
+    /**
+     * The list of {@code cockroachdb.changefeed.sink.options} as it goes into the statement: as it is written,
+     * without {@code split_column_families}. For a table with one column family the option changes nothing.
+     * A table with more than one is then rejected by CockroachDB, instead of being read with one event per
+     * column family.
+     */
+    private static String sinkOptionsOfTheChangefeed(String sinkOptions) {
+        if (sinkOptions == null) {
+            return null;
+        }
+        final String usable = withoutSplitColumnFamilies(sinkOptions);
+        if (!usable.equals(sinkOptions)) {
+            LOGGER.warn("The property {} sets the changefeed option {}, which the connector leaves out of the changefeed. {}",
+                    CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS.name(), SPLIT_COLUMN_FAMILIES, NO_CHANGEFEED_PER_COLUMN_FAMILY);
+        }
+        return usable;
+    }
+
+    /**
+     * Returns a list of changefeed options, as a user writes it in SQL, without the option
+     * {@code split_column_families}. The rest of the list keeps its text, and a list without the option is
+     * returned as it is. A comma in a quoted value or in a quoted identifier separates nothing. A quoted value
+     * ends at its quote, a doubled quote is a quote in the value, and a value with the prefix {@code e} or
+     * {@code E} takes a backslash as an escape. The option is found by a plain or a quoted name.
+     */
+    static String withoutSplitColumnFamilies(String sinkOptions) {
+        final List<String> kept = new ArrayList<>();
+        boolean found = false;
+        boolean quoted = false;
+        boolean escapes = false;
+        boolean quotedIdentifier = false;
+        int start = 0;
+        for (int i = 0; i <= sinkOptions.length(); i++) {
+            final char current = i < sinkOptions.length() ? sinkOptions.charAt(i) : ',';
+            if (quoted && i < sinkOptions.length()) {
+                if (current == '\\' && escapes && i + 1 < sinkOptions.length()) {
+                    i++;
+                }
+                else if (current == '\'') {
+                    if (i + 1 < sinkOptions.length() && sinkOptions.charAt(i + 1) == '\'') {
+                        i++;
+                    }
+                    else {
+                        quoted = false;
+                    }
+                }
+            }
+            else if (quotedIdentifier && i < sinkOptions.length()) {
+                quotedIdentifier = current != '"';
+            }
+            else if (current == '\'' && i < sinkOptions.length()) {
+                quoted = true;
+                escapes = i > 0 && "eE".indexOf(sinkOptions.charAt(i - 1)) >= 0;
+            }
+            else if (current == '"' && i < sinkOptions.length()) {
+                quotedIdentifier = true;
+            }
+            else if (current == ',') {
+                final String option = sinkOptions.substring(start, Math.min(i, sinkOptions.length()));
+                if (SPLIT_COLUMN_FAMILIES.equals(sinkOptionName(option))) {
+                    found = true;
+                }
+                else {
+                    kept.add(option);
+                }
+                start = i + 1;
+            }
+        }
+        return found ? String.join(",", kept) : sinkOptions;
+    }
+
+    /** The name of one option of the list in lower case, without its value and without the quotes of a quoted name. */
+    private static String sinkOptionName(String option) {
+        final String name = option.split("=", 2)[0].trim();
+        final boolean quotedName = name.length() > 1
+                && (name.startsWith("\"") && name.endsWith("\"") || name.startsWith("'") && name.endsWith("'"));
+        return (quotedName ? name.substring(1, name.length() - 1) : name).toLowerCase(Locale.ROOT);
     }
 
     /**

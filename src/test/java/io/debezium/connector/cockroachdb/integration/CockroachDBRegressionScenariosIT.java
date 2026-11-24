@@ -44,6 +44,7 @@ import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import io.debezium.connector.cockroachdb.CockroachDBConnectorConfig;
 import io.debezium.connector.cockroachdb.CockroachDBStreamingChangeEventSource;
 
 import ch.qos.logback.classic.Logger;
@@ -1120,6 +1121,57 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             assertThat(rs.next()).as("The connector should have created a changefeed").isTrue();
             assertThat(rs.getString(1)).contains("min_checkpoint_frequency = '10s'");
         }
+    }
+
+    @Test
+    public void shouldLeaveSplitColumnFamiliesOutOfTheChangefeed() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("split-option-test", "split_option_testdb", "public.split_option_events");
+        // The connector cannot read a changefeed that is split by column family, so it leaves the option out.
+        // The rest of the list reaches the changefeed. CockroachDB would reject the option together with
+        // resolved for a Kafka sink.
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS.name(), "split_column_families, min_checkpoint_frequency = '10s'");
+        connection = openDatabase("split_option_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS split_option_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO split_option_events VALUES (1, 'Alice')");
+        }
+
+        startTask(config);
+
+        assertThat(pollForRecords(1, 45)).as("Should receive the scan row").isNotEmpty();
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOBS] "
+                        + "WHERE status = 'running' AND description LIKE '%topic_prefix=split-option-test.%'")) {
+            assertThat(rs.next()).as("The connector should have created a changefeed").isTrue();
+            assertThat(rs.getString(1)).contains("min_checkpoint_frequency = '10s'").doesNotContain("split_column_families");
+        }
+    }
+
+    @Test
+    public void shouldNotEmitOneRecordPerColumnFamilyForATableWithTwoColumnFamilies() throws Exception {
+        connection = openDatabase("column_families_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS column_families_events (id INT8 PRIMARY KEY, a STRING, b STRING NOT NULL, "
+                    + "FAMILY f1 (id, a), FAMILY f2 (b))");
+            stmt.execute("UPSERT INTO column_families_events VALUES (1, 'a1', 'b1')");
+        }
+        // CockroachDB accepts the option for a sinkless changefeed and then sends one event per column family.
+        // The event of the second family has no primary key, and the connector would emit it with an empty key.
+        // Without the option CockroachDB rejects a changefeed for this table.
+        final Map<String, String> config = baseConnectorConfig("column-families-test", "column_families_testdb", "public.column_families_events");
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_SINK_TYPE.name(), "sinkless");
+        config.remove(CockroachDBConnectorConfig.CHANGEFEED_SINK_URI.name());
+        config.remove(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS.name());
+        config.remove(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_AUTO_OFFSET_RESET.name());
+        config.remove(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_POLL_TIMEOUT_MS.name());
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS.name(), "split_column_families");
+
+        startTask(config);
+
+        PollOutcome outcome = pollUntilRecordsOrError(30);
+        assertThat(outcome.records).as("No record should be emitted for the events of the column families").isEmpty();
+        assertThat(outcome.error).as("CockroachDB should reject the changefeed").isNotNull();
+        assertThat(rootCauseMessage(outcome.error)).contains("multiple column families");
     }
 
     @Test
