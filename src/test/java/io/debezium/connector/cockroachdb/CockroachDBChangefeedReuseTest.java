@@ -113,6 +113,35 @@ public class CockroachDBChangefeedReuseTest {
     }
 
     @Test
+    void warnsWhenAReusedChangefeedWasCreatedWithSplitColumnFamilies() throws Exception {
+        // The option splits a table that has more than one column family: CockroachDB writes it to one topic per
+        // column family, and the connector reads the topic of the table. A table with one column family is not
+        // split, so the changefeed is reused. The description is the one that CockroachDB shows for such a job.
+        final String split = "CREATE CHANGEFEED FOR TABLE reprodb.public.acct INTO 'kafka://kafka:9092?topic_prefix=repro.' "
+                + "WITH OPTIONS (enriched_properties = 'source', envelope = 'enriched', full_table_name, split_column_families, updated)";
+        // The text in a value is no option.
+        final String label = "CREATE CHANGEFEED FOR TABLE reprodb.public.acct INTO 'kafka://kafka:9092?topic_prefix=repro.' "
+                + "WITH OPTIONS (enriched_properties = 'source', envelope = 'enriched', full_table_name, "
+                + "metrics_label = e'a, split_column_families, b', resolved = '10s', updated)";
+        final Logger sourceLogger = (Logger) LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
+        final ListAppender<ILoggingEvent> log = new ListAppender<>();
+        log.start();
+        sourceLogger.addAppender(log);
+        try {
+            assertThat(source(Map.of()).changefeedExists(connectionListing("1021", "running", label), ACCT, List.of(ACCT))).isTrue();
+            assertThat(log.list).noneMatch(event -> event.getFormattedMessage().contains("split_column_families"));
+
+            assertThat(source(Map.of()).changefeedExists(connectionListing("1020", "running", split), ACCT, List.of(ACCT))).isTrue();
+            assertThat(log.list).filteredOn(event -> event.getFormattedMessage().contains("split_column_families"))
+                    .singleElement()
+                    .satisfies(event -> assertThat(event.getFormattedMessage()).contains("1020", "more than one column family"));
+        }
+        finally {
+            sourceLogger.detachAppender(log);
+        }
+    }
+
+    @Test
     void retriesTheJobsQueryAfterReconnecting() throws Exception {
         // A node restart or drain ends the session, so the first query fails and a new connection finds the job.
         ResultSet jobs = jobRows("1006", "running", WITHOUT_DIFF);

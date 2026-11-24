@@ -61,12 +61,15 @@ public class CockroachDBErrorHandler extends ErrorHandler {
     /**
      * Texts of errors that no retry can fix and that CockroachDB reports without a specific SQLSTATE, like
      * the errors that a retry can fix: a changefeed option that does not exist, a sink URI parameter that
-     * does not exist, and a sink that does not exist.
+     * does not exist, a sink that does not exist, and a table with more than one column family, which the
+     * connector cannot capture.
      */
     private static final List<String> PERMANENT_ERROR_TEXTS = List.of(
             "invalid option \"",
             "sink query parameters",
-            "unsupported sink:");
+            "unsupported sink:",
+            CockroachDBStreamingChangeEventSource.MULTIPLE_COLUMN_FAMILIES_TEXT,
+            CockroachDBStreamingChangeEventSource.COLUMN_FAMILY_ADDED_TEXT);
 
     /**
      * The text of the error for a changefeed whose cursor, or whose initial scan, is older than the garbage

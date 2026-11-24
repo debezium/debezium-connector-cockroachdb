@@ -106,6 +106,22 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     private static final String NO_CHANGEFEED_PER_COLUMN_FAMILY = "The connector cannot read a changefeed that is split by "
             + "column family, so it cannot capture a table with more than one column family.";
 
+    /**
+     * Part of the error with which CockroachDB rejects a changefeed for a table with more than one column
+     * family, in lower case. CockroachDB reports the error without a specific SQLSTATE.
+     */
+    static final String MULTIPLE_COLUMN_FAMILIES_TEXT = "multiple column families";
+
+    /**
+     * Part of the error with which CockroachDB ends a changefeed when one of its tables gets a second column
+     * family, in lower case. A changefeed that starts again at the stored cursor ends with it as well.
+     */
+    static final String COLUMN_FAMILY_ADDED_TEXT = "cannot now target a table with";
+
+    /** What the operator can do when CockroachDB rejects or ends a changefeed because of the column families of a table. */
+    private static final String COLUMN_FAMILY_HINT = NO_CHANGEFEED_PER_COLUMN_FAMILY + " Remove the table from the tables that "
+            + "the connector captures.";
+
     private static final int MAX_DEDUP_CACHE_SIZE = 10_000;
 
     private final CockroachDBConnectorConfig config;
@@ -381,7 +397,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             // privileges, and so on). Surface its message directly so an invalid value or a
             // permission problem is visible in the task status without digging into the cause chain.
             LOGGER.error("Error in CockroachDB streaming", e);
-            throw new RuntimeException("Failed to stream changes from CockroachDB: " + e.getMessage(), e);
+            final SQLException failure = withColumnFamilyHint(e);
+            throw new RuntimeException("Failed to stream changes from CockroachDB: " + failure.getMessage(), failure);
         }
         finally {
             if (this.schemaRefreshConnection != null) {
@@ -1116,6 +1133,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                             + "cockroachdb.changefeed.include.diff is disabled; update events will carry before images.",
                             table);
                 }
+                // The option splits a table that has more than one column family. A table with one column
+                // family is not split, so the changefeed can be one that works.
+                if (changefeedHasOption(description, SPLIT_COLUMN_FAMILIES)) {
+                    LOGGER.warn("Reusing changefeed job {}, which was created with {}. If one of its tables has more than one "
+                            + "column family, CockroachDB writes the changes of that table to one topic per column family, "
+                            + "and the connector receives none of them. {}", jobId, SPLIT_COLUMN_FAMILIES, NO_CHANGEFEED_PER_COLUMN_FAMILY);
+                }
                 // The captured table set is frozen at job creation. If tables were removed
                 // from table.include.list since, the reused job keeps streaming them at full
                 // volume into intermediate topics that nothing consumes.
@@ -1713,6 +1737,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                         + "no longer has the changes since its cursor: " + error + ". Reconfigure the connector to use the snapshot "
                         + "mode when_needed, which starts again with an initial scan in this case.");
             }
+            if (isColumnFamilyError(error)) {
+                // A changefeed that the connector creates after a restart ends in the same way.
+                throw new DebeziumException("Changefeed job " + jobId + " for the table(s) " + tables + " has ended with the status '"
+                        + status + "': " + error + (error.endsWith(".") ? " " : ". ") + COLUMN_FAMILY_HINT);
+            }
             throw new DebeziumException("Changefeed job " + jobId + " for the table(s) " + tables + " has ended with the status '"
                     + status + "'" + (error.isEmpty() ? "" : ": " + error) + ". The connector receives no more changes of these "
                     + "tables. Restart the connector to create a changefeed for them. It continues where the connector's offsets "
@@ -2045,7 +2074,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
         catch (Exception e) {
             LOGGER.error("Error consuming from Kafka topics {}: {}", topicNames, e.getMessage(), e);
-            throw new RuntimeException("Failed to consume from Kafka topics " + topicNames, e);
+            throw new RuntimeException("Failed to consume from Kafka topics " + topicNames,
+                    e instanceof SQLException failure ? withColumnFamilyHint(failure) : e);
         }
     }
 
@@ -2109,7 +2139,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 return;
             }
             LOGGER.error("Error in sinkless changefeed consumption: {}", e.getMessage(), e);
-            throw new RuntimeException("Failed to stream sinkless changefeed from CockroachDB: " + e.getMessage(), e);
+            final SQLException failure = withColumnFamilyHint(e);
+            throw new RuntimeException("Failed to stream sinkless changefeed from CockroachDB: " + failure.getMessage(), failure);
         }
     }
 
@@ -2281,6 +2312,28 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     + "Exclude the table until the connector has stored a later cursor. " + SNAPSHOT_MODE_HINT, failure.getSQLState(), failure);
         }
         return failure;
+    }
+
+    /**
+     * Adds to the error with which CockroachDB rejects or ends a changefeed because of the column families of a
+     * table that the connector cannot capture such a table. The error for a changefeed that is created names
+     * the option {@code split_column_families}, which the connector does not pass on. Other errors are
+     * returned as they are.
+     */
+    SQLException withColumnFamilyHint(SQLException failure) {
+        final String message = failure.getMessage();
+        if (!isColumnFamilyError(message) || message.contains(COLUMN_FAMILY_HINT)) {
+            return failure;
+        }
+        return new SQLException(message + (message.endsWith(".") ? " " : ". ") + COLUMN_FAMILY_HINT, failure.getSQLState(), failure);
+    }
+
+    private boolean isColumnFamilyError(String message) {
+        if (message == null) {
+            return false;
+        }
+        final String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains(MULTIPLE_COLUMN_FAMILIES_TEXT) || normalized.contains(COLUMN_FAMILY_ADDED_TEXT);
     }
 
     /** What the operator has to know when CockroachDB denies a changefeed at a cursor to a user that has the privilege. */

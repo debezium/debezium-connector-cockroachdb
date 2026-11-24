@@ -43,10 +43,12 @@ import org.apache.kafka.connect.json.JsonConverter;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import io.debezium.connector.cockroachdb.CockroachDBConnectorConfig;
 import io.debezium.connector.cockroachdb.CockroachDBStreamingChangeEventSource;
 
+import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -1175,6 +1177,126 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
     }
 
     @Test
+    public void shouldFailTheTaskForATableWithMoreThanOneColumnFamily() throws Exception {
+        connection = openDatabase("two_families_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS two_families_events (id INT8 PRIMARY KEY, a STRING, b STRING NOT NULL, "
+                    + "FAMILY f1 (id, a), FAMILY f2 (b))");
+            stmt.execute("UPSERT INTO two_families_events VALUES (1, 'a1', 'b1')");
+        }
+
+        // CockroachDB rejects the changefeed and names an option that the connector does not pass on.
+        startTask(baseConnectorConfig("two-families-test", "two_families_testdb", "public.two_families_events"));
+
+        PollOutcome outcome = pollUntilRecordsOrError(30);
+        assertThat(outcome.error).as("The task should fail").isNotNull();
+        assertThat(messagesOf(outcome.error)).contains("cannot capture a table with more than one column family");
+        // A retriable error would restart the connector, which runs into the same error again and again.
+        assertThat(outcome.error).as("No retry gives the table one column family").isNotInstanceOf(RetriableException.class);
+    }
+
+    @Test
+    public void shouldFailTheSinklessTaskForATableWithMoreThanOneColumnFamily() throws Exception {
+        connection = openDatabase("two_families_sinkless_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS two_families_events (id INT8 PRIMARY KEY, a STRING, b STRING NOT NULL, "
+                    + "FAMILY f1 (id, a), FAMILY f2 (b))");
+            stmt.execute("UPSERT INTO two_families_events VALUES (1, 'a1', 'b1')");
+        }
+
+        startTask(sinklessConnectorConfig("two-families-sinkless-test", "two_families_sinkless_testdb", "public.two_families_events"));
+
+        PollOutcome outcome = pollUntilRecordsOrError(30);
+        assertThat(outcome.error).as("The task should fail").isNotNull();
+        assertThat(messagesOf(outcome.error)).contains("cannot capture a table with more than one column family");
+        assertThat(outcome.error).as("No retry gives the table one column family").isNotInstanceOf(RetriableException.class);
+    }
+
+    @Test
+    public void shouldFailTheSinklessTaskWhenATableGetsASecondColumnFamily() throws Exception {
+        connection = openDatabase("family_added_sinkless_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS family_added_events (id INT8 PRIMARY KEY, a STRING)");
+            stmt.execute("UPSERT INTO family_added_events VALUES (1, 'a1')");
+        }
+        startTask(sinklessConnectorConfig("family-added-sinkless-test", "family_added_sinkless_testdb", "public.family_added_events"));
+        assertThat(pollForRecords(1, 45)).as("Should stream before the table changes").isNotEmpty();
+
+        // CockroachDB ends a changefeed whose table gets a second column family. A changefeed that starts again
+        // at the stored cursor ends in the same way, so no retry helps.
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("ALTER TABLE family_added_events ADD COLUMN c INT8 CREATE FAMILY f2");
+        }
+
+        final PollOutcome outcome = pollUntilRecordsOrError(60);
+        assertThat(outcome.error).as("The task should fail when the changefeed ends").isNotNull();
+        assertThat(messagesOf(outcome.error)).contains("cannot capture a table with more than one column family");
+        assertThat(outcome.error).as("No retry gives the table one column family").isNotInstanceOf(RetriableException.class);
+    }
+
+    @Test
+    public void shouldSayWhyItsChangefeedEndedWhenATableGetsASecondColumnFamily() throws Exception {
+        connection = openDatabase("family_added_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS family_added_events (id INT8 PRIMARY KEY, a STRING)");
+            stmt.execute("UPSERT INTO family_added_events VALUES (1, 'a1')");
+        }
+        startTask(baseConnectorConfig("family-added-test", "family_added_testdb", "public.family_added_events"));
+        assertThat(pollForRecords(1, 45)).as("Should stream before the table changes").isNotEmpty();
+        final String jobId = runningChangefeedJobFor("family_added_events");
+
+        // The changefeed job fails. A new job at the stored cursor would fail in the same way.
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("ALTER TABLE family_added_events ADD COLUMN c INT8 CREATE FAMILY f2");
+        }
+
+        final PollOutcome outcome = pollUntilRecordsOrError(90);
+        assertThat(outcome.error).as("Task should stop when its changefeed has ended").isInstanceOf(ConnectException.class)
+                .isNotInstanceOf(RetriableException.class);
+        assertThat(messagesOf(outcome.error))
+                .contains("Changefeed job " + jobId, "cannot capture a table with more than one column family")
+                .doesNotContain("Restart the connector");
+    }
+
+    @Test
+    public void shouldReuseAChangefeedWithSplitColumnFamiliesForATableWithOneColumnFamily() throws Exception {
+        connection = openDatabase("split_reuse_testdb");
+        final Map<String, String> config = baseConnectorConfig("split-reuse-test", "split_reuse_testdb", "public.split_reuse_events");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS split_reuse_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO split_reuse_events VALUES (1, 'Alice')");
+            // A changefeed that exists before the connector starts. The option splits only a table with more
+            // than one column family, so this one writes to the topic of the table.
+            stmt.execute("CREATE CHANGEFEED FOR TABLE split_reuse_testdb.public.split_reuse_events INTO '"
+                    + config.get(CockroachDBConnectorConfig.CHANGEFEED_SINK_URI.name()) + "?topic_prefix=split-reuse-test.' "
+                    + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source', updated, split_column_families");
+        }
+        final String jobId = runningChangefeedJobFor("split_reuse_events");
+        final Logger sourceLogger = (Logger) LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
+        final ListAppender<ILoggingEvent> warnings = new ListAppender<>();
+        warnings.start();
+        sourceLogger.addAppender(warnings);
+        try {
+            startTask(config);
+
+            assertThat(pollForRecords(1, 45)).as("Should receive the row from the changefeed that exists already").isNotEmpty();
+            try (Statement stmt = connection.createStatement();
+                    ResultSet rs = stmt.executeQuery("SELECT job_id FROM [SHOW CHANGEFEED JOBS] "
+                            + "WHERE status = 'running' AND description LIKE '%topic_prefix=split-reuse-test.%'")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString(1)).as("The connector should use the changefeed that exists already").isEqualTo(jobId);
+                assertThat(rs.next()).as("The connector should not create a second changefeed").isFalse();
+            }
+            assertThat(warnings.list).anyMatch(event -> event.getLevel() == Level.WARN
+                    && event.getFormattedMessage().contains(jobId)
+                    && event.getFormattedMessage().contains("split_column_families"));
+        }
+        finally {
+            sourceLogger.detachAppender(warnings);
+        }
+    }
+
+    @Test
     public void shouldKeepItsOwnOptionsWhenTheSinkOptionsRepeatThem() throws Exception {
         final Map<String, String> config = baseConnectorConfig("own-options-test", "own_options_testdb", "public.own_options_events");
         // CockroachDB uses the last value of an option that is given twice. The connector can only read the
@@ -1359,6 +1481,17 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
         try (KafkaProducer<String, String> producer = new KafkaProducer<>(props)) {
             producer.send(new ProducerRecord<>(topic, key, value)).get(30, TimeUnit.SECONDS);
         }
+    }
+
+    /** The configuration of a scenario for a connector that reads a sinkless changefeed. */
+    private Map<String, String> sinklessConnectorConfig(String scenarioName, String databaseName, String tableIncludeList) {
+        final Map<String, String> config = baseConnectorConfig(scenarioName, databaseName, tableIncludeList);
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_SINK_TYPE.name(), "sinkless");
+        config.remove(CockroachDBConnectorConfig.CHANGEFEED_SINK_URI.name());
+        config.remove(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS.name());
+        config.remove(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_AUTO_OFFSET_RESET.name());
+        config.remove(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_POLL_TIMEOUT_MS.name());
+        return config;
     }
 
     private static String messagesOf(Throwable failure) {

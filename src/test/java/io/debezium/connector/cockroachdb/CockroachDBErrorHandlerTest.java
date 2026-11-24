@@ -11,6 +11,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
@@ -125,6 +126,25 @@ public class CockroachDBErrorHandlerTest {
         assertThat(errorHandler.isRetriable(new RuntimeException("Failed to stream changes from CockroachDB", unknownOption))).isFalse();
         // The driver can leave the SQLSTATE out.
         assertThat(errorHandler.isRetriable(new SQLException("ERROR: unsupported sink: nosuch"))).isFalse();
+    }
+
+    @Test
+    void aTableWithMoreThanOneColumnFamilyIsNotRetriable() {
+        // CockroachDB v25.4.21 and v26.4.1 report both errors with their uncategorized SQLSTATE: the first when a
+        // changefeed is created for such a table, the second when a table of a running changefeed gets a second
+        // column family. No retry gives the table one column family.
+        final SQLException columnFamilies = new SQLException("ERROR: CHANGEFEED targeting a table (orders) with multiple column families requires "
+                + "WITH split_column_families and will emit multiple events per row.", "XXUUU");
+        final SQLException columnFamilyAdded = new SQLException("ERROR: CHANGEFEED created on a table with a single column family (orders) cannot now "
+                + "target a table with 2 families. targets: {Size:1 m:map[106:{wholeTable:0x4016941500 byFamilyName:map[]}]}, tableDesc: "
+                + "tabledesc.immutable: {ID: 106, Version: 2}", "XXUUU");
+
+        for (SQLException failure : List.of(columnFamilies, columnFamilyAdded)) {
+            assertThat(errorHandler.isRetriable(failure)).isFalse();
+            assertThat(errorHandler("when_needed").isRetriable(failure)).isFalse();
+            // The streaming source wraps the error.
+            assertThat(errorHandler.isRetriable(new RuntimeException("Failed to stream changes from CockroachDB", failure))).isFalse();
+        }
     }
 
     @Test
