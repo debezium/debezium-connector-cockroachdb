@@ -26,11 +26,13 @@ import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.json.JsonConverter;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import io.debezium.connector.cockroachdb.CockroachDBConnectorConfig;
 import io.debezium.connector.cockroachdb.CockroachDBStreamingChangeEventSource;
 
 import ch.qos.logback.classic.Logger;
@@ -576,6 +578,62 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             assertThat(rs.next()).as("The connector should have created a changefeed").isTrue();
             assertThat(rs.getString(1)).contains("min_checkpoint_frequency = '10s'");
         }
+    }
+
+    @Test
+    public void shouldPassChangefeedOptionPropertiesToTheChangefeed() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("option-properties-test", "option_properties_testdb",
+                "public.option_properties_events");
+        // One property per option: the connector quotes the value, and a property without a value gives an
+        // option without one. A quote in a value is escaped, and CockroachDB takes a backslash as it is, also
+        // in front of the closing quote.
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "min_checkpoint_frequency", "10s");
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "protect_data_from_gc_on_pause", "");
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "metrics_label", "it's a\\");
+        connection = openDatabase("option_properties_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS option_properties_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO option_properties_events VALUES (1, 'Alice')");
+        }
+
+        startTask(config);
+
+        assertThat(pollForRecords(1, 45)).as("Should receive the scan row").isNotEmpty();
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOBS] "
+                        + "WHERE status = 'running' AND description LIKE '%topic_prefix=option-properties-test.%'")) {
+            assertThat(rs.next()).as("The connector should have created a changefeed").isTrue();
+            // CockroachDB shows a value with a quote or a backslash in its escaped form.
+            assertThat(rs.getString(1)).contains("min_checkpoint_frequency = '10s'", "protect_data_from_gc_on_pause",
+                    "metrics_label = e'it\\'s a\\\\'");
+        }
+    }
+
+    @Test
+    public void shouldRefuseAReservedChangefeedOptionPropertyAlsoWhenTheChangefeedIsReused() throws Exception {
+        connection = openDatabase("option_reuse_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS option_reuse_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO option_reuse_events VALUES (1, 'Alice')");
+        }
+
+        // The first run creates the changefeed, which keeps running after the task stops.
+        startTask(baseConnectorConfig("option-reuse-test", "option_reuse_testdb", "public.option_reuse_events"));
+        assertThat(pollUntilRecordsOrError(30).records).as("First run should stream the seed row").isNotEmpty();
+        stopTask();
+        runningChangefeedJobFor("option_reuse_events");
+
+        // The second run finds that changefeed and builds no statement. The property must fail this start
+        // too, and not only a later one that has to create a changefeed.
+        final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "resolved";
+        final Map<String, String> config = baseConnectorConfig("option-reuse-test", "option_reuse_testdb", "public.option_reuse_events");
+        config.put(property, "1s");
+        startTask(config);
+        PollOutcome outcome = pollUntilRecordsOrError(45);
+        assertThat(outcome.error).as("Second run should fail for the property instead of reusing the changefeed").isNotNull();
+        assertThat(rootCauseMessage(outcome.error)).contains(property, CockroachDBConnectorConfig.CHANGEFEED_RESOLVED_INTERVAL.name());
+        // A retriable error would restart the connector, which runs into the same property again and again.
+        assertThat(outcome.error).as("No retry can fix the property").isNotInstanceOf(RetriableException.class);
     }
 
     @Test

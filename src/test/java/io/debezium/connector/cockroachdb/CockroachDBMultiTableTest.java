@@ -16,6 +16,9 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -85,6 +88,166 @@ public class CockroachDBMultiTableTest {
                 .isInstanceOf(DebeziumException.class)
                 .hasMessageContaining(CockroachDBConnectorConfig.CHANGEFEED_SINK_URI.name())
                 .hasMessageContaining("testdb.public.orders");
+    }
+
+    @Test
+    public void shouldWriteEveryChangefeedOptionPropertyIntoTheStatement() {
+        // The connector quotes the value. A property without a value gives an option without one.
+        Configuration config = baseConfig().edit()
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "min_checkpoint_frequency", "10s")
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "protect_data_from_gc_on_pause", "")
+                .build();
+        CockroachDBStreamingChangeEventSource source = createSource(config);
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+
+        assertThat(source.buildSinkChangefeedQuery(tables, null, false))
+                .contains(" WITH full_table_name, min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause, envelope = 'enriched'");
+        assertThat(source.buildSinklessChangefeedQuery(tables, null, false))
+                .contains(" WITH min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause, envelope = 'enriched'");
+    }
+
+    @Test
+    public void shouldEscapeAQuoteInTheValueOfAChangefeedOptionProperty() {
+        Configuration config = baseConfig().edit()
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "metrics_label", "it's")
+                .build();
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+
+        assertThat(createSource(config).buildSinkChangefeedQuery(tables, null, false)).contains("metrics_label = 'it''s'");
+    }
+
+    @Test
+    public void shouldWriteTheValueOfAChangefeedOptionPropertyWithoutTheSpacesAroundIt() {
+        // A blank value gives an option without a value. CockroachDB takes a backslash in a quoted value as it
+        // is, so only the quote is escaped.
+        Configuration config = baseConfig().edit()
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "min_checkpoint_frequency", " 10s ")
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "protect_data_from_gc_on_pause", "  ")
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "metrics_label", "a\\")
+                .build();
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+
+        assertThat(createSource(config).buildSinklessChangefeedQuery(tables, null, false))
+                .contains(" WITH metrics_label = 'a\\', min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause, envelope = 'enriched'");
+    }
+
+    @Test
+    public void shouldPutTheChangefeedOptionPropertiesAfterTheDeprecatedOptions() {
+        // When an option is given twice, CockroachDB uses the last value. A property therefore wins over the
+        // deprecated list of options, and an option that the connector sets itself wins over both.
+        Configuration config = baseConfig().edit()
+                .with(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS, "min_checkpoint_frequency = '10s'")
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "min_checkpoint_frequency", "30s")
+                .build();
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+
+        assertThat(createSource(config).buildSinkChangefeedQuery(tables, null, false))
+                .contains(" WITH full_table_name, min_checkpoint_frequency = '10s', min_checkpoint_frequency = '30s', envelope = 'enriched'");
+    }
+
+    @Test
+    public void shouldRefuseAChangefeedOptionPropertyForAnOptionThatIsReservedForTheConnector() {
+        // The option, and what the message has to name for it: the property that sets the option where there is one.
+        final Map<String, String> reserved = Map.ofEntries(
+                Map.entry("envelope", "enriched envelope"),
+                Map.entry("format", "JSON"),
+                Map.entry("full_table_name", "topics"),
+                Map.entry("enriched_properties", CockroachDBConnectorConfig.CHANGEFEED_ENRICHED_PROPERTIES.name()),
+                Map.entry("updated", CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_UPDATED.name()),
+                Map.entry("diff", CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_DIFF.name()),
+                Map.entry("mvcc_timestamp", CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_MVCC_TIMESTAMP.name()),
+                Map.entry("resolved", CockroachDBConnectorConfig.CHANGEFEED_RESOLVED_INTERVAL.name()),
+                Map.entry("cursor", CockroachDBConnectorConfig.CHANGEFEED_CURSOR.name()),
+                Map.entry("initial_scan", CockroachDBConnectorConfig.SNAPSHOT_MODE.name()),
+                Map.entry("initial_scan_only", CockroachDBConnectorConfig.SNAPSHOT_MODE.name()),
+                Map.entry("no_initial_scan", CockroachDBConnectorConfig.SNAPSHOT_MODE.name()),
+                Map.entry("kafka_sink_config", CockroachDBConnectorConfig.CHANGEFEED_KAFKA_SINK_CONFIG.name()));
+
+        reserved.forEach((option, hint) -> {
+            final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + option;
+            // The property is refused when the task starts, and not only when a statement is built: a changefeed
+            // that exists already is reused, and no statement is built for it.
+            assertThatThrownBy(() -> createSource(baseConfig().edit().with(property, "x").build()), "property %s", property)
+                    .isInstanceOf(DebeziumException.class)
+                    .hasMessageContaining(property)
+                    .hasMessageContaining("reserved for the connector")
+                    .hasMessageContaining(hint);
+        });
+    }
+
+    @Test
+    public void shouldRefuseAReservedChangefeedOptionInAnyCase() {
+        // CockroachDB does not distinguish the case of an option name.
+        final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "ENVELOPE";
+
+        assertThatThrownBy(() -> createSource(baseConfig().edit().with(property, "wrapped").build()))
+                .isInstanceOf(DebeziumException.class)
+                .hasMessageContaining(property)
+                .hasMessageContaining("reserved for the connector");
+    }
+
+    @Test
+    public void shouldReserveEveryOptionThatTheConnectorWrites() {
+        Configuration everything = baseConfig().edit()
+                .with(CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_UPDATED, true)
+                .with(CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_DIFF, true)
+                .with(CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_MVCC_TIMESTAMP, true)
+                .with(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_SINK_CONFIG, "{\"Flush\": {\"Messages\": 100}}")
+                .build();
+        CockroachDBStreamingChangeEventSource source = createSource(everything);
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+        Set<String> written = new TreeSet<>();
+        written.addAll(optionNames(source.buildSinkChangefeedQuery(tables, null, false)));
+        written.addAll(optionNames(source.buildSinkChangefeedQuery(tables, "1700000000000000000.0000000000", true)));
+        written.addAll(optionNames(source.buildSinklessChangefeedQuery(tables, null, false)));
+
+        assertThat(written).contains("full_table_name", "envelope", "enriched_properties", "updated", "diff", "mvcc_timestamp",
+                "resolved", "initial_scan", "cursor", "kafka_sink_config");
+        for (String option : written) {
+            final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + option;
+            assertThatThrownBy(() -> createSource(baseConfig().edit().with(property, "x").build()), "property %s", property)
+                    .isInstanceOf(DebeziumException.class)
+                    .hasMessageContaining("reserved for the connector");
+        }
+    }
+
+    /** The names of the options in the WITH clause of a statement. A comma in a quoted value separates nothing. */
+    private static Set<String> optionNames(String statement) {
+        final String options = statement.substring(statement.indexOf(" WITH ") + " WITH ".length()) + ",";
+        final Set<String> names = new TreeSet<>();
+        final StringBuilder option = new StringBuilder();
+        boolean quoted = false;
+        for (char current : options.toCharArray()) {
+            if (current == '\'') {
+                quoted = !quoted;
+            }
+            if (current == ',' && !quoted) {
+                names.add(option.toString().split("=", 2)[0].trim());
+                option.setLength(0);
+            }
+            else {
+                option.append(current);
+            }
+        }
+        return names;
+    }
+
+    @Test
+    public void shouldRefuseAChangefeedOptionPropertyWhoseNameIsNoOptionName() {
+        // The name goes into the statement as it is, so it must be a plain option name. The empty name is the
+        // property that consists of the prefix alone.
+        for (String name : List.of("min_checkpoint_frequency = '1s', envelope", "", "min-checkpoint-frequency", "1s", "metrics label",
+                " metrics_label", "metrics_label\n", "m\u00e9trique")) {
+            final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + name;
+            // From a map, as Kafka Connect passes the properties: the name is taken as it is.
+            final Map<String, String> properties = baseConfig().asMap();
+            properties.put(property, "x");
+
+            assertThatThrownBy(() -> createSource(Configuration.from(properties)), "property %s", property)
+                    .isInstanceOf(DebeziumException.class)
+                    .hasMessageContaining(property)
+                    .hasMessageContaining("does not name a changefeed option");
+        }
     }
 
     @Test
