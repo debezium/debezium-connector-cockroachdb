@@ -9,8 +9,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -19,11 +21,16 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.json.JsonConverter;
@@ -66,6 +73,21 @@ import ch.qos.logback.core.read.ListAppender;
  * <li>{@link #shouldKeepUpdatesAndDeletesThatArriveBeforeTheFirstResolvedTimestamp}
  * (debezium/dbz#3142): an update or a delete that arrives before the first resolved timestamp
  * must keep its operation and key instead of being emitted as a snapshot read.</li>
+ * <li>{@link #shouldEmitRowsInsertedBeforeTheFirstResolvedTimestampAsCreates},
+ * {@link #shouldCreateChangefeedsThatScanAtAnExplicitCursor} and
+ * {@link #shouldProcessSignalsThatArriveBeforeTheFirstResolvedTimestamp}: a row
+ * inserted after the initial scan must be emitted as a create even when it arrives before the first
+ * resolved timestamp. Emitted as a snapshot read, a row of the signaling table is not acted on.
+ * {@link #shouldEmitScanRowsThatArriveOutsideTheScanPhaseAsReads} covers the reverse case,
+ * {@link #shouldTellScanRowsFromInsertedRowsAcrossSeveralChangefeeds} several changefeeds,
+ * {@link #shouldUseTheCursorOfEveryReusedChangefeed} reused changefeeds that do not line up with the
+ * connector's own grouping, and
+ * {@link #shouldCreateChangefeedsWhenTheSessionDefaultsToReadCommitted} a session that cannot
+ * evaluate the cluster timestamp in its default isolation level.</li>
+ * <li>{@link #shouldDropEventsThatCockroachDbDeliversMoreThanOnce} and
+ * {@link #shouldCreateEveryChangefeedWithTheUpdatedOption} (debezium/dbz#2927): an event that
+ * CockroachDB delivers again has a new processing time but the same updated timestamp and row
+ * images, and the connector must emit it only once.</li>
  * </ul>
  *
  * @author Virag Tripathi
@@ -210,6 +232,522 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             jsonConverter.configure(converterConfig);
             assertThat(jsonConverter.fromConnectData(delete.topic(), delete.keySchema(), delete.key())).isNotEmpty();
         }
+    }
+
+    @Test
+    public void shouldEmitRowsInsertedBeforeTheFirstResolvedTimestampAsCreates() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("insert-window-test", "insert_window_testdb", "public.insert_window_events");
+        connection = openDatabase("insert_window_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS insert_window_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO insert_window_events VALUES (1, 'scanned'), (2, 'scanned')");
+            // As in the test above, a reused changefeed without the resolved option keeps the connector in
+            // the scan phase. Its cursor is the timestamp of the scan. With the updated option every scan
+            // row carries that timestamp and every row inserted afterwards carries a later one.
+            final String cursor;
+            try (ResultSet rs = stmt.executeQuery("SELECT cluster_logical_timestamp()::STRING")) {
+                assertThat(rs.next()).isTrue();
+                cursor = rs.getString(1);
+            }
+            stmt.execute("CREATE CHANGEFEED FOR TABLE insert_window_testdb.public.insert_window_events INTO '"
+                    + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=insert-window-test.' "
+                    + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source,schema', updated, "
+                    + "initial_scan = 'yes', cursor = '" + cursor + "'");
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(2, 45);
+        assertThat(scanRows).as("Should receive both scan rows").hasSizeGreaterThanOrEqualTo(2);
+        assertThat(scanRows).allSatisfy(row -> {
+            assertThat(((Struct) row.value()).getString("op")).isEqualTo("r");
+            assertThat(((Struct) row.value()).getStruct("source").getString("snapshot")).isEqualTo("true");
+        });
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO insert_window_events VALUES (3, 'inserted')");
+        }
+
+        // CockroachDB can deliver a change more than once, so every record of the inserted row is checked.
+        final List<SourceRecord> inserts = pollForRecords(r -> hasId(r, 3L), 1, 60);
+        assertThat(inserts).as("Should receive the inserted row").isNotEmpty();
+        assertThat(inserts).allSatisfy(record -> {
+            final Struct insert = (Struct) record.value();
+            assertThat(insert.getString("op")).as("A row inserted after the scan is a create").isEqualTo("c");
+            assertThat(insert.getStruct("after").getString("name")).isEqualTo("inserted");
+            assertThat(insert.getStruct("source").getString("snapshot")).as("A create is not a snapshot record").isIn(null, "false");
+        });
+    }
+
+    @Test
+    public void shouldProcessSignalsThatArriveBeforeTheFirstResolvedTimestamp() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("signal-window-test", "signal_window_testdb",
+                "public.signal_window_products,public.debezium_signal");
+        config.put("signal.data.collection", "signal_window_testdb.public.debezium_signal");
+        connection = openDatabase("signal_window_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS signal_window_products (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS debezium_signal (id STRING PRIMARY KEY, type STRING NOT NULL, data STRING)");
+            stmt.execute("UPSERT INTO signal_window_products VALUES (1, 'Widget'), (2, 'Gadget')");
+            // As in the tests above, a reused changefeed without the resolved option keeps the connector
+            // in the scan phase.
+            final String cursor;
+            try (ResultSet rs = stmt.executeQuery("SELECT cluster_logical_timestamp()::STRING")) {
+                assertThat(rs.next()).isTrue();
+                cursor = rs.getString(1);
+            }
+            stmt.execute("CREATE CHANGEFEED FOR TABLE signal_window_testdb.public.signal_window_products, "
+                    + "signal_window_testdb.public.debezium_signal INTO '"
+                    + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=signal-window-test.' "
+                    + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source,schema', updated, "
+                    + "initial_scan = 'yes', cursor = '" + cursor + "'");
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(2, 45);
+        assertThat(scanRows).as("Should receive both scan rows").hasSizeGreaterThanOrEqualTo(2);
+        assertThat(scanRows).allSatisfy(row -> {
+            assertThat(((Struct) row.value()).getString("op")).isEqualTo("r");
+            assertThat(((Struct) row.value()).getStruct("source").getString("snapshot")).isEqualTo("true");
+        });
+
+        // The connector acts on a row of the signaling table only when the row arrives as a create.
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO debezium_signal VALUES ('signal-window-1', 'execute-snapshot', "
+                    + "'{\"data-collections\": [\"signal_window_testdb.public.signal_window_products\"]}')");
+        }
+
+        // The rows of the changefeed's scan are marked as snapshot records in the source block. A read
+        // without that mark comes from the incremental snapshot.
+        final List<SourceRecord> snapshotRows = pollForRecords(r -> r.topic().endsWith(".signal_window_products")
+                && r.value() != null && "r".equals(((Struct) r.value()).getString("op"))
+                && !"true".equals(((Struct) r.value()).getStruct("source").getString("snapshot")), 2, 60);
+        assertThat(snapshotRows).as("The incremental snapshot that the signal asks for should read both rows")
+                .extracting(r -> ((Struct) r.key()).getInt64("id"))
+                .contains(1L, 2L);
+    }
+
+    @Test
+    public void shouldEmitScanRowsThatArriveOutsideTheScanPhaseAsReads() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("late-scan-test", "late_scan_testdb", "public.late_scan_events");
+        // With no_data the connector does not start a scan phase, so the scan rows of the reused changefeed
+        // arrive outside of it.
+        config.put("snapshot.mode", "no_data");
+        connection = openDatabase("late_scan_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS late_scan_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO late_scan_events VALUES (1, 'scanned'), (2, 'scanned')");
+            final String cursor;
+            try (ResultSet rs = stmt.executeQuery("SELECT cluster_logical_timestamp()::STRING")) {
+                assertThat(rs.next()).isTrue();
+                cursor = rs.getString(1);
+            }
+            stmt.execute("CREATE CHANGEFEED FOR TABLE late_scan_testdb.public.late_scan_events INTO '"
+                    + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=late-scan-test.' "
+                    + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source,schema', updated, "
+                    + "initial_scan = 'yes', cursor = '" + cursor + "'");
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(2, 45);
+        assertThat(scanRows).as("Should receive both scan rows").hasSizeGreaterThanOrEqualTo(2);
+        assertThat(scanRows).allSatisfy(row -> {
+            assertThat(((Struct) row.value()).getString("op")).as("A scan row is a snapshot read").isEqualTo("r");
+            assertThat(((Struct) row.value()).getStruct("source").getString("snapshot")).isEqualTo("true");
+        });
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO late_scan_events VALUES (3, 'inserted')");
+        }
+
+        final List<SourceRecord> inserts = pollForRecords(r -> hasId(r, 3L), 1, 60);
+        assertThat(inserts).as("Should receive the inserted row").isNotEmpty();
+        assertThat(inserts).allSatisfy(record -> {
+            final Struct insert = (Struct) record.value();
+            assertThat(insert.getString("op")).isEqualTo("c");
+            assertThat(insert.getStruct("source").getString("snapshot")).as("A create is not a snapshot record").isIn(null, "false");
+        });
+    }
+
+    @Test
+    public void shouldCreateChangefeedsThatScanAtAnExplicitCursor() throws Exception {
+        connection = openDatabase("scan_cursor_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS scan_cursor_orders (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS scan_cursor_items (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO scan_cursor_orders VALUES (1, 'scanned')");
+            stmt.execute("UPSERT INTO scan_cursor_items VALUES (1, 'scanned')");
+        }
+
+        // CockroachDB v26.4 sends the first resolved timestamp of a changefeed over several tables only
+        // with its first checkpoint, about 30 seconds after the scan.
+        startTask(baseConnectorConfig("scan-cursor-test", "scan_cursor_testdb", "public.scan_cursor_orders,public.scan_cursor_items"));
+
+        final List<SourceRecord> scanRows = pollForRecords(2, 45);
+        assertThat(scanRows).as("Should receive the scan row of each table").hasSizeGreaterThanOrEqualTo(2);
+        assertThat(scanRows).allSatisfy(row -> {
+            assertThat(((Struct) row.value()).getString("op")).isEqualTo("r");
+            // The connector adds the updated option for its own use. The timestamp is not emitted unless
+            // cockroachdb.changefeed.include.updated or include.mvcc.timestamp is enabled.
+            assertThat(((Struct) row.value()).getStruct("source").getString("ts_hlc")).isNull();
+        });
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO scan_cursor_orders VALUES (2, 'inserted')");
+            try (ResultSet rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOBS] "
+                    + "WHERE status = 'running' AND description LIKE '%topic_prefix=scan-cursor-test.%'")) {
+                assertThat(rs.next()).as("The connector should have created a changefeed").isTrue();
+                final String options = rs.getString(1).substring(rs.getString(1).indexOf("WITH OPTIONS ("));
+                // The connector tells scan rows from rows inserted later by comparing the updated timestamp
+                // of a row with the cursor of the changefeed.
+                assertThat(options).contains("cursor = '", "initial_scan = 'yes'").containsPattern("[(,] ?updated[,)]");
+            }
+        }
+
+        final List<SourceRecord> inserts = pollForRecords(r -> r.topic().endsWith(".scan_cursor_orders") && hasId(r, 2L), 1, 60);
+        assertThat(inserts).as("Should receive the inserted row").isNotEmpty();
+        assertThat(inserts).allSatisfy(record -> {
+            final Struct insert = (Struct) record.value();
+            assertThat(insert.getString("op")).as("A row inserted after the scan is a create").isEqualTo("c");
+            assertThat(insert.getStruct("source").getString("snapshot")).as("A create is not a snapshot record").isIn(null, "false");
+            assertThat(insert.getStruct("source").getString("ts_hlc")).isNull();
+        });
+    }
+
+    @Test
+    public void shouldTellScanRowsFromInsertedRowsAcrossSeveralChangefeeds() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("scan-groups-test", "scan_groups_testdb",
+                "public.scan_groups_orders,public.scan_groups_items");
+        // One changefeed per table. Each changefeed scans at its own cursor, and the first resolved
+        // timestamp of either of them ends the scan phase for both.
+        config.put("cockroachdb.changefeed.max.tables.per.changefeed", "1");
+        connection = openDatabase("scan_groups_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS scan_groups_orders (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS scan_groups_items (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO scan_groups_orders VALUES (1, 'scanned'), (2, 'scanned')");
+            stmt.execute("UPSERT INTO scan_groups_items VALUES (1, 'scanned'), (2, 'scanned')");
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(4, 45);
+        assertThat(scanRows).as("Should receive the scan rows of both tables").hasSizeGreaterThanOrEqualTo(4);
+        assertThat(scanRows).allSatisfy(row -> {
+            assertThat(((Struct) row.value()).getString("op")).as("A scan row is a snapshot read").isEqualTo("r");
+            assertThat(((Struct) row.value()).getStruct("source").getString("snapshot")).isEqualTo("true");
+        });
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO scan_groups_orders VALUES (3, 'inserted')");
+            stmt.execute("INSERT INTO scan_groups_items VALUES (3, 'inserted')");
+            try (ResultSet rs = stmt.executeQuery("SELECT count(*), count(DISTINCT substring(description FROM 'cursor = ''[0-9.]+''')) "
+                    + "FROM [SHOW CHANGEFEED JOBS] WHERE status = 'running' AND description LIKE '%topic_prefix=scan-groups-test.%'")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getInt(1)).as("The connector should have created one changefeed per table").isEqualTo(2);
+                assertThat(rs.getInt(2)).as("Each changefeed has its own cursor").isEqualTo(2);
+            }
+        }
+
+        final Set<String> tables = new HashSet<>();
+        final List<SourceRecord> inserts = pollForRecords(r -> hasId(r, 3L) && tables.add(r.topic()), 2, 60);
+        assertThat(inserts).as("Should receive the row inserted into each table").hasSize(2);
+        assertThat(inserts).allSatisfy(record -> {
+            final Struct insert = (Struct) record.value();
+            assertThat(insert.getString("op")).as("A row inserted after the scan is a create").isEqualTo("c");
+            assertThat(insert.getStruct("source").getString("snapshot")).as("A create is not a snapshot record").isIn(null, "false");
+        });
+    }
+
+    @Test
+    public void shouldDropEventsThatCockroachDbDeliversMoreThanOnce() throws Exception {
+        final String topic = "redelivery-test.redelivery_testdb.public.redelivery_events";
+        connection = openDatabase("redelivery_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS redelivery_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO redelivery_events VALUES (1, 'scanned')");
+        }
+
+        startTask(baseConnectorConfig("redelivery-test", "redelivery_testdb", "public.redelivery_events"));
+        assertThat(pollForRecords(1, 45)).as("Should receive the scan row").isNotEmpty();
+        final String jobId = runningChangefeedJobFor("redelivery_events");
+
+        // After PAUSE JOB and RESUME JOB a changefeed emits again what it emitted since its last
+        // checkpoint. A checkpoint can fall between the insert and the pause, so the sequence is repeated
+        // with a new row until CockroachDB has written one of the inserts to the intermediate topic twice.
+        final List<SourceRecord> emitted = new ArrayList<>();
+        long redelivered = -1;
+        for (long id = 100; id < 106 && redelivered < 0; id++) {
+            final long inserted = id;
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute("INSERT INTO redelivery_events VALUES (" + inserted + ", 'inserted')");
+            }
+            emitted.addAll(pollForRecords(r -> hasId(r, inserted), 1, 60));
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute("PAUSE JOB " + jobId);
+            }
+            waitForChangefeedJobStatus(jobId, "paused");
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute("RESUME JOB " + jobId);
+            }
+            waitForChangefeedJobStatus(jobId, "running");
+            for (int i = 0; i < 20 && redelivered < 0; i++) {
+                if (copiesInTopic(topic, "\"after\": {\"id\": " + inserted + ",") >= 2) {
+                    redelivered = inserted;
+                }
+                else {
+                    Thread.sleep(1000);
+                }
+            }
+        }
+        assertThat(redelivered).as("CockroachDB should have written one of the inserts to the intermediate topic twice").isPositive();
+
+        // The connector has emitted the insert already. A row that is written after the second copy tells
+        // when the connector has read that copy.
+        final long row = redelivered;
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO redelivery_events VALUES (999, 'written after the copy')");
+        }
+        final List<SourceRecord> written = pollForRecords(r -> {
+            if (hasId(r, row)) {
+                emitted.add(r);
+            }
+            return hasId(r, 999L);
+        }, 1, 60);
+        assertThat(written).as("Should receive the row that was written after the copy").isNotEmpty();
+        assertThat(emitted.stream().filter(r -> hasId(r, row))).as("The connector should emit the insert once").hasSize(1);
+    }
+
+    @Test
+    public void shouldEmitTheChangesOfARowInTheirOrderWhenCockroachDbDeliversThemAgain() throws Exception {
+        final String topic = "reorder-test.reorder_testdb.public.reorder_events";
+        final Map<String, String> config = baseConnectorConfig("reorder-test", "reorder_testdb", "public.reorder_events,public.reorder_filler");
+        config.put("snapshot.mode", "no_data");
+        connection = openDatabase("reorder_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS reorder_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS reorder_filler (id INT8 PRIMARY KEY)");
+            // When a changefeed is paused and resumed, it emits again what it emitted since its last
+            // checkpoint. This one writes a checkpoint soon after it starts and then only every ten minutes.
+            stmt.execute("CREATE CHANGEFEED FOR TABLE reorder_testdb.public.reorder_events, reorder_testdb.public.reorder_filler INTO '"
+                    + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=reorder-test.' "
+                    + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source,schema', updated, "
+                    + "initial_scan = 'no', min_checkpoint_frequency = '10m'");
+        }
+
+        startTask(config);
+        final String jobId = runningChangefeedJobFor("reorder_events");
+        waitForACheckpoint(jobId);
+
+        // The row changes twice, and between the two changes more events pass than the connector remembers.
+        final List<SourceRecord> changes = new ArrayList<>();
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO reorder_events VALUES (1, 'older')");
+        }
+        changes.addAll(pollForRecords(r -> isReorderEvent(r, 1L), 1, 60));
+        assertThat(changes).as("Should receive the insert").isNotEmpty();
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO reorder_filler SELECT generate_series(1001, 11050)");
+        }
+        // CockroachDB can deliver events again on its own at any time, so the test counts rows, not records,
+        // and waits for the update instead of taking the next record of the row for it.
+        final Set<Long> otherRows = new HashSet<>();
+        pollForRecords(r -> {
+            if (r.topic().endsWith(".reorder_filler") && r.key() instanceof Struct) {
+                otherRows.add(((Struct) r.key()).getInt64("id"));
+            }
+            return otherRows.size() >= 10_050;
+        }, 1, 180);
+        assertThat(otherRows).as("Should receive the rows of the other table").hasSize(10_050);
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("UPDATE reorder_events SET name = 'newer' WHERE id = 1");
+        }
+        final List<SourceRecord> updates = pollForRecords(r -> {
+            if (isReorderEvent(r, 1L)) {
+                changes.add(r);
+            }
+            return isReorderEvent(r, 1L) && "newer".equals(nameOf(r));
+        }, 1, 60);
+        assertThat(updates).as("Should receive the update").isNotEmpty();
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("PAUSE JOB " + jobId);
+        }
+        waitForChangefeedJobStatus(jobId, "paused");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("RESUME JOB " + jobId);
+        }
+        waitForChangefeedJobStatus(jobId, "running");
+        int copies = 0;
+        for (int i = 0; i < 60 && copies < 2; i++) {
+            copies = copiesInTopic(topic, "\"name\": \"newer\"");
+            if (copies < 2) {
+                Thread.sleep(1000);
+            }
+        }
+        assertThat(copies).as("CockroachDB should have written the update to the intermediate topic twice").isGreaterThanOrEqualTo(2);
+        assertThat(copiesInTopic(topic, "\"name\": \"older\"")).as("and the insert as well").isGreaterThanOrEqualTo(2);
+
+        // A row that is written after the copies tells when the connector has read them.
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO reorder_events VALUES (2, 'written after the copies')");
+        }
+        final List<SourceRecord> written = pollForRecords(r -> {
+            if (isReorderEvent(r, 1L)) {
+                changes.add(r);
+            }
+            return isReorderEvent(r, 2L);
+        }, 1, 120);
+        assertThat(written).as("Should receive the row that was written after the copies").isNotEmpty();
+
+        // Whatever the connector emitted again, the last event of the row must be its last change.
+        assertThat(nameOfTheLastChange(changes)).as("The row must not end on its older version").isEqualTo("newer");
+    }
+
+    private static boolean isReorderEvent(SourceRecord record, long id) {
+        return record.topic().endsWith(".reorder_events") && hasId(record, id);
+    }
+
+    private void waitForACheckpoint(String jobId) throws Exception {
+        for (int i = 0; i < 90; i++) {
+            try (Statement stmt = connection.createStatement();
+                    ResultSet rs = stmt.executeQuery("SELECT high_water_timestamp FROM [SHOW CHANGEFEED JOB " + jobId + "]")) {
+                if (rs.next() && rs.getString(1) != null) {
+                    return;
+                }
+            }
+            Thread.sleep(1000);
+        }
+        throw new IllegalStateException("Changefeed job " + jobId + " wrote no checkpoint");
+    }
+
+    private static String nameOfTheLastChange(List<SourceRecord> changes) {
+        return nameOf(changes.get(changes.size() - 1));
+    }
+
+    private static String nameOf(SourceRecord record) {
+        final Struct after = ((Struct) record.value()).getStruct("after");
+        return after == null ? null : after.getString("name");
+    }
+
+    @Test
+    public void shouldCreateEveryChangefeedWithTheUpdatedOption() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("updated-option-test", "updated_option_testdb", "public.updated_option_events");
+        // With no_data the changefeed has neither an initial scan nor a cursor.
+        config.put("snapshot.mode", "no_data");
+        connection = openDatabase("updated_option_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS updated_option_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+        }
+
+        startTask(config);
+
+        String options = null;
+        for (int i = 0; i < 30 && options == null; i++) {
+            try (Statement stmt = connection.createStatement();
+                    ResultSet rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOBS] "
+                            + "WHERE status = 'running' AND description LIKE '%topic_prefix=updated-option-test.%'")) {
+                if (rs.next()) {
+                    options = rs.getString(1).substring(rs.getString(1).indexOf("WITH OPTIONS ("));
+                }
+            }
+            if (options == null) {
+                Thread.sleep(1000);
+            }
+        }
+        assertThat(options).as("The connector should have created a changefeed").isNotNull();
+        assertThat(options).contains("initial_scan = 'no'").containsPattern("[(,] ?updated[,)]");
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO updated_option_events VALUES (1, 'inserted')");
+        }
+        final List<SourceRecord> inserts = pollForRecords(r -> hasId(r, 1L), 1, 60);
+        assertThat(inserts).as("Should receive the inserted row").isNotEmpty();
+        // The option is for the connector's own use. The timestamp is not emitted unless the configuration asks for it.
+        assertThat(inserts).allSatisfy(record -> assertThat(((Struct) record.value()).getStruct("source").getString("ts_hlc")).isNull());
+    }
+
+    @Test
+    public void shouldUseTheCursorOfEveryReusedChangefeed() throws Exception {
+        // The connector puts both tables into one changefeed, but finds one running changefeed per table,
+        // for example after cockroachdb.changefeed.max.tables.per.changefeed was raised. Neither of them
+        // sends resolved timestamps, so the connector stays in the scan phase.
+        final Map<String, String> config = baseConnectorConfig("reused-cursors-test", "reused_cursors_testdb",
+                "public.reused_cursors_orders,public.reused_cursors_items");
+        connection = openDatabase("reused_cursors_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            for (String table : List.of("reused_cursors_orders", "reused_cursors_items")) {
+                stmt.execute("CREATE TABLE IF NOT EXISTS " + table + " (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+                stmt.execute("UPSERT INTO " + table + " VALUES (1, 'scanned')");
+                final String cursor;
+                try (ResultSet rs = stmt.executeQuery("SELECT cluster_logical_timestamp()::STRING")) {
+                    assertThat(rs.next()).isTrue();
+                    cursor = rs.getString(1);
+                }
+                stmt.execute("CREATE CHANGEFEED FOR TABLE reused_cursors_testdb.public." + table + " INTO '"
+                        + config.get("cockroachdb.changefeed.sink.uri") + "?topic_prefix=reused-cursors-test.' "
+                        + "WITH full_table_name, envelope = 'enriched', enriched_properties = 'source,schema', updated, "
+                        + "initial_scan = 'yes', cursor = '" + cursor + "'");
+            }
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(2, 45);
+        assertThat(scanRows).as("Should receive the scan row of each table").hasSizeGreaterThanOrEqualTo(2);
+        assertThat(scanRows).allSatisfy(row -> assertThat(((Struct) row.value()).getString("op")).isEqualTo("r"));
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO reused_cursors_orders VALUES (2, 'inserted')");
+            stmt.execute("INSERT INTO reused_cursors_items VALUES (2, 'inserted')");
+        }
+
+        final Set<String> tables = new HashSet<>();
+        final List<SourceRecord> inserts = pollForRecords(r -> hasId(r, 2L) && tables.add(r.topic()), 2, 60);
+        assertThat(inserts).as("Should receive the row inserted into each table").hasSize(2);
+        assertThat(inserts).allSatisfy(record -> assertThat(((Struct) record.value()).getString("op"))
+                .as("A row inserted after the scan is a create in " + record.topic()).isEqualTo("c"));
+    }
+
+    @Test
+    public void shouldCreateChangefeedsWhenTheSessionDefaultsToReadCommitted() throws Exception {
+        connection = openDatabase("read_committed_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            // CockroachDB evaluates cluster_logical_timestamp(), which gives the changefeed its cursor, only
+            // in a SERIALIZABLE transaction. Role defaults do not apply to root, so the connector gets a
+            // user of its own.
+            stmt.execute("CREATE USER IF NOT EXISTS read_committed_connector");
+            stmt.execute("GRANT admin TO read_committed_connector");
+            stmt.execute("ALTER ROLE read_committed_connector SET default_transaction_isolation = 'read committed'");
+            stmt.execute("CREATE TABLE IF NOT EXISTS read_committed_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO read_committed_events VALUES (1, 'scanned')");
+        }
+        try (Connection session = DriverManager.getConnection(
+                cockroachdb.getJdbcUrl().replace("/postgres", "/read_committed_testdb"), "read_committed_connector", "");
+                Statement stmt = session.createStatement();
+                ResultSet rs = stmt.executeQuery("SHOW transaction_isolation")) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getString(1)).as("A session of the connector's user should default to READ COMMITTED").isEqualTo("read committed");
+        }
+
+        final Map<String, String> config = baseConnectorConfig("read-committed-test", "read_committed_testdb", "public.read_committed_events");
+        config.put("database.user", "read_committed_connector");
+        config.put("database.password", "");
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(1, 45);
+        assertThat(scanRows).as("Should receive the scan row").isNotEmpty();
+        assertThat(scanRows).allSatisfy(row -> assertThat(((Struct) row.value()).getString("op")).isEqualTo("r"));
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO read_committed_events VALUES (2, 'inserted')");
+        }
+
+        final List<SourceRecord> inserts = pollForRecords(r -> hasId(r, 2L), 1, 60);
+        assertThat(inserts).as("Should receive the inserted row").isNotEmpty();
+        assertThat(inserts).allSatisfy(record -> assertThat(((Struct) record.value()).getString("op")).isEqualTo("c"));
     }
 
     @Test
@@ -616,6 +1154,35 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
                 .as("source.schema enables JDBC sink routing via ${source.schema} (debezium/dbz#2432)")
                 .isEqualTo("public");
         assertThat(source.getString("table")).isEqualTo("accounts");
+    }
+
+    /** Counts the messages of an intermediate topic whose value contains the given text. */
+    private static int copiesInTopic(String topic, String text) {
+        final Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers().replaceFirst("^PLAINTEXT://", ""));
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
+            final List<TopicPartition> partitions = consumer.partitionsFor(topic).stream()
+                    .map(info -> new TopicPartition(info.topic(), info.partition()))
+                    .collect(Collectors.toList());
+            consumer.assign(partitions);
+            consumer.seekToBeginning(partitions);
+            final Map<TopicPartition, Long> end = consumer.endOffsets(partitions);
+            int copies = 0;
+            while (partitions.stream().anyMatch(partition -> consumer.position(partition) < end.get(partition))) {
+                for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(500))) {
+                    if (record.value() != null && record.value().contains(text)) {
+                        copies++;
+                    }
+                }
+            }
+            return copies;
+        }
+    }
+
+    private static boolean hasId(SourceRecord record, long id) {
+        return record.value() != null && record.key() instanceof Struct && Long.valueOf(id).equals(((Struct) record.key()).getInt64("id"));
     }
 
     private boolean isDelete(SourceRecord record) {

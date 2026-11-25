@@ -8,19 +8,25 @@ package io.debezium.connector.cockroachdb;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -154,10 +160,146 @@ public class CockroachDBStreamingChangeEventSourceTest {
                 .isEqualTo(CockroachDBStreamingChangeEventSource.createEventId(orders, flat, "[1]"));
     }
 
+    private static JsonNode changefeedEvent(String op, String processedAt, String sourceTimestamps, String after) throws Exception {
+        return MAPPER.readTree("{\"op\": \"" + op + "\", \"ts_ns\": " + processedAt + ", \"after\": " + after + ", "
+                + "\"source\": {" + sourceTimestamps + ", \"node_id\": 1, \"table_name\": \"t\"}}");
+    }
+
+    @Test
+    void givesAnEventThatCockroachDbDeliversAgainTheSameId() throws Exception {
+        // Captured from v25.4.21: after PAUSE JOB and RESUME JOB the changefeed emitted this insert again.
+        // The two messages differ only in the top-level ts_ns, the time at which the changefeed processed
+        // them, so that field cannot identify the event (debezium/dbz#2927).
+        final TableId table = new TableId("e", "public", "t");
+        final String updated = "\"ts_hlc\": \"1795272958318972119.0000000000\"";
+        final JsonNode first = changefeedEvent("c", "1795272958825342632", updated, "{\"id\": 10, \"v\": \"live\"}");
+        final JsonNode again = changefeedEvent("c", "1795272985420500419", updated, "{\"id\": 10, \"v\": \"live\"}");
+
+        assertThat(CockroachDBStreamingChangeEventSource.createEventId(table, again, "[10]"))
+                .isEqualTo(CockroachDBStreamingChangeEventSource.createEventId(table, first, "[10]"));
+    }
+
+    @Test
+    void keepsEventsOfTheSameRowApartByTheirTimestampAndImages() throws Exception {
+        final TableId table = new TableId("e", "public", "t");
+        final String updated = "\"ts_hlc\": \"1795272958318972119.0000000000\"";
+        final String id = CockroachDBStreamingChangeEventSource.createEventId(table,
+                changefeedEvent("u", "100", updated, "{\"id\": 1, \"v\": \"a2\"}"), "[1]");
+
+        // A later change of the same row.
+        assertThat(CockroachDBStreamingChangeEventSource.createEventId(table,
+                changefeedEvent("u", "100", "\"ts_hlc\": \"1795272994376546985.0000000000\"", "{\"id\": 1, \"v\": \"a2\"}"), "[1]"))
+                .isNotEqualTo(id);
+        // The same timestamp with another row image, for example the row with a column that was added.
+        assertThat(CockroachDBStreamingChangeEventSource.createEventId(table,
+                changefeedEvent("u", "100", updated, "{\"d\": 5, \"id\": 1, \"v\": \"a2\"}"), "[1]"))
+                .isNotEqualTo(id);
+        // Another row that was changed in the same transaction.
+        assertThat(CockroachDBStreamingChangeEventSource.createEventId(table,
+                changefeedEvent("u", "100", updated, "{\"id\": 1, \"v\": \"a2\"}"), "[2]"))
+                .isNotEqualTo(id);
+    }
+
+    @Test
+    void usesTheMvccTimestampWhenTheUpdatedTimestampIsMissing() throws Exception {
+        // A reused changefeed can have the mvcc_timestamp option without the updated option.
+        final TableId table = new TableId("e", "public", "t");
+        final String mvcc = "\"mvcc_timestamp\": \"1795272958318972119.0000000000\"";
+        final JsonNode first = changefeedEvent("c", "1795272958825342632", mvcc, "{\"id\": 10, \"v\": \"live\"}");
+        final JsonNode again = changefeedEvent("c", "1795272985420500419", mvcc, "{\"id\": 10, \"v\": \"live\"}");
+
+        assertThat(CockroachDBStreamingChangeEventSource.createEventId(table, again, "[10]"))
+                .isEqualTo(CockroachDBStreamingChangeEventSource.createEventId(table, first, "[10]"));
+    }
+
+    /** What the connector does with a changefeed event: emit it unless it is a copy of the last event of its row. */
+    private static void deliver(CockroachDBStreamingChangeEventSource source, TableId table, String key, String op, String updated,
+                                String value, List<String> emitted)
+            throws Exception {
+        final String row = CockroachDBStreamingChangeEventSource.rowId(table, key);
+        // Every delivery has its own processing time.
+        final String id = CockroachDBStreamingChangeEventSource.createEventId(table, changefeedEvent(op, String.valueOf(System.nanoTime()),
+                "\"ts_hlc\": \"" + updated + ".0000000000\"", "{\"v\": \"" + value + "\"}"), key);
+        if (!source.isCopyOfLastEvent(row, id)) {
+            emitted.add(value);
+            source.rememberDispatched(row, id);
+        }
+    }
+
+    @Test
+    void dropsACopyOfTheLastEventOfARow() throws Exception {
+        final CockroachDBStreamingChangeEventSource source = source(baseConfig().build());
+        final TableId table = new TableId("e", "public", "t");
+        final List<String> emitted = new ArrayList<>();
+
+        deliver(source, table, "[1]", "c", "100", "inserted", emitted);
+        deliver(source, table, "[2]", "c", "100", "inserted in the same transaction", emitted);
+        // CockroachDB delivers both events again.
+        deliver(source, table, "[1]", "c", "100", "inserted", emitted);
+        deliver(source, table, "[2]", "c", "100", "inserted in the same transaction", emitted);
+
+        assertThat(emitted).containsExactly("inserted", "inserted in the same transaction");
+    }
+
+    @Test
+    void doesNotTakeAnEventThatWasNotDispatchedForProcessed() throws Exception {
+        final CockroachDBStreamingChangeEventSource source = source(baseConfig().build());
+        final TableId table = new TableId("e", "public", "t");
+        final String row = CockroachDBStreamingChangeEventSource.rowId(table, "[1]");
+        final String id = CockroachDBStreamingChangeEventSource.createEventId(table,
+                changefeedEvent("c", "1", "\"ts_hlc\": \"100.0000000000\"", "{\"v\": \"inserted\"}"), "[1]");
+
+        // The event was looked up but failed before it was dispatched, so its copy must be processed.
+        assertThat(source.isCopyOfLastEvent(row, id)).isFalse();
+        assertThat(source.isCopyOfLastEvent(row, id)).isFalse();
+        source.rememberDispatched(row, id);
+        assertThat(source.isCopyOfLastEvent(row, id)).isTrue();
+    }
+
+    @Test
+    void emitsTheEventsOfARowAgainInTheirOrderWhenItChangedMoreThanOnce() throws Exception {
+        // Dropping every event that was seen before breaks the order of a row: the connector remembers a
+        // limited number of events, so the older of two changes of a row can be forgotten while the newer
+        // one is not. When CockroachDB delivers both again, the older one is emitted, the newer one is
+        // dropped, and the row ends on its older version (debezium/dbz#2927).
+        final CockroachDBStreamingChangeEventSource source = source(baseConfig().build());
+        final TableId table = new TableId("e", "public", "t");
+        final List<String> emitted = new ArrayList<>();
+
+        deliver(source, table, "[1]", "u", "100", "older", emitted);
+        for (int other = 2; other < 10_100; other++) {
+            deliver(source, table, "[" + other + "]", "c", "200", "another row", emitted);
+        }
+        deliver(source, table, "[1]", "u", "300", "newer", emitted);
+        emitted.clear();
+        // CockroachDB delivers the two changes of the row again.
+        deliver(source, table, "[1]", "u", "100", "older", emitted);
+        deliver(source, table, "[1]", "u", "300", "newer", emitted);
+
+        assertThat(emitted).containsExactly("older", "newer");
+    }
+
+    @Test
+    void emitsTheEventsOfARowAgainInTheirOrderWhenBothAreRemembered() throws Exception {
+        final CockroachDBStreamingChangeEventSource source = source(baseConfig().build());
+        final TableId table = new TableId("e", "public", "t");
+        final List<String> emitted = new ArrayList<>();
+
+        deliver(source, table, "[1]", "u", "100", "older", emitted);
+        deliver(source, table, "[1]", "u", "300", "newer", emitted);
+        emitted.clear();
+        deliver(source, table, "[1]", "u", "100", "older", emitted);
+        deliver(source, table, "[1]", "u", "300", "newer", emitted);
+        // A third delivery of the newer change alone is a copy of the last event of the row.
+        deliver(source, table, "[1]", "u", "300", "newer", emitted);
+
+        assertThat(emitted).containsExactly("older", "newer");
+    }
+
     @Test
     void emitsScanRowsAsReadsWhileTheInitialScanIsInProgress() throws Exception {
         // CockroachDB reports the rows of an initial scan as creates.
-        assertThat(CockroachDBStreamingChangeEventSource.operationFor(event("c", "100", "orders"), true))
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(event("c", "100", "orders"), null, true))
                 .isEqualTo(Envelope.Operation.READ);
     }
 
@@ -168,9 +310,9 @@ public class CockroachDBStreamingChangeEventSourceTest {
         // (debezium/dbz#3142).
         final JsonNode delete = MAPPER.readTree("{\"op\": \"d\", \"ts_ns\": 100, \"after\": null}");
 
-        assertThat(CockroachDBStreamingChangeEventSource.operationFor(event("u", "100", "orders"), true))
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(event("u", "100", "orders"), null, true))
                 .isEqualTo(Envelope.Operation.UPDATE);
-        assertThat(CockroachDBStreamingChangeEventSource.operationFor(delete, true))
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(delete, null, true))
                 .isEqualTo(Envelope.Operation.DELETE);
     }
 
@@ -178,12 +320,144 @@ public class CockroachDBStreamingChangeEventSourceTest {
     void usesTheChangefeedOperationAfterTheInitialScan() throws Exception {
         final JsonNode delete = MAPPER.readTree("{\"op\": \"d\", \"ts_ns\": 100, \"after\": null}");
 
-        assertThat(CockroachDBStreamingChangeEventSource.operationFor(event("c", "100", "orders"), false))
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(event("c", "100", "orders"), null, false))
                 .isEqualTo(Envelope.Operation.CREATE);
-        assertThat(CockroachDBStreamingChangeEventSource.operationFor(event("u", "100", "orders"), false))
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(event("u", "100", "orders"), null, false))
                 .isEqualTo(Envelope.Operation.UPDATE);
-        assertThat(CockroachDBStreamingChangeEventSource.operationFor(delete, false))
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(delete, null, false))
                 .isEqualTo(Envelope.Operation.DELETE);
+    }
+
+    private static final BigDecimal SCAN_TIMESTAMP = new BigDecimal("1795243641446371339.0000000000");
+
+    private static JsonNode eventAt(String op, String updatedTimestamp) throws Exception {
+        return MAPPER.readTree("{\"op\": \"" + op + "\", \"ts_ns\": 100, \"after\": {\"id\": 1}, "
+                + "\"source\": {\"ts_hlc\": \"" + updatedTimestamp + "\"}}");
+    }
+
+    @Test
+    void tellsScanRowsFromRowsInsertedLaterByTheScanTimestamp() throws Exception {
+        // With the updated option every scan row carries the timestamp of the scan, and a row inserted
+        // later carries a later one. CockroachDB reports both as creates, and it can deliver the later row
+        // before the first resolved timestamp, which ends the scan phase.
+        final JsonNode scanRow = eventAt("c", "1795243641446371339.0000000000");
+        final JsonNode insertedLater = eventAt("c", "1795243643012345678.0000000000");
+
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(scanRow, SCAN_TIMESTAMP, true))
+                .isEqualTo(Envelope.Operation.READ);
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(insertedLater, SCAN_TIMESTAMP, true))
+                .isEqualTo(Envelope.Operation.CREATE);
+
+        // With the mvcc_timestamp option a scan row also carries the time of its last write, which is
+        // earlier than the scan. Only the updated timestamp identifies the scan.
+        final JsonNode scanRowWithMvccTimestamp = MAPPER.readTree("{\"op\": \"c\", \"ts_ns\": 100, \"after\": {\"id\": 1}, "
+                + "\"source\": {\"mvcc_timestamp\": \"1795243000000000000.0000000000\", \"ts_hlc\": \"1795243641446371339.0000000000\"}}");
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(scanRowWithMvccTimestamp, SCAN_TIMESTAMP, true))
+                .isEqualTo(Envelope.Operation.READ);
+    }
+
+    @Test
+    void readsScanRowsThatArriveAfterTheScanPhaseEnded() throws Exception {
+        // The first resolved timestamp ends the scan phase for all tables. The connector can read it from
+        // the topic of one table before it has read the scan rows of another table.
+        final JsonNode scanRow = eventAt("c", "1795243641446371339.0000000000");
+        final JsonNode insertedLater = eventAt("c", "1795243643012345678.0000000000");
+
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(scanRow, SCAN_TIMESTAMP, false))
+                .isEqualTo(Envelope.Operation.READ);
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(insertedLater, SCAN_TIMESTAMP, false))
+                .isEqualTo(Envelope.Operation.CREATE);
+    }
+
+    @Test
+    void fallsBackToTheScanPhaseWhenTimestampsAreMissing() throws Exception {
+        // A reused changefeed that was created without a cursor has no known scan timestamp, and events
+        // of a changefeed without the updated option carry no timestamp to compare.
+        final JsonNode withTimestamp = eventAt("c", "1795243643012345678.0000000000");
+        final JsonNode withoutTimestamp = event("c", "100", "orders");
+
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(withTimestamp, null, true))
+                .isEqualTo(Envelope.Operation.READ);
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(withoutTimestamp, SCAN_TIMESTAMP, true))
+                .isEqualTo(Envelope.Operation.READ);
+        assertThat(CockroachDBStreamingChangeEventSource.operationFor(withoutTimestamp, SCAN_TIMESTAMP, false))
+                .isEqualTo(Envelope.Operation.CREATE);
+    }
+
+    @Test
+    void readsTheScanTimestampFromAChangefeedDescription() {
+        final String withCursor = "CREATE CHANGEFEED FOR TABLE demodb.public.orders INTO 'kafka://kafka:9092?topic_prefix=crdb.' "
+                + "WITH OPTIONS (cursor = '1795243641446371339.0000000000', diff, enriched_properties = 'source', "
+                + "envelope = 'enriched', full_table_name, initial_scan = 'yes', resolved = '10s', updated)";
+        final String withoutCursor = "CREATE CHANGEFEED FOR TABLE demodb.public.cursor INTO 'kafka://kafka:9092?topic_prefix=crdb.' "
+                + "WITH OPTIONS (enriched_properties = 'source', envelope = 'enriched', full_table_name, initial_scan = 'yes')";
+
+        // ALTER CHANGEFEED keeps the cursor and removes initial_scan (captured from v25.4 and v26.4).
+        final String altered = "CREATE CHANGEFEED FOR TABLE demodb.public.orders INTO 'kafka://kafka:9092?topic_prefix=crdb.' "
+                + "WITH OPTIONS (cursor = '1795243641446371339.0000000000', diff, enriched_properties = 'source', "
+                + "envelope = 'enriched', full_table_name, resolved = '10s', updated)";
+        final String cursorInsideAnotherValue = "CREATE CHANGEFEED FOR TABLE demodb.public.orders INTO 'kafka://kafka:9092?topic_prefix=crdb.' "
+                + "WITH OPTIONS (envelope = 'enriched', full_table_name, metrics_label = e'a, cursor = \\'1.0\\', b', updated)";
+        final String wallClockCursor = "CREATE CHANGEFEED FOR TABLE demodb.public.orders INTO 'kafka://kafka:9092?topic_prefix=crdb.' "
+                + "WITH OPTIONS (cursor = '2026-11-21 10:00:00', envelope = 'enriched', full_table_name, updated)";
+
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedCursor(withCursor)).isEqualByComparingTo(SCAN_TIMESTAMP);
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedCursor(altered)).isEqualByComparingTo(SCAN_TIMESTAMP);
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedCursor(withoutCursor)).isNull();
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedCursor(cursorInsideAnotherValue)).isNull();
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedCursor(wallClockCursor)).isNull();
+        assertThat(CockroachDBStreamingChangeEventSource.changefeedCursor(null)).isNull();
+    }
+
+    @Test
+    void createsEveryChangefeedWithTheUpdatedOption() {
+        // The connector reads the updated timestamp of every event: it compares it with the cursor to
+        // recognize the rows of an initial scan, and it identifies an event by it to drop events that
+        // CockroachDB delivers more than once. cockroachdb.changefeed.include.updated is disabled here.
+        final List<TableId> tables = List.of(new TableId("testdb", "public", "orders"));
+        final CockroachDBStreamingChangeEventSource source = source(baseConfig().with("snapshot.mode", "initial").build());
+
+        assertThat(withOptionNames(source.buildSinkChangefeedQuery(tables, "1795243641446371339.0000000000", false)))
+                .containsExactly("full_table_name", "envelope", "enriched_properties", "updated", "resolved", "initial_scan", "cursor");
+        assertThat(withOptionNames(source.buildSinklessChangefeedQuery(tables, "1795243641446371339.0000000000", false)))
+                .containsExactly("envelope", "enriched_properties", "updated", "resolved", "initial_scan", "cursor");
+        // A changefeed that resumes from a stored cursor.
+        assertThat(withOptionNames(source.buildSinkChangefeedQuery(tables, "1795243641446371339.0000000000", true)))
+                .containsExactly("full_table_name", "envelope", "enriched_properties", "updated", "resolved", "initial_scan", "cursor");
+        // A changefeed without an initial scan and without a cursor.
+        assertThat(withOptionNames(source(baseConfig().with("snapshot.mode", "no_data").build()).buildSinkChangefeedQuery(tables, null, false)))
+                .containsExactly("full_table_name", "envelope", "enriched_properties", "updated", "resolved", "initial_scan");
+    }
+
+    @Test
+    void scansAtTheCurrentClusterTimestamp() throws Exception {
+        final CockroachDBStreamingChangeEventSource source = source(baseConfig().with("snapshot.mode", "initial").build());
+        final TableId orders = new TableId("testdb", "public", "orders");
+        final Statement statement = statementOnAClusterAt("1795243641446371339.0000000000");
+
+        final boolean recovered = source.executeSinkChangefeed(statement, List.of(orders), null, false);
+
+        assertThat(recovered).isFalse();
+        final ArgumentCaptor<String> queries = ArgumentCaptor.forClass(String.class);
+        verify(statement).execute(queries.capture());
+        assertThat(queries.getValue()).contains("initial_scan = 'yes'", "cursor = '1795243641446371339.0000000000'", " updated,");
+        assertThat(source.scanTimestamp(orders)).isEqualByComparingTo(SCAN_TIMESTAMP);
+        // CockroachDB evaluates the timestamp only in a SERIALIZABLE transaction, and the session can default
+        // to READ COMMITTED. With auto-commit the connector opens and ends that transaction itself.
+        final Statement timestampStatement = statement.getConnection().createStatement();
+        final InOrder order = inOrder(timestampStatement, statement);
+        order.verify(timestampStatement).execute("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        order.verify(timestampStatement).executeQuery("SELECT cluster_logical_timestamp()::STRING");
+        order.verify(timestampStatement).execute("ROLLBACK");
+        order.verify(statement).execute(anyString());
+    }
+
+    private static Statement statementOnAClusterAt(String clusterTimestamp) throws SQLException {
+        final Statement statement = mock(Statement.class, RETURNS_DEEP_STUBS);
+        when(statement.getConnection().getAutoCommit()).thenReturn(true);
+        when(statement.getConnection().createStatement().executeQuery(anyString()).next()).thenReturn(true);
+        when(statement.getConnection().createStatement().executeQuery(anyString()).getString(1)).thenReturn(clusterTimestamp);
+        return statement;
     }
 
     @Test
@@ -244,26 +518,27 @@ public class CockroachDBStreamingChangeEventSourceTest {
     }
 
     @Test
-    void retriesSinkChangefeedOnceWithoutCursorForWhenNeeded() throws Exception {
+    void retriesSinkChangefeedOnceWithANewInitialScanForWhenNeeded() throws Exception {
         CockroachDBStreamingChangeEventSource source = source(baseConfig()
                 .with("snapshot.mode", "when_needed")
                 .build());
-        Statement statement = mock(Statement.class);
+        Statement statement = statementOnAClusterAt("1795243641446371339.0000000000");
         SQLException staleCursor = new SQLException(
                 "HINT: do the targets exist at the specified cursor time 1?", "42P01");
         doThrow(staleCursor).doReturn(false).when(statement).execute(anyString());
 
-        boolean recovered = source.executeSinkChangefeed(
-                statement, List.of(new TableId("testdb", "public", "orders")), "1.0000000000", true);
+        TableId orders = new TableId("testdb", "public", "orders");
+        boolean recovered = source.executeSinkChangefeed(statement, List.of(orders), "1.0000000000", true);
 
         assertThat(recovered).isTrue();
         ArgumentCaptor<String> queries = ArgumentCaptor.forClass(String.class);
         verify(statement, times(2)).execute(queries.capture());
         assertThat(queries.getAllValues().get(0))
                 .contains("cursor = '1.0000000000'", "initial_scan = 'no'");
+        // The new scan runs at the current cluster timestamp, not at the rejected cursor.
         assertThat(queries.getAllValues().get(1))
-                .contains("initial_scan = 'yes'")
-                .doesNotContain("cursor =");
+                .contains("initial_scan = 'yes'", "cursor = '1795243641446371339.0000000000'");
+        assertThat(source.scanTimestamp(orders)).isEqualByComparingTo(SCAN_TIMESTAMP);
     }
 
     @Test

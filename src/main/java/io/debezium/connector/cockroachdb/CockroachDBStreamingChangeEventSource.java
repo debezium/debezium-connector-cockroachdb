@@ -6,10 +6,13 @@
 package io.debezium.connector.cockroachdb;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -99,13 +102,14 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     private final ObjectMapper objectMapper = ChangefeedJsonMapper.create();
 
     /**
-     * Bounded LRU cache for deduplication. Evicts oldest entries when the cache
-     * exceeds {@link #MAX_DEDUP_CACHE_SIZE} to prevent unbounded memory growth.
+     * The identifier of the event that was dispatched last for a row, for the
+     * {@link #MAX_DEDUP_CACHE_SIZE} rows that were looked up most recently (see {@link #isCopyOfLastEvent}).
+     * A bounded LRU cache, to prevent unbounded memory growth.
      */
-    private final Map<String, Boolean> processedEvents = Collections.synchronizedMap(
+    private final Map<String, String> lastEventOfRow = Collections.synchronizedMap(
             new LinkedHashMap<>(MAX_DEDUP_CACHE_SIZE, 0.75f, true) {
                 @Override
-                protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+                protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
                     return size() > MAX_DEDUP_CACHE_SIZE;
                 }
             });
@@ -123,6 +127,21 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * that the initial scan phase has completed.
      */
     private volatile boolean initialScanInProgress = false;
+
+    /** Reads the timestamp that a changefeed with an initial scan gets as its cursor. */
+    private static final String CLUSTER_TIMESTAMP_QUERY = "SELECT cluster_logical_timestamp()::STRING";
+
+    /**
+     * The cursor of the changefeed that covers a table, for the changefeeds whose cursor is known. An
+     * initial scan reads the tables as of the cursor (see {@link #isScanRow}).
+     */
+    private final Map<TableId, BigDecimal> scanTimestamps = new HashMap<>();
+
+    /**
+     * Whether the cursors of the running changefeeds were read since the changefeeds were last set up.
+     * They are read once, when the first table is found to have a running changefeed.
+     */
+    private boolean reusedCursorsRecorded;
 
     /**
      * How often an initial_only run in kafka mode asks CockroachDB whether its changefeed jobs have
@@ -308,6 +327,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                            boolean hasPriorOffset)
             throws SQLException {
 
+        scanTimestamps.clear();
+        reusedCursorsRecorded = false;
         if (config.isSinklessChangefeed()) {
             // A sinkless changefeed is created and streamed in a single executeQuery during
             // consumption (see consumeSinkless), so there is nothing to pre-create here.
@@ -370,11 +391,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     boolean executeSinkChangefeed(Statement stmt, List<TableId> tables, String cursor, boolean hasPriorOffset)
             throws SQLException {
-        String query = buildSinkChangefeedQuery(tables, cursor, hasPriorOffset);
+        final String startCursor = needsScanCursor(cursor, hasPriorOffset) ? currentClusterTimestamp(stmt.getConnection()) : cursor;
+        String query = buildSinkChangefeedQuery(tables, startCursor, hasPriorOffset);
         LOGGER.debug("Changefeed query: {}", query);
         try {
             stmt.execute(query);
             recordCreatedJobId(stmt);
+            recordScanTimestamp(tables, startCursor);
             return false;
         }
         catch (SQLException e) {
@@ -382,11 +405,99 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 throw e;
             }
             logInvalidCursorRecovery(e);
-            String recoveryQuery = buildSinkChangefeedQuery(tables, null, false);
+            final String recoveryCursor = needsScanCursor(null, false) ? currentClusterTimestamp(stmt.getConnection()) : null;
+            String recoveryQuery = buildSinkChangefeedQuery(tables, recoveryCursor, false);
             LOGGER.debug("Invalid-cursor recovery changefeed query: {}", recoveryQuery);
             stmt.execute(recoveryQuery);
             recordCreatedJobId(stmt);
+            recordScanTimestamp(tables, recoveryCursor);
             return true;
+        }
+    }
+
+    /**
+     * Returns {@code true} if a changefeed that is about to be created starts with an initial scan and has
+     * no cursor yet. Such a changefeed gets the current cluster timestamp as its cursor, so that the
+     * connector knows the timestamp of the scan (see {@link #isScanRow}).
+     */
+    private boolean needsScanCursor(String cursor, boolean hasPriorOffset) {
+        return "yes".equals(config.getInitialScanForSnapshotMode(hasPriorOffset)) && !isTimestampCursor(cursor);
+    }
+
+    /**
+     * Reads the current cluster timestamp on the connection that creates the changefeed. CockroachDB
+     * rejects a cursor that is ahead of the node that runs the statement by more than its clock offset
+     * tolerance, which a timestamp taken from the same session never is.
+     * <p>CockroachDB evaluates {@code cluster_logical_timestamp()} only in a SERIALIZABLE transaction,
+     * and the session can default to READ COMMITTED, so the query runs in a transaction of its own. The
+     * transaction is ended afterwards, so that the changefeed does not run in it.
+     */
+    private static String currentClusterTimestamp(Connection connection) throws SQLException {
+        // Without auto-commit the driver opens the transaction itself with the next statement.
+        final boolean autoCommit = connection.getAutoCommit();
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(autoCommit ? "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE" : "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+            String timestamp = null;
+            SQLException failure = null;
+            try (ResultSet rs = stmt.executeQuery(CLUSTER_TIMESTAMP_QUERY)) {
+                if (rs.next()) {
+                    timestamp = rs.getString(1);
+                }
+            }
+            catch (SQLException e) {
+                failure = e;
+            }
+            try {
+                if (autoCommit) {
+                    stmt.execute("ROLLBACK");
+                }
+                else {
+                    connection.rollback();
+                }
+            }
+            catch (SQLException e) {
+                if (failure == null) {
+                    throw e;
+                }
+                failure.addSuppressed(e);
+            }
+            if (failure != null) {
+                throw failure;
+            }
+            if (timestamp == null) {
+                throw new SQLException("CockroachDB returned no cluster timestamp");
+            }
+            return timestamp;
+        }
+    }
+
+    /** Remembers the cursor that the changefeed for the given tables was created with. */
+    private void recordScanTimestamp(List<TableId> tables, String cursor) {
+        final BigDecimal timestamp = isTimestampCursor(cursor) ? parseDecimalTimestamp(cursor) : null;
+        if (timestamp != null) {
+            tables.forEach(table -> scanTimestamps.put(table, timestamp));
+        }
+    }
+
+    private static boolean isTimestampCursor(String cursor) {
+        return cursor != null && !cursor.trim().isEmpty()
+                && !CockroachDBOffsetContext.CURSOR_INITIAL.equals(cursor)
+                && !CockroachDBOffsetContext.CURSOR_NOW.equals(cursor);
+    }
+
+    /**
+     * Parses a CockroachDB decimal timestamp such as {@code 1795243641446371339.0000000000}. Returns
+     * {@code null} for anything else, for example a cursor given as a date and time.
+     */
+    private static BigDecimal parseDecimalTimestamp(String timestamp) {
+        if (timestamp == null) {
+            return null;
+        }
+        try {
+            return new BigDecimal(timestamp.trim());
+        }
+        catch (NumberFormatException e) {
+            return null;
         }
     }
 
@@ -534,11 +645,58 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                             + "CANCEL JOB {}, and restart the connector so it recreates the changefeed.",
                             jobId, extraTables, jobId);
                 }
+                if (!reusedCursorsRecorded) {
+                    recordCursorsOfRunningJobs(jobs, sinkMarker, allIncludedTables);
+                    reusedCursorsRecorded = true;
+                    reportJobsWithoutUpdated(runningJobsWithout(jobs, sinkMarker, "updated"));
+                }
                 changefeedJobIds.add(Long.parseLong(jobId));
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * Names the reused changefeeds that were created without the {@code updated} option, for example by
+     * an earlier version of the connector, and says how to add it. The connector works without it, but
+     * then it has no timestamp to tell scan rows from inserted rows, or copies of an event from new
+     * events (see {@link #isScanRow} and {@link #createEventId}).
+     */
+    private void reportJobsWithoutUpdated(List<String> jobIds) {
+        if (jobIds.isEmpty() || isInitialOnly()) {
+            return;
+        }
+        LOGGER.info("Reusing changefeed job(s) {}, created without the updated option. For their events the connector cannot "
+                + "recognize the rows of an initial scan by their timestamp, and it cannot recognize an event that CockroachDB "
+                + "delivers more than once. A changefeed that the connector creates has the option. To add it to an existing "
+                + "changefeed, run PAUSE JOB <job_id>, wait until SHOW CHANGEFEED JOB <job_id> reports the status 'paused', and "
+                + "run ALTER CHANGEFEED <job_id> SET updated and RESUME JOB <job_id>.", String.join(", ", jobIds));
+    }
+
+    /**
+     * Remembers the cursor of every running changefeed that has this connector's topic prefix, for the
+     * tables that it covers. The jobs do not have to line up with the connector's own groups of tables,
+     * for example after {@code cockroachdb.changefeed.max.tables.per.changefeed} was changed.
+     */
+    private void recordCursorsOfRunningJobs(List<Job> jobs, String sinkMarker, List<TableId> includedTables) {
+        for (Job job : jobs) {
+            final String description = job.description();
+            if (!"running".equals(job.status()) || description == null || !description.contains(sinkMarker)) {
+                continue;
+            }
+            final BigDecimal cursor = changefeedCursor(description);
+            if (cursor != null) {
+                // The table list of the job is parsed once, not once for every included table.
+                final List<List<String>> captured = parseChangefeedTableComponents(description);
+                for (TableId included : includedTables) {
+                    final List<String> expected = tableIdComponents(included);
+                    if (captured.stream().anyMatch(candidate -> qualifiedSuffixMatches(candidate, expected))) {
+                        scanTimestamps.put(included, cursor);
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -654,19 +812,16 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
-     * Returns {@code true} if the changefeed should be created with {@code updated}. Like
-     * {@code mvcc_timestamp}, CockroachDB rejects it together with {@code initial_scan='only'}.
-     */
-    boolean isUpdatedRequested() {
-        return config.isChangefeedIncludeUpdated() && !isInitialOnly();
-    }
-
-    /**
      * Returns {@code true} if the changefeed should be created with {@code diff}. Like
      * {@code mvcc_timestamp}, CockroachDB rejects it together with {@code initial_scan='only'}.
      */
     boolean isDiffRequested() {
         return config.isChangefeedIncludeDiff() && !isInitialOnly();
+    }
+
+    /** Returns {@code true} if the configuration asks for the commit timestamp of each row in {@code source.ts_hlc}. */
+    private boolean isRowTimestampRequested() {
+        return config.isChangefeedIncludeUpdated() || config.isChangefeedIncludeMvccTimestamp();
     }
 
     /** Both {@code initial_scan='yes'} and {@code initial_scan='only'} emit the existing rows first. */
@@ -909,24 +1064,70 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      * option (for example {@code diff} or {@code mvcc_timestamp}) inside {@code WITH OPTIONS (...)}.
      */
     static boolean changefeedHasOption(String description, String optionName) {
+        return changefeedOptions(description).stream().anyMatch(option -> optionName.equals(option.trim()));
+    }
+
+    /**
+     * Returns the {@code cursor} option of a {@code SHOW CHANGEFEED JOBS} description, or {@code null} if
+     * the changefeed has no cursor or its cursor is not a decimal timestamp. {@code ALTER CHANGEFEED}
+     * keeps the cursor in the description.
+     */
+    static BigDecimal changefeedCursor(String description) {
+        for (String option : changefeedOptions(description)) {
+            final String[] nameAndValue = option.split("=", 2);
+            if (nameAndValue.length == 2 && "cursor".equals(nameAndValue[0].trim())) {
+                final String value = nameAndValue[1].trim();
+                final boolean quoted = value.length() >= 2 && value.startsWith("'") && value.endsWith("'");
+                return parseDecimalTimestamp(quoted ? value.substring(1, value.length() - 1) : value);
+            }
+        }
+        return null;
+    }
+
+    /** Returns the options listed inside {@code WITH OPTIONS (...)} of a {@code SHOW CHANGEFEED JOBS} description. */
+    private static List<String> changefeedOptions(String description) {
         if (description == null) {
-            return false;
+            return List.of();
         }
         int start = description.indexOf("WITH OPTIONS (");
         if (start < 0) {
-            return false;
+            return List.of();
         }
         String options = description.substring(start + "WITH OPTIONS (".length());
         int end = options.lastIndexOf(')');
         if (end >= 0) {
             options = options.substring(0, end);
         }
-        for (String option : options.split(",")) {
-            if (optionName.equals(option.trim())) {
-                return true;
+        return splitOptions(options);
+    }
+
+    /**
+     * Splits a changefeed option list at the commas that are not part of a quoted value. CockroachDB
+     * writes a quote inside a value as a backslash escape, for example {@code e'it\'s'}.
+     */
+    private static List<String> splitOptions(String options) {
+        final List<String> tokens = new ArrayList<>();
+        final StringBuilder token = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < options.length(); i++) {
+            final char current = options.charAt(i);
+            if (current == ',' && !quoted) {
+                tokens.add(token.toString());
+                token.setLength(0);
+                continue;
+            }
+            token.append(current);
+            if (current == '\'') {
+                quoted = !quoted;
+            }
+            else if (current == '\\' && quoted && i + 1 < options.length()) {
+                token.append(options.charAt(++i));
             }
         }
-        return false;
+        if (!token.toString().trim().isEmpty()) {
+            tokens.add(token.toString());
+        }
+        return tokens;
     }
 
     static boolean changefeedUsesEnrichedEnvelope(String description) {
@@ -1124,9 +1325,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             tablesBySchemaAndName.put(table.schema() + "." + table.table(), table);
         }
 
-        String changefeedQuery = buildSinklessChangefeedQuery(tables, offsetContext.getCursor(), hasPriorOffset);
         LOGGER.info("Starting sinkless changefeed for {} table(s) (streaming over SQL, no intermediate Kafka)", tables.size());
-        LOGGER.debug("Sinkless changefeed query: {}", changefeedQuery);
 
         // The streaming query holds its connection open indefinitely, so it must use a dedicated
         // connection separate from the schema-refresh connection opened in execute().
@@ -1214,9 +1413,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     ResultSet executeSinklessChangefeed(Statement stmt, Connection connection, List<TableId> tables,
                                         String cursor, boolean hasPriorOffset)
             throws SQLException {
-        String query = buildSinklessChangefeedQuery(tables, cursor, hasPriorOffset);
+        final String startCursor = needsScanCursor(cursor, hasPriorOffset) ? currentClusterTimestamp(connection) : cursor;
+        String query = buildSinklessChangefeedQuery(tables, startCursor, hasPriorOffset);
+        LOGGER.debug("Sinkless changefeed query: {}", query);
         try {
-            return stmt.executeQuery(query);
+            final ResultSet rs = stmt.executeQuery(query);
+            recordScanTimestamp(tables, startCursor);
+            return rs;
         }
         catch (SQLException e) {
             if (!shouldRecoverFromInvalidCursor(e, hasPriorOffset)) {
@@ -1225,9 +1428,12 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             logInvalidCursorRecovery(e);
             connection.rollback();
             initialScanInProgress = true;
-            String recoveryQuery = buildSinklessChangefeedQuery(tables, null, false);
+            final String recoveryCursor = needsScanCursor(null, false) ? currentClusterTimestamp(connection) : null;
+            String recoveryQuery = buildSinklessChangefeedQuery(tables, recoveryCursor, false);
             LOGGER.debug("Invalid-cursor recovery sinkless query: {}", recoveryQuery);
-            return stmt.executeQuery(recoveryQuery);
+            final ResultSet rs = stmt.executeQuery(recoveryQuery);
+            recordScanTimestamp(tables, recoveryCursor);
+            return rs;
         }
     }
 
@@ -1388,16 +1594,17 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 return;
             }
 
-            String eventId = createEventId(table, jsonNode, keyJson);
-            if (eventId != null && processedEvents.putIfAbsent(eventId, Boolean.TRUE) != null) {
-                LOGGER.debug("Skipping duplicate event: {}", eventId);
+            final String eventId = createEventId(table, jsonNode, keyJson);
+            final String rowId = rowId(table, keyJson);
+            if (isCopyOfLastEvent(rowId, eventId)) {
+                LOGGER.debug("Skipping an event that was delivered again: {}", eventId);
                 return;
             }
 
             LOGGER.debug("Processing changefeed event for table {}", table);
 
             JsonNode payloadNode = resolvePayload(jsonNode);
-            Envelope.Operation operation = extractOperation(payloadNode);
+            Envelope.Operation operation = extractOperation(table, payloadNode);
             JsonNode afterNode = payloadNode.path("after");
             JsonNode beforeNode = payloadNode.path("before");
 
@@ -1429,8 +1636,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             // it advances only on resolved timestamps, as before.
             offsetContext.event(table, offsetContext.getTimestamp());
             // Carry the row's own commit timestamp as source.ts_hlc (debezium/dbz#2919). It is
-            // set, or cleared, for every event so one row's value never leaks onto the next.
-            offsetContext.setHlc(extractHlc(payloadNode));
+            // set, or cleared, for every event so one row's value never leaks onto the next. The
+            // updated option that the connector adds to a changefeed with an initial scan serves
+            // only to recognize scan rows (see isScanRow), so its timestamp is not emitted unless
+            // the configuration asks for one.
+            offsetContext.setHlc(isRowTimestampRequested() ? extractHlc(payloadNode) : null);
 
             CockroachDBChangeRecordEmitter emitter = new CockroachDBChangeRecordEmitter(
                     currentPartition, offsetContext, clock, config, tableObj, operation,
@@ -1438,22 +1648,26 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     beforeNode.isMissingNode() ? null : beforeNode,
                     keyNode);
 
-            // An update or a delete that arrives while the initial scan is in progress is a change made
-            // after the scan, so its source block must not mark it as a snapshot record
-            // (debezium/dbz#3142). The scan rows that follow are marked again.
-            final boolean changeDuringScan = initialScanInProgress && operation != Envelope.Operation.READ;
-            if (changeDuringScan) {
-                offsetContext.markSnapshotRecord(SnapshotRecord.FALSE);
+            // The source block marks a record as a snapshot record exactly when it is a row of the initial
+            // scan. The marker that is set for the scan phase is right for scan rows during the phase and
+            // for changes after it. A change that arrives during the scan phase, and a scan row that
+            // arrives after it, get their own marker for the dispatch (debezium/dbz#3142).
+            final boolean scanRow = operation == Envelope.Operation.READ;
+            final boolean scanPhase = initialScanInProgress;
+            if (scanRow != scanPhase) {
+                offsetContext.markSnapshotRecord(scanRow ? SnapshotRecord.TRUE : SnapshotRecord.FALSE);
             }
             try {
                 LOGGER.debug("Dispatching {} event for table {}", operation, table);
                 dispatcher.dispatchDataChangeEvent(currentPartition, table, emitter);
             }
             finally {
-                if (changeDuringScan) {
-                    offsetContext.markSnapshotRecord(SnapshotRecord.TRUE);
+                if (scanRow != scanPhase) {
+                    offsetContext.markSnapshotRecord(scanPhase ? SnapshotRecord.TRUE : SnapshotRecord.FALSE);
                 }
             }
+            // Only now: an event that was skipped or that failed must not make its copy look processed.
+            rememberDispatched(rowId, eventId);
         }
         catch (DebeziumException e) {
             // Deliberate failure (for example a schema refresh that failed after reconnect):
@@ -1467,33 +1681,89 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     }
 
     /**
-     * Creates a unique event identifier for deduplication.
-     * <p>The identifier combines the schema-qualified {@link TableId} with the operation
-     * type, the event's nanosecond timestamp, and the changefeed message key. The table
-     * identity is taken from the {@code TableId} (derived from the Kafka topic the event
-     * arrived on), not from the message body: the changefeed {@code source.table_name}
-     * field is unqualified, so two same-named tables in different schemas (for example
-     * {@code public.orders} and {@code inventory.orders}) that change at the same MVCC
-     * timestamp would otherwise collide and have one event silently dropped. Using the
-     * {@code TableId} also removes any dependency on the {@code source} enriched property
-     * being present.
-     * <p>The message key is required to tell apart different rows that share an operation
-     * and timestamp: two rows changed in the same transaction can carry the same
-     * {@code ts_ns}, and without the key one of the two events is silently discarded as a
-     * duplicate (debezium/dbz#2283). A missing key degrades to table, operation and
-     * timestamp only.
+     * Returns {@code true} if the event is a copy of the event that was dispatched last for its row.
+     * <p>CockroachDB delivers changefeed events at least once: after a retry, a pause, or a restart of
+     * the changefeed it emits again what it emitted since its last checkpoint, for every row in the
+     * order of the changes. Only a copy of the last event of a row is dropped. When a row changed
+     * more than once since the checkpoint, its events are all emitted again, in their order, so the last
+     * event that the connector emits for a row is always the last one that CockroachDB delivered for
+     * it. Dropping every event that was seen before would not guarantee that: if the older of two
+     * events of a row was no longer remembered and the newer one was, the older one would be emitted
+     * after the newer one (debezium/dbz#2927).
+     */
+    boolean isCopyOfLastEvent(String rowId, String eventId) {
+        return eventId != null && eventId.equals(lastEventOfRow.get(rowId));
+    }
+
+    /** Remembers the event as the last one that was dispatched for its row. */
+    void rememberDispatched(String rowId, String eventId) {
+        if (eventId != null) {
+            lastEventOfRow.put(rowId, eventId);
+        }
+    }
+
+    /** Identifies the row of an event by its table and its message key. */
+    static String rowId(TableId table, String keyJson) {
+        return table.identifier() + ":" + (keyJson == null ? "" : keyJson.trim());
+    }
+
+    /**
+     * Creates the identifier that tells whether two events are copies of each other.
+     * <p>The copies of an event that CockroachDB delivers more than once are identical except for the
+     * top-level {@code ts_ns}, the time at which the changefeed processed the message, and the node
+     * that emitted them. So the identifier is built from what stays the same: the table, the
+     * operation, the message key, the timestamp that the changefeed assigned to the row (the
+     * {@code updated} timestamp, or else the MVCC timestamp), and a digest of the row images
+     * (debezium/dbz#2927). The row images are part of it so that two events that share all the rest but
+     * carry different data are never taken for copies of each other.
+     * <p>The connector creates its changefeeds with the {@code updated} option. For a reused changefeed
+     * that has neither timestamp, the identifier falls back to the processing time, which only
+     * recognizes a message that is read twice.
+     * <p>The table identity is taken from the {@link TableId} (derived from the Kafka topic the event
+     * arrived on), not from the message body: the changefeed {@code source.table_name} field is
+     * unqualified, so same-named tables in different schemas would otherwise collide. The message key
+     * tells apart different rows that were changed in the same transaction and share a timestamp
+     * (debezium/dbz#2283). A missing key degrades to the remaining parts.
      */
     static String createEventId(TableId table, JsonNode jsonNode, String keyJson) {
         try {
             JsonNode payloadNode = resolvePayload(jsonNode);
             String operation = payloadNode.path("op").asText("");
-            String timestamp = payloadNode.path("ts_ns").asText("");
             String rowKey = keyJson == null ? "" : keyJson.trim();
-            return table.identifier() + ":" + operation + ":" + timestamp + ":" + rowKey;
+            final String rowTimestamp = extractRowTimestamp(payloadNode);
+            if (rowTimestamp == null) {
+                String timestamp = payloadNode.path("ts_ns").asText("");
+                return table.identifier() + ":" + operation + ":" + timestamp + ":" + rowKey;
+            }
+            return table.identifier() + ":" + operation + ":" + rowTimestamp + ":" + rowKey + ":" + digestOfRowImages(payloadNode);
         }
         catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * Returns the timestamp that the changefeed assigned to the row of an event: the {@code updated}
+     * timestamp ({@code source.ts_hlc}) or else the MVCC timestamp. Returns {@code null} if the event
+     * carries neither.
+     */
+    private static String extractRowTimestamp(JsonNode payloadNode) {
+        final JsonNode source = payloadNode.path("source");
+        for (String field : new String[]{ "ts_hlc", "mvcc_timestamp" }) {
+            final JsonNode value = source.path(field);
+            if (value.isValueNode() && !value.isNull() && !value.asText().isEmpty()) {
+                return value.asText();
+            }
+        }
+        return null;
+    }
+
+    private static String digestOfRowImages(JsonNode payloadNode) throws NoSuchAlgorithmException {
+        final MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        digest.update(payloadNode.path("after").toString().getBytes(StandardCharsets.UTF_8));
+        digest.update((byte) 0);
+        digest.update(payloadNode.path("before").toString().getBytes(StandardCharsets.UTF_8));
+        return Base64.getEncoder().withoutPadding().encodeToString(digest.digest());
     }
 
     /**
@@ -1526,23 +1796,24 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     /**
      * Extracts the Debezium {@link Envelope.Operation} from the changefeed payload.
      *
-     * @see #operationFor(JsonNode, boolean)
+     * @see #operationFor(JsonNode, BigDecimal, boolean)
      */
-    private Envelope.Operation extractOperation(JsonNode payloadNode) {
-        return operationFor(payloadNode, initialScanInProgress);
+    private Envelope.Operation extractOperation(TableId table, JsonNode payloadNode) {
+        return operationFor(payloadNode, scanTimestamp(table), initialScanInProgress);
+    }
+
+    /** Returns the cursor of the changefeed that covers the table, or {@code null} if it is not known. */
+    BigDecimal scanTimestamp(TableId table) {
+        return scanTimestamps.get(table);
     }
 
     /**
-     * Returns the Debezium {@link Envelope.Operation} of a changefeed event.
-     * <p>CockroachDB reports the rows of an initial scan as creates, so while the scan is in progress
-     * creates are emitted as READ. An update or a delete is a change made after the scan. CockroachDB
-     * can deliver it before the first resolved timestamp, which is what ends the scan phase, so it
-     * keeps its own operation: emitted as a READ, a delete has no row image to build the record key
-     * from (debezium/dbz#3142).
-     * <p>After the scan the {@code op} field decides, falling back to before/after presence detection.
+     * Returns the Debezium {@link Envelope.Operation} of a changefeed event: READ for a row of the
+     * initial scan (see {@link #isScanRow}), and otherwise what the {@code op} field says, falling back
+     * to before/after presence detection.
      */
-    static Envelope.Operation operationFor(JsonNode payloadNode, boolean initialScanInProgress) {
-        if (initialScanInProgress && !isUpdateOrDelete(payloadNode)) {
+    static Envelope.Operation operationFor(JsonNode payloadNode, BigDecimal scanTimestamp, boolean initialScanInProgress) {
+        if (isScanRow(payloadNode, scanTimestamp, initialScanInProgress)) {
             return Envelope.Operation.READ;
         }
         if (payloadNode.has("op")) {
@@ -1581,6 +1852,30 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     private static boolean isUpdateOrDelete(JsonNode payloadNode) {
         final String op = payloadNode.path("op").asText("");
         return "u".equals(op) || "d".equals(op);
+    }
+
+    /**
+     * Returns {@code true} if a changefeed event is a row of the initial scan.
+     * <p>CockroachDB reports the rows of the scan and the rows inserted afterwards in the same way, as
+     * creates, and it can deliver an inserted row before the first resolved timestamp, which is what
+     * ends the scan phase. With the {@code updated} option the two differ in their timestamp: a row of
+     * the scan carries the timestamp of the scan, which is the cursor of the changefeed, and a row
+     * inserted afterwards carries a later one. The connector creates its changefeeds with both, so it
+     * compares the two whenever they are known. For a reused changefeed without them, every create
+     * counts as a row of the scan for as long as the scan phase lasts.
+     * <p>An update or a delete is always a change made after the scan. Emitted as a READ, a delete would
+     * have no row image to build the record key from (debezium/dbz#3142).
+     */
+    static boolean isScanRow(JsonNode payloadNode, BigDecimal scanTimestamp, boolean initialScanInProgress) {
+        if (isUpdateOrDelete(payloadNode)) {
+            return false;
+        }
+        final BigDecimal updated = scanTimestamp == null ? null
+                : parseDecimalTimestamp(payloadNode.path("source").path("ts_hlc").asText(null));
+        if (updated != null) {
+            return updated.compareTo(scanTimestamp) == 0;
+        }
+        return initialScanInProgress;
     }
 
     /**
@@ -1636,8 +1931,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
     /**
      * Builds the comma-separated {@code WITH} options shared by the sink-based and sinkless
      * changefeeds: the fixed enriched envelope, enriched_properties, updated/diff, the resolved
-     * interval, the snapshot-derived initial_scan, an optional resume cursor, and any user sink
-     * options. Returned without a leading comma so callers can prefix it with their own options
+     * interval, the snapshot-derived initial_scan, the cursor to resume or to scan at, and any user
+     * sink options. Returned without a leading comma so callers can prefix it with their own options
      * (for example {@code full_table_name} for the kafka sink).
      */
     private String buildChangefeedWithOptions(String cursor, boolean hasPriorOffset) {
@@ -1650,7 +1945,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         if (enrichedProperties != null && !enrichedProperties.trim().isEmpty()) {
             options.add("enriched_properties = '" + sanitizeLiteral(enrichedProperties) + "'");
         }
-        if (isUpdatedRequested()) {
+        final String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
+        final boolean timestampCursor = isTimestampCursor(cursor);
+        // Every changefeed gets updated, whatever cockroachdb.changefeed.include.updated says. The
+        // connector reads the updated timestamp of each event for its own use: it compares it with
+        // the cursor to recognize the rows of an initial scan (see isScanRow), and it identifies an
+        // event by it to drop events that CockroachDB delivers more than once (see createEventId).
+        if (!isInitialOnly()) {
             options.add("updated");
         }
         else if (config.isChangefeedIncludeUpdated()) {
@@ -1678,13 +1979,10 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             options.add("resolved = '" + sanitizeLiteral(config.getChangefeedResolvedInterval()) + "'");
         }
 
-        String initialScan = config.getInitialScanForSnapshotMode(hasPriorOffset);
         if (initialScan != null) {
             options.add("initial_scan = '" + sanitizeLiteral(initialScan) + "'");
         }
-        if (cursor != null && !cursor.trim().isEmpty()
-                && !CockroachDBOffsetContext.CURSOR_INITIAL.equals(cursor)
-                && !CockroachDBOffsetContext.CURSOR_NOW.equals(cursor)) {
+        if (timestampCursor) {
             options.add("cursor = '" + sanitizeLiteral(cursor) + "'");
         }
         String sinkOptions = config.getChangefeedSinkOptions();
