@@ -96,9 +96,37 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
 
+    /**
+     * With this changefeed option CockroachDB sends one event per column family for a table that has more
+     * than one, and an event carries the columns of that family only. The connector reads every event as a
+     * complete row, so it does not pass the option on.
+     */
+    private static final String SPLIT_COLUMN_FAMILIES = "split_column_families";
+
+    private static final String NO_CHANGEFEED_PER_COLUMN_FAMILY = "The connector cannot read a changefeed that is split by "
+            + "column family, so it cannot capture a table with more than one column family.";
+
+    /**
+     * Part of the error with which CockroachDB rejects a changefeed for a table with more than one column
+     * family, in lower case. CockroachDB reports the error without a specific SQLSTATE.
+     */
+    static final String MULTIPLE_COLUMN_FAMILIES_TEXT = "multiple column families";
+
+    /**
+     * Part of the error with which CockroachDB ends a changefeed when one of its tables gets a second column
+     * family, in lower case. A changefeed that starts again at the stored cursor ends with it as well.
+     */
+    static final String COLUMN_FAMILY_ADDED_TEXT = "cannot now target a table with";
+
+    /** What the operator can do when CockroachDB rejects or ends a changefeed because of the column families of a table. */
+    private static final String COLUMN_FAMILY_HINT = NO_CHANGEFEED_PER_COLUMN_FAMILY + " Remove the table from the tables that "
+            + "the connector captures.";
+
     private static final int MAX_DEDUP_CACHE_SIZE = 10_000;
 
     private final CockroachDBConnectorConfig config;
+    /** The list of {@code cockroachdb.changefeed.sink.options}, as it goes into a statement. */
+    private final String changefeedSinkOptions;
     private final EventDispatcher<CockroachDBPartition, TableId> dispatcher;
     private final CockroachDBSchema schema;
     private final Clock clock;
@@ -280,6 +308,7 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                                  Clock clock,
                                                  SnapshotProgressListener<CockroachDBPartition> snapshotProgressListener) {
         this.config = Objects.requireNonNull(config, "config must not be null");
+        this.changefeedSinkOptions = sinkOptionsOfTheChangefeed(config.getChangefeedSinkOptions());
         this.dispatcher = dispatcher;
         this.schema = schema;
         this.clock = clock;
@@ -368,7 +397,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             // privileges, and so on). Surface its message directly so an invalid value or a
             // permission problem is visible in the task status without digging into the cause chain.
             LOGGER.error("Error in CockroachDB streaming", e);
-            throw new RuntimeException("Failed to stream changes from CockroachDB: " + e.getMessage(), e);
+            final SQLException failure = withColumnFamilyHint(e);
+            throw new RuntimeException("Failed to stream changes from CockroachDB: " + failure.getMessage(), failure);
         }
         finally {
             if (this.schemaRefreshConnection != null) {
@@ -1103,6 +1133,13 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                             + "cockroachdb.changefeed.include.diff is disabled; update events will carry before images.",
                             table);
                 }
+                // The option splits a table that has more than one column family. A table with one column
+                // family is not split, so the changefeed can be one that works.
+                if (changefeedHasOption(description, SPLIT_COLUMN_FAMILIES)) {
+                    LOGGER.warn("Reusing changefeed job {}, which was created with {}. If one of its tables has more than one "
+                            + "column family, CockroachDB writes the changes of that table to one topic per column family, "
+                            + "and the connector receives none of them. {}", jobId, SPLIT_COLUMN_FAMILIES, NO_CHANGEFEED_PER_COLUMN_FAMILY);
+                }
                 // The captured table set is frozen at job creation. If tables were removed
                 // from table.include.list since, the reused job keeps streaming them at full
                 // volume into intermediate topics that nothing consumes.
@@ -1700,6 +1737,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                         + "no longer has the changes since its cursor: " + error + ". Reconfigure the connector to use the snapshot "
                         + "mode when_needed, which starts again with an initial scan in this case.");
             }
+            if (isColumnFamilyError(error)) {
+                // A changefeed that the connector creates after a restart ends in the same way.
+                throw new DebeziumException("Changefeed job " + jobId + " for the table(s) " + tables + " has ended with the status '"
+                        + status + "': " + error + (error.endsWith(".") ? " " : ". ") + COLUMN_FAMILY_HINT);
+            }
             throw new DebeziumException("Changefeed job " + jobId + " for the table(s) " + tables + " has ended with the status '"
                     + status + "'" + (error.isEmpty() ? "" : ": " + error) + ". The connector receives no more changes of these "
                     + "tables. Restart the connector to create a changefeed for them. It continues where the connector's offsets "
@@ -2032,7 +2074,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         }
         catch (Exception e) {
             LOGGER.error("Error consuming from Kafka topics {}: {}", topicNames, e.getMessage(), e);
-            throw new RuntimeException("Failed to consume from Kafka topics " + topicNames, e);
+            throw new RuntimeException("Failed to consume from Kafka topics " + topicNames,
+                    e instanceof SQLException failure ? withColumnFamilyHint(failure) : e);
         }
     }
 
@@ -2096,7 +2139,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 return;
             }
             LOGGER.error("Error in sinkless changefeed consumption: {}", e.getMessage(), e);
-            throw new RuntimeException("Failed to stream sinkless changefeed from CockroachDB: " + e.getMessage(), e);
+            final SQLException failure = withColumnFamilyHint(e);
+            throw new RuntimeException("Failed to stream sinkless changefeed from CockroachDB: " + failure.getMessage(), failure);
         }
     }
 
@@ -2268,6 +2312,28 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                     + "Exclude the table until the connector has stored a later cursor. " + SNAPSHOT_MODE_HINT, failure.getSQLState(), failure);
         }
         return failure;
+    }
+
+    /**
+     * Adds to the error with which CockroachDB rejects or ends a changefeed because of the column families of a
+     * table that the connector cannot capture such a table. The error for a changefeed that is created names
+     * the option {@code split_column_families}, which the connector does not pass on. Other errors are
+     * returned as they are.
+     */
+    SQLException withColumnFamilyHint(SQLException failure) {
+        final String message = failure.getMessage();
+        if (!isColumnFamilyError(message) || message.contains(COLUMN_FAMILY_HINT)) {
+            return failure;
+        }
+        return new SQLException(message + (message.endsWith(".") ? " " : ". ") + COLUMN_FAMILY_HINT, failure.getSQLState(), failure);
+    }
+
+    private boolean isColumnFamilyError(String message) {
+        if (message == null) {
+            return false;
+        }
+        final String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains(MULTIPLE_COLUMN_FAMILIES_TEXT) || normalized.contains(COLUMN_FAMILY_ADDED_TEXT);
     }
 
     /** What the operator has to know when CockroachDB denies a changefeed at a cursor to a user that has the privilege. */
@@ -2854,9 +2920,8 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
         // their quotes would break every quoted value, for example min_checkpoint_frequency = '10s'.
         // They come first: when an option is given twice, CockroachDB uses the last value, so an option
         // that the connector sets itself keeps the connector's value.
-        String sinkOptions = config.getChangefeedSinkOptions();
-        if (sinkOptions != null && !sinkOptions.trim().isEmpty()) {
-            options.add(sinkOptions.trim());
+        if (changefeedSinkOptions != null && !changefeedSinkOptions.trim().isEmpty()) {
+            options.add(changefeedSinkOptions.trim());
         }
         // The connector parses only the enriched envelope (it relies on the 'op' and 'ts_ns' fields
         // it provides), so the envelope is fixed rather than configurable.
@@ -2903,6 +2968,85 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             options.add("kafka_sink_config='" + sanitizeLiteral(kafkaSinkConfig) + "'");
         }
         return String.join(", ", options);
+    }
+
+    /**
+     * The list of {@code cockroachdb.changefeed.sink.options} as it goes into the statement: as it is written,
+     * without {@code split_column_families}. For a table with one column family the option changes nothing.
+     * A table with more than one is then rejected by CockroachDB, instead of being read with one event per
+     * column family.
+     */
+    private static String sinkOptionsOfTheChangefeed(String sinkOptions) {
+        if (sinkOptions == null) {
+            return null;
+        }
+        final String usable = withoutSplitColumnFamilies(sinkOptions);
+        if (!usable.equals(sinkOptions)) {
+            LOGGER.warn("The property {} sets the changefeed option {}, which the connector leaves out of the changefeed. {}",
+                    CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS.name(), SPLIT_COLUMN_FAMILIES, NO_CHANGEFEED_PER_COLUMN_FAMILY);
+        }
+        return usable;
+    }
+
+    /**
+     * Returns a list of changefeed options, as a user writes it in SQL, without the option
+     * {@code split_column_families}. The rest of the list keeps its text, and a list without the option is
+     * returned as it is. A comma in a quoted value or in a quoted identifier separates nothing. A quoted value
+     * ends at its quote, a doubled quote is a quote in the value, and a value with the prefix {@code e} or
+     * {@code E} takes a backslash as an escape. The option is found by a plain or a quoted name.
+     */
+    static String withoutSplitColumnFamilies(String sinkOptions) {
+        final List<String> kept = new ArrayList<>();
+        boolean found = false;
+        boolean quoted = false;
+        boolean escapes = false;
+        boolean quotedIdentifier = false;
+        int start = 0;
+        for (int i = 0; i <= sinkOptions.length(); i++) {
+            final char current = i < sinkOptions.length() ? sinkOptions.charAt(i) : ',';
+            if (quoted && i < sinkOptions.length()) {
+                if (current == '\\' && escapes && i + 1 < sinkOptions.length()) {
+                    i++;
+                }
+                else if (current == '\'') {
+                    if (i + 1 < sinkOptions.length() && sinkOptions.charAt(i + 1) == '\'') {
+                        i++;
+                    }
+                    else {
+                        quoted = false;
+                    }
+                }
+            }
+            else if (quotedIdentifier && i < sinkOptions.length()) {
+                quotedIdentifier = current != '"';
+            }
+            else if (current == '\'' && i < sinkOptions.length()) {
+                quoted = true;
+                escapes = i > 0 && "eE".indexOf(sinkOptions.charAt(i - 1)) >= 0;
+            }
+            else if (current == '"' && i < sinkOptions.length()) {
+                quotedIdentifier = true;
+            }
+            else if (current == ',') {
+                final String option = sinkOptions.substring(start, Math.min(i, sinkOptions.length()));
+                if (SPLIT_COLUMN_FAMILIES.equals(sinkOptionName(option))) {
+                    found = true;
+                }
+                else {
+                    kept.add(option);
+                }
+                start = i + 1;
+            }
+        }
+        return found ? String.join(",", kept) : sinkOptions;
+    }
+
+    /** The name of one option of the list in lower case, without its value and without the quotes of a quoted name. */
+    private static String sinkOptionName(String option) {
+        final String name = option.split("=", 2)[0].trim();
+        final boolean quotedName = name.length() > 1
+                && (name.startsWith("\"") && name.endsWith("\"") || name.startsWith("'") && name.endsWith("'"));
+        return (quotedName ? name.substring(1, name.length() - 1) : name).toLowerCase(Locale.ROOT);
     }
 
     /**

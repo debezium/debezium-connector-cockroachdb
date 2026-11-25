@@ -209,6 +209,27 @@ class CockroachDBChangefeedJobCheckTest {
     }
 
     @Test
+    void saysThatATableGotASecondColumnFamilyWhenItsChangefeedJobFailed() throws Exception {
+        // The error as CockroachDB v25.4.21 and v26.4.1 report it for the job. A changefeed that the connector
+        // creates after a restart ends in the same way, so the message does not say to restart.
+        final ScriptedSource source = new ScriptedSource("initial", new long[]{ 1_000_000 })
+                .answer("running", "failed", "CHANGEFEED created on a table with a single column family (orders) cannot now target a "
+                        + "table with 2 families. targets: {Size:1 m:map[106:{wholeTable:0x4016941500 byFamilyName:map[]}]}, tableDesc: "
+                        + "tabledesc.immutable: {ID: 106, Version: 2}");
+
+        assertThatThrownBy(() -> source.checkAfter(60_000))
+                .isInstanceOf(DebeziumException.class)
+                .hasMessageContaining("Changefeed job 1102")
+                .hasMessageContaining("reprodb.public.orders")
+                .hasMessageContaining("'failed': CHANGEFEED created on a table with a single column family")
+                .hasMessageEndingWith("it cannot capture a table with more than one column family. Remove the table from the tables "
+                        + "that the connector captures.")
+                .satisfies(failure -> assertThat(failure.getMessage()).doesNotContain("Restart the connector"))
+                .satisfies(failure -> assertThat(errorHandler().isRetriable(new RuntimeException("Failed to consume from Kafka topics", failure)))
+                        .as("retriable").isFalse());
+    }
+
+    @Test
     void stopsWhenAChangefeedJobWasCanceled() throws Exception {
         for (String status : new String[]{ "reverting", "canceled" }) {
             final ScriptedSource source = new ScriptedSource("initial", new long[]{ 1_000_000 }).answer("running", status, "");

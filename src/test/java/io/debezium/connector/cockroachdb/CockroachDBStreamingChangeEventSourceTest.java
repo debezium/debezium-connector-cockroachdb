@@ -609,6 +609,37 @@ public class CockroachDBStreamingChangeEventSourceTest {
     }
 
     @Test
+    void saysThatATableWithMoreThanOneColumnFamilyCannotBeCaptured() {
+        // The texts as CockroachDB v25.4.21 and v26.4.1 return them: for a changefeed that is created for such a
+        // table, and for a running changefeed whose table gets a second column family. The first names an option
+        // that the connector does not pass on.
+        SQLException columnFamilies = new SQLException("ERROR: CHANGEFEED targeting a table (orders) with multiple column families requires "
+                + "WITH split_column_families and will emit multiple events per row.", "XXUUU");
+        SQLException columnFamilyAdded = new SQLException("ERROR: CHANGEFEED created on a table with a single column family (orders) cannot now "
+                + "target a table with 2 families. targets: {Size:1 m:map[106:{wholeTable:0x4016941500 byFamilyName:map[]}]}, tableDesc: "
+                + "tabledesc.immutable: {ID: 106, Version: 2}", "XXUUU");
+        CockroachDBStreamingChangeEventSource source = source(baseConfig().build());
+
+        for (SQLException failure : List.of(columnFamilies, columnFamilyAdded)) {
+            SQLException withHint = source.withColumnFamilyHint(failure);
+
+            assertThat((Throwable) withHint)
+                    .hasMessageStartingWith(failure.getMessage())
+                    .hasMessageEndingWith("it cannot capture a table with more than one column family. Remove the table from the tables "
+                            + "that the connector captures.")
+                    .hasCause(failure);
+            assertThat(withHint.getSQLState()).isEqualTo("XXUUU");
+            // The hint is added once.
+            assertThat((Throwable) source.withColumnFamilyHint(withHint)).isSameAs(withHint);
+        }
+        // Another error is returned as it is, also one without a message.
+        SQLException unknownSink = new SQLException("ERROR: unsupported sink: nosuch", "XXUUU");
+        assertThat((Throwable) source.withColumnFamilyHint(unknownSink)).isSameAs(unknownSink);
+        SQLException withoutMessage = new SQLException();
+        assertThat((Throwable) source.withColumnFamilyHint(withoutMessage)).isSameAs(withoutMessage);
+    }
+
+    @Test
     void saysWhatToDoWhenATableIsNewerThanTheCursor() throws Exception {
         // The text as CockroachDB v26.4.1 returns it.
         SQLException newer = new SQLException("ERROR: failed to resolve targets in the CHANGEFEED stmt: table \"testdb.public.orders\" does "
