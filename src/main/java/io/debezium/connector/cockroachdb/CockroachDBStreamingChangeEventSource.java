@@ -89,9 +89,45 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
 
+    private static final String CHANGEFEED_OPTION_NAME = "[A-Za-z_][A-Za-z0-9_]*";
+
+    /**
+     * The changefeed options that are reserved for the connector, with what to use in their place: the
+     * options that it writes itself, and the ones that would change what it relies on. A
+     * {@code cockroachdb.changefeed.option.<name>} property for one of them is refused.
+     */
+    private static final Map<String, String> OPTIONS_RESERVED_FOR_THE_CONNECTOR = Map.ofEntries(
+            Map.entry("envelope", "The connector reads the enriched envelope only."),
+            Map.entry("format", "The connector reads JSON only."),
+            Map.entry("full_table_name", "The connector names the topics of the changefeed."),
+            Map.entry("enriched_properties", "Use " + CockroachDBConnectorConfig.CHANGEFEED_ENRICHED_PROPERTIES.name() + "."),
+            Map.entry("updated", "Use " + CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_UPDATED.name() + "."),
+            Map.entry("diff", "Use " + CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_DIFF.name() + "."),
+            Map.entry("mvcc_timestamp", "Use " + CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_MVCC_TIMESTAMP.name() + "."),
+            Map.entry("resolved", "Use " + CockroachDBConnectorConfig.CHANGEFEED_RESOLVED_INTERVAL.name() + "."),
+            Map.entry("cursor", "Use " + CockroachDBConnectorConfig.CHANGEFEED_CURSOR.name() + "."),
+            Map.entry("initial_scan", "Use " + CockroachDBConnectorConfig.SNAPSHOT_MODE.name() + "."),
+            Map.entry("initial_scan_only", "Use " + CockroachDBConnectorConfig.SNAPSHOT_MODE.name() + "."),
+            Map.entry("no_initial_scan", "Use " + CockroachDBConnectorConfig.SNAPSHOT_MODE.name() + "."),
+            Map.entry("kafka_sink_config", "Use " + CockroachDBConnectorConfig.CHANGEFEED_KAFKA_SINK_CONFIG.name() + "."));
+
+    /**
+     * With this changefeed option CockroachDB sends one event per column family for a table that has more
+     * than one, and an event carries the columns of that family only. The connector reads every event as a
+     * complete row, so it does not pass the option on.
+     */
+    private static final String SPLIT_COLUMN_FAMILIES = "split_column_families";
+
+    private static final String NO_CHANGEFEED_PER_COLUMN_FAMILY = "The connector cannot read a changefeed that is split by "
+            + "column family, so it cannot capture a table with more than one column family.";
+
     private static final int MAX_DEDUP_CACHE_SIZE = 10_000;
 
     private final CockroachDBConnectorConfig config;
+    /** The list of {@code cockroachdb.changefeed.sink.options}, as it goes into a statement. */
+    private final String changefeedSinkOptions;
+    /** The options of the {@code cockroachdb.changefeed.option.<name>} properties, as they go into a statement. */
+    private final List<String> changefeedOptionProperties;
     private final EventDispatcher<CockroachDBPartition, TableId> dispatcher;
     private final CockroachDBSchema schema;
     private final Clock clock;
@@ -178,6 +214,11 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                                  Clock clock,
                                                  SnapshotProgressListener<CockroachDBPartition> snapshotProgressListener) {
         this.config = Objects.requireNonNull(config, "config must not be null");
+        this.changefeedSinkOptions = sinkOptionsOfTheChangefeed(config.getChangefeedSinkOptions());
+        // Checked when the task starts and not when a statement is built: a changefeed that exists already
+        // is reused as it is, so a property that cannot be used would go unnoticed until the connector has
+        // to create a changefeed.
+        this.changefeedOptionProperties = changefeedOptionProperties(config.getChangefeedOptions());
         this.dispatcher = dispatcher;
         this.schema = schema;
         this.clock = clock;
@@ -1642,6 +1683,15 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     private String buildChangefeedWithOptions(String cursor, boolean hasPriorOffset) {
         List<String> options = new ArrayList<>();
+        // The user's own options are SQL in their own right and are passed through as they are. Escaping
+        // their quotes would break every quoted value, for example min_checkpoint_frequency = '10s'.
+        // They come first: when an option is given twice, CockroachDB uses the last value, so an option
+        // that the connector sets itself keeps the connector's value.
+        if (changefeedSinkOptions != null && !changefeedSinkOptions.trim().isEmpty()) {
+            options.add(changefeedSinkOptions.trim());
+        }
+        // After the deprecated list, so that a property wins over it.
+        options.addAll(changefeedOptionProperties);
         // The connector parses only the enriched envelope (it relies on the 'op' and 'ts_ns' fields
         // it provides), so the envelope is fixed rather than configurable.
         options.add("envelope = 'enriched'");
@@ -1687,10 +1737,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 && !CockroachDBOffsetContext.CURSOR_NOW.equals(cursor)) {
             options.add("cursor = '" + sanitizeLiteral(cursor) + "'");
         }
-        String sinkOptions = config.getChangefeedSinkOptions();
-        if (sinkOptions != null && !sinkOptions.trim().isEmpty()) {
-            options.add(sanitizeLiteral(sinkOptions));
-        }
         // kafka_sink_config takes a JSON document as a quoted SQL literal; the value is
         // validated as JSON at configuration time and internal single quotes are doubled here.
         String kafkaSinkConfig = config.getChangefeedKafkaSinkConfig();
@@ -1698,6 +1744,116 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             options.add("kafka_sink_config='" + sanitizeLiteral(kafkaSinkConfig) + "'");
         }
         return String.join(", ", options);
+    }
+
+    /**
+     * The options of the {@code cockroachdb.changefeed.option.<name>} properties as they go into the
+     * {@code WITH} clause: {@code <name> = '<value>'}, or the name alone for a property without a value.
+     * The name goes into the statement as it is, so it has to be a plain option name. An option that is
+     * reserved for the connector is refused: for an option that the connector writes, CockroachDB would use
+     * the connector's value anyway, and the others would change what the connector reads.
+     */
+    private static List<String> changefeedOptionProperties(Map<String, String> properties) {
+        final List<String> options = new ArrayList<>();
+        for (Map.Entry<String, String> option : properties.entrySet()) {
+            final String name = option.getKey();
+            final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + name;
+            if (!name.matches(CHANGEFEED_OPTION_NAME)) {
+                throw new DebeziumException("The property " + property + " does not name a changefeed option. "
+                        + "The name of an option consists of letters, digits and underscores.");
+            }
+            if (SPLIT_COLUMN_FAMILIES.equalsIgnoreCase(name)) {
+                throw new DebeziumException("The property " + property + " sets a changefeed option that the connector "
+                        + "does not support. " + NO_CHANGEFEED_PER_COLUMN_FAMILY);
+            }
+            final String ownProperty = OPTIONS_RESERVED_FOR_THE_CONNECTOR.get(name.toLowerCase(Locale.ROOT));
+            if (ownProperty != null) {
+                throw new DebeziumException("The property " + property + " sets a changefeed option that is reserved "
+                        + "for the connector. " + ownProperty);
+            }
+            final String value = option.getValue().trim();
+            options.add(value.isEmpty() ? name : name + " = '" + sanitizeLiteral(value) + "'");
+        }
+        return options;
+    }
+
+    /**
+     * The list of {@code cockroachdb.changefeed.sink.options} as it goes into the statement: as it is written,
+     * without {@code split_column_families}. For a table with one column family the option changes nothing.
+     * A table with more than one is then rejected by CockroachDB, instead of being read with one event per
+     * column family.
+     */
+    private static String sinkOptionsOfTheChangefeed(String sinkOptions) {
+        if (sinkOptions == null) {
+            return null;
+        }
+        final String usable = withoutSplitColumnFamilies(sinkOptions);
+        if (!usable.equals(sinkOptions)) {
+            LOGGER.warn("The property {} sets the changefeed option {}, which the connector leaves out of the changefeed. {}",
+                    CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS.name(), SPLIT_COLUMN_FAMILIES, NO_CHANGEFEED_PER_COLUMN_FAMILY);
+        }
+        return usable;
+    }
+
+    /**
+     * Returns a list of changefeed options, as a user writes it in SQL, without the option
+     * {@code split_column_families}. The rest of the list keeps its text, and a list without the option is
+     * returned as it is. A comma in a quoted value or in a quoted identifier separates nothing. A quoted value
+     * ends at its quote, a doubled quote is a quote in the value, and a value with the prefix {@code e} or
+     * {@code E} takes a backslash as an escape. The option is found by a plain or a quoted name.
+     */
+    static String withoutSplitColumnFamilies(String sinkOptions) {
+        final List<String> kept = new ArrayList<>();
+        boolean found = false;
+        boolean quoted = false;
+        boolean escapes = false;
+        boolean quotedIdentifier = false;
+        int start = 0;
+        for (int i = 0; i <= sinkOptions.length(); i++) {
+            final char current = i < sinkOptions.length() ? sinkOptions.charAt(i) : ',';
+            if (quoted && i < sinkOptions.length()) {
+                if (current == '\\' && escapes && i + 1 < sinkOptions.length()) {
+                    i++;
+                }
+                else if (current == '\'') {
+                    if (i + 1 < sinkOptions.length() && sinkOptions.charAt(i + 1) == '\'') {
+                        i++;
+                    }
+                    else {
+                        quoted = false;
+                    }
+                }
+            }
+            else if (quotedIdentifier && i < sinkOptions.length()) {
+                quotedIdentifier = current != '"';
+            }
+            else if (current == '\'' && i < sinkOptions.length()) {
+                quoted = true;
+                escapes = i > 0 && "eE".indexOf(sinkOptions.charAt(i - 1)) >= 0;
+            }
+            else if (current == '"' && i < sinkOptions.length()) {
+                quotedIdentifier = true;
+            }
+            else if (current == ',') {
+                final String option = sinkOptions.substring(start, Math.min(i, sinkOptions.length()));
+                if (SPLIT_COLUMN_FAMILIES.equals(sinkOptionName(option))) {
+                    found = true;
+                }
+                else {
+                    kept.add(option);
+                }
+                start = i + 1;
+            }
+        }
+        return found ? String.join(",", kept) : sinkOptions;
+    }
+
+    /** The name of one option of the list in lower case, without its value and without the quotes of a quoted name. */
+    private static String sinkOptionName(String option) {
+        final String name = option.split("=", 2)[0].trim();
+        final boolean quotedName = name.length() > 1
+                && (name.startsWith("\"") && name.endsWith("\"") || name.startsWith("'") && name.endsWith("'"));
+        return (quotedName ? name.substring(1, name.length() - 1) : name).toLowerCase(Locale.ROOT);
     }
 
     /**

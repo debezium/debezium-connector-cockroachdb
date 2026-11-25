@@ -16,13 +16,23 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 
 import io.debezium.DebeziumException;
 import io.debezium.config.Configuration;
 import io.debezium.relational.TableId;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 
 /**
  * Unit tests for multi-table changefeed support.
@@ -85,6 +95,274 @@ public class CockroachDBMultiTableTest {
                 .isInstanceOf(DebeziumException.class)
                 .hasMessageContaining(CockroachDBConnectorConfig.CHANGEFEED_SINK_URI.name())
                 .hasMessageContaining("testdb.public.orders");
+    }
+
+    @Test
+    public void shouldWriteEveryChangefeedOptionPropertyIntoTheStatement() {
+        // The connector quotes the value. A property without a value gives an option without one.
+        Configuration config = baseConfig().edit()
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "min_checkpoint_frequency", "10s")
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "protect_data_from_gc_on_pause", "")
+                .build();
+        CockroachDBStreamingChangeEventSource source = createSource(config);
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+
+        assertThat(source.buildSinkChangefeedQuery(tables, null, false))
+                .contains(" WITH full_table_name, min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause, envelope = 'enriched'");
+        assertThat(source.buildSinklessChangefeedQuery(tables, null, false))
+                .contains(" WITH min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause, envelope = 'enriched'");
+    }
+
+    @Test
+    public void shouldEscapeAQuoteInTheValueOfAChangefeedOptionProperty() {
+        Configuration config = baseConfig().edit()
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "metrics_label", "it's")
+                .build();
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+
+        assertThat(createSource(config).buildSinkChangefeedQuery(tables, null, false)).contains("metrics_label = 'it''s'");
+    }
+
+    @Test
+    public void shouldWriteTheValueOfAChangefeedOptionPropertyWithoutTheSpacesAroundIt() {
+        // A blank value gives an option without a value. CockroachDB takes a backslash in a quoted value as it
+        // is, so only the quote is escaped.
+        Configuration config = baseConfig().edit()
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "min_checkpoint_frequency", " 10s ")
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "protect_data_from_gc_on_pause", "  ")
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "metrics_label", "a\\")
+                .build();
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+
+        assertThat(createSource(config).buildSinklessChangefeedQuery(tables, null, false))
+                .contains(" WITH metrics_label = 'a\\', min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause, envelope = 'enriched'");
+    }
+
+    @Test
+    public void shouldPutTheChangefeedOptionPropertiesAfterTheDeprecatedOptions() {
+        // When an option is given twice, CockroachDB uses the last value. A property therefore wins over the
+        // deprecated list of options, and an option that the connector sets itself wins over both.
+        Configuration config = baseConfig().edit()
+                .with(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS, "min_checkpoint_frequency = '10s'")
+                .with(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "min_checkpoint_frequency", "30s")
+                .build();
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+
+        assertThat(createSource(config).buildSinkChangefeedQuery(tables, null, false))
+                .contains(" WITH full_table_name, min_checkpoint_frequency = '10s', min_checkpoint_frequency = '30s', envelope = 'enriched'");
+    }
+
+    @Test
+    public void shouldRefuseAChangefeedOptionPropertyForAnOptionThatIsReservedForTheConnector() {
+        // The option, and what the message has to name for it: the property that sets the option where there is one.
+        final Map<String, String> reserved = Map.ofEntries(
+                Map.entry("envelope", "enriched envelope"),
+                Map.entry("format", "JSON"),
+                Map.entry("full_table_name", "topics"),
+                Map.entry("enriched_properties", CockroachDBConnectorConfig.CHANGEFEED_ENRICHED_PROPERTIES.name()),
+                Map.entry("updated", CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_UPDATED.name()),
+                Map.entry("diff", CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_DIFF.name()),
+                Map.entry("mvcc_timestamp", CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_MVCC_TIMESTAMP.name()),
+                Map.entry("resolved", CockroachDBConnectorConfig.CHANGEFEED_RESOLVED_INTERVAL.name()),
+                Map.entry("cursor", CockroachDBConnectorConfig.CHANGEFEED_CURSOR.name()),
+                Map.entry("initial_scan", CockroachDBConnectorConfig.SNAPSHOT_MODE.name()),
+                Map.entry("initial_scan_only", CockroachDBConnectorConfig.SNAPSHOT_MODE.name()),
+                Map.entry("no_initial_scan", CockroachDBConnectorConfig.SNAPSHOT_MODE.name()),
+                Map.entry("kafka_sink_config", CockroachDBConnectorConfig.CHANGEFEED_KAFKA_SINK_CONFIG.name()));
+
+        reserved.forEach((option, hint) -> {
+            final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + option;
+            // The property is refused when the task starts, and not only when a statement is built: a changefeed
+            // that exists already is reused, and no statement is built for it.
+            assertThatThrownBy(() -> createSource(baseConfig().edit().with(property, "x").build()), "property %s", property)
+                    .isInstanceOf(DebeziumException.class)
+                    .hasMessageContaining(property)
+                    .hasMessageContaining("reserved for the connector")
+                    .hasMessageContaining(hint);
+        });
+    }
+
+    @Test
+    public void shouldRefuseAReservedChangefeedOptionInAnyCase() {
+        // CockroachDB does not distinguish the case of an option name.
+        final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "ENVELOPE";
+
+        assertThatThrownBy(() -> createSource(baseConfig().edit().with(property, "wrapped").build()))
+                .isInstanceOf(DebeziumException.class)
+                .hasMessageContaining(property)
+                .hasMessageContaining("reserved for the connector");
+    }
+
+    @Test
+    public void shouldReserveEveryOptionThatTheConnectorWrites() {
+        Configuration everything = baseConfig().edit()
+                .with(CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_UPDATED, true)
+                .with(CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_DIFF, true)
+                .with(CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_MVCC_TIMESTAMP, true)
+                .with(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_SINK_CONFIG, "{\"Flush\": {\"Messages\": 100}}")
+                .build();
+        CockroachDBStreamingChangeEventSource source = createSource(everything);
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+        Set<String> written = new TreeSet<>();
+        written.addAll(optionNames(source.buildSinkChangefeedQuery(tables, null, false)));
+        written.addAll(optionNames(source.buildSinkChangefeedQuery(tables, "1700000000000000000.0000000000", true)));
+        written.addAll(optionNames(source.buildSinklessChangefeedQuery(tables, null, false)));
+
+        assertThat(written).contains("full_table_name", "envelope", "enriched_properties", "updated", "diff", "mvcc_timestamp",
+                "resolved", "initial_scan", "cursor", "kafka_sink_config");
+        for (String option : written) {
+            final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + option;
+            assertThatThrownBy(() -> createSource(baseConfig().edit().with(property, "x").build()), "property %s", property)
+                    .isInstanceOf(DebeziumException.class)
+                    .hasMessageContaining("reserved for the connector");
+        }
+    }
+
+    /** The names of the options in the WITH clause of a statement. A comma in a quoted value separates nothing. */
+    private static Set<String> optionNames(String statement) {
+        final String options = statement.substring(statement.indexOf(" WITH ") + " WITH ".length()) + ",";
+        final Set<String> names = new TreeSet<>();
+        final StringBuilder option = new StringBuilder();
+        boolean quoted = false;
+        for (char current : options.toCharArray()) {
+            if (current == '\'') {
+                quoted = !quoted;
+            }
+            if (current == ',' && !quoted) {
+                names.add(option.toString().split("=", 2)[0].trim());
+                option.setLength(0);
+            }
+            else {
+                option.append(current);
+            }
+        }
+        return names;
+    }
+
+    @Test
+    public void shouldRefuseAChangefeedOptionPropertyWhoseNameIsNoOptionName() {
+        // The name goes into the statement as it is, so it must be a plain option name. The empty name is the
+        // property that consists of the prefix alone.
+        for (String name : List.of("min_checkpoint_frequency = '1s', envelope", "", "min-checkpoint-frequency", "1s", "metrics label",
+                " metrics_label", "metrics_label\n", "m\u00e9trique")) {
+            final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + name;
+            // From a map, as Kafka Connect passes the properties: the name is taken as it is.
+            final Map<String, String> properties = baseConfig().asMap();
+            properties.put(property, "x");
+
+            assertThatThrownBy(() -> createSource(Configuration.from(properties)), "property %s", property)
+                    .isInstanceOf(DebeziumException.class)
+                    .hasMessageContaining(property)
+                    .hasMessageContaining("does not name a changefeed option");
+        }
+    }
+
+    @Test
+    public void shouldLeaveSplitColumnFamiliesOutOfTheStatement() {
+        // With this option CockroachDB sends one event per column family for a table with more than one, with
+        // the columns of that family only, and the connector reads every event as a complete row. The rest of
+        // the list goes into the statement as it is written. A plain quoted value ends at its quote, also after
+        // a backslash, and a value with the prefix e takes a backslash in front of a quote as an escape.
+        final Map<String, String> listAndWhatIsLeft = Map.ofEntries(
+                Map.entry("split_column_families", ""),
+                Map.entry("min_checkpoint_frequency = '10s', split_column_families", "min_checkpoint_frequency = '10s', "),
+                Map.entry("split_column_families, min_checkpoint_frequency = '10s'", "min_checkpoint_frequency = '10s', "),
+                Map.entry(" SPLIT_COLUMN_FAMILIES , protect_data_from_gc_on_pause", "protect_data_from_gc_on_pause, "),
+                Map.entry("\"split_column_families\"", ""),
+                Map.entry("'split_column_families'", ""),
+                Map.entry("metrics_label = 'a, b', split_column_families", "metrics_label = 'a, b', "),
+                Map.entry("metrics_label = 'a\\', split_column_families", "metrics_label = 'a\\', "),
+                Map.entry("metrics_label = e'a\\'b', split_column_families", "metrics_label = e'a\\'b', "),
+                Map.entry("metrics_label = 'it''s', split_column_families, diff", "metrics_label = 'it''s', diff, "));
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+
+        listAndWhatIsLeft.forEach((sinkOptions, left) -> {
+            Configuration config = baseConfig().edit().with(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS, sinkOptions).build();
+
+            assertThat(createSource(config).buildSinklessChangefeedQuery(tables, null, false)).as("options %s", sinkOptions)
+                    .contains(" WITH " + left + "envelope = 'enriched'")
+                    .doesNotContainIgnoringCase("split_column_families");
+        });
+    }
+
+    @Test
+    public void shouldWarnThatSplitColumnFamiliesIsLeftOut() {
+        final Logger logger = ((LoggerContext) LoggerFactory.getILoggerFactory()).getLogger(CockroachDBStreamingChangeEventSource.class);
+        final ListAppender<ILoggingEvent> log = new ListAppender<>();
+        log.start();
+        logger.addAppender(log);
+        try {
+            createSource(baseConfig().edit().with(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS, "min_checkpoint_frequency = '10s'").build());
+            assertThat(log.list).noneMatch(event -> event.getFormattedMessage().contains("split_column_families"));
+
+            createSource(baseConfig().edit()
+                    .with(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS, "min_checkpoint_frequency = '10s', split_column_families").build());
+            assertThat(log.list).filteredOn(event -> event.getLevel() == Level.WARN)
+                    .anyMatch(event -> event.getFormattedMessage().contains(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS.name())
+                            && event.getFormattedMessage().contains("split_column_families")
+                            && event.getFormattedMessage().contains("more than one column family"));
+        }
+        finally {
+            logger.detachAppender(log);
+        }
+    }
+
+    @Test
+    public void shouldNotTakeAQuotedValueForTheOptionSplitColumnFamilies() {
+        List<TableId> tables = Collections.singletonList(new TableId("testdb", "public", "orders"));
+        for (String sinkOptions : List.of(
+                "metrics_label = 'a, split_column_families, b'",
+                "metrics_label = e'a\\', split_column_families, b'",
+                "metrics_label = e'a''b\\', split_column_families, c'",
+                "metrics_label = 'it''s, split_column_families'",
+                "metrics_label = 'split_column_families'",
+                "min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause")) {
+            Configuration config = baseConfig().edit().with(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS, sinkOptions).build();
+
+            // The list goes into the statement as it is written.
+            assertThat(createSource(config).buildSinklessChangefeedQuery(tables, null, false)).contains(" WITH " + sinkOptions + ", ");
+        }
+    }
+
+    @Test
+    public void shouldRemoveOnlyTheOptionSplitColumnFamiliesFromTheSinkOptions() {
+        // A list without the option is returned as it is.
+        for (String sinkOptions : List.of(
+                "min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause",
+                // The prefix E also makes a backslash an escape.
+                "metrics_label = E'a\\', split_column_families, b', diff",
+                // A comma in a quoted identifier separates nothing either.
+                "metrics_label = \"a, split_column_families, b\", diff",
+                // A quote that never ends takes the rest of the list.
+                "metrics_label = 'a, split_column_families",
+                "  ",
+                "diff,")) {
+            assertThat(CockroachDBStreamingChangeEventSource.withoutSplitColumnFamilies(sinkOptions)).isSameAs(sinkOptions);
+        }
+        // A name in upper case or in quotes, and the option with a value that it does not take.
+        assertThat(CockroachDBStreamingChangeEventSource.withoutSplitColumnFamilies("Split_Column_Families = 'x', \"Quoted_Name\""))
+                .isEqualTo(" \"Quoted_Name\"");
+        // Options on several lines.
+        assertThat(CockroachDBStreamingChangeEventSource.withoutSplitColumnFamilies("min_checkpoint_frequency = '10s',\n  split_column_families\n"))
+                .isEqualTo("min_checkpoint_frequency = '10s'");
+        // The option more than once, and a comma at the end.
+        assertThat(CockroachDBStreamingChangeEventSource.withoutSplitColumnFamilies("split_column_families, diff, split_column_families,"))
+                .isEqualTo(" diff,");
+        // What follows the option stays in the list, also a value that never ends.
+        assertThat(CockroachDBStreamingChangeEventSource.withoutSplitColumnFamilies("split_column_families, metrics_label = e'a\\"))
+                .isEqualTo(" metrics_label = e'a\\");
+    }
+
+    @Test
+    public void shouldRefuseAChangefeedOptionPropertyForSplitColumnFamilies() {
+        for (String name : List.of("split_column_families", "Split_Column_Families")) {
+            final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + name;
+
+            assertThatThrownBy(() -> createSource(baseConfig().edit().with(property, "").build()), "property %s", property)
+                    .isInstanceOf(DebeziumException.class)
+                    .hasMessageContaining(property)
+                    .hasMessageContaining("more than one column family");
+        }
     }
 
     @Test

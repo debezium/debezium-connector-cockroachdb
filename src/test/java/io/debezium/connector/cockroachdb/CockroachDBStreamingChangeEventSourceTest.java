@@ -40,9 +40,8 @@ import io.debezium.relational.TableId;
  * timestamp (debezium/dbz#2283).</p>
  *
  * <p>The {@code cockroachdb.changefeed.kafka.sink.config} property passes CockroachDB's
- * {@code kafka_sink_config} changefeed option through as a single-quoted JSON literal; the
- * general sink options passthrough cannot carry it because it escapes the required quotes
- * (debezium/dbz#2278).</p>
+ * {@code kafka_sink_config} changefeed option through as a single-quoted JSON literal
+ * (debezium/dbz#2278). The general sink options are passed through as they are written.</p>
  *
  * @author Virag Tripathi
  */
@@ -295,6 +294,38 @@ public class CockroachDBStreamingChangeEventSourceTest {
                 statement, List.of(new TableId("testdb", "public", "orders")), "1.0000000000", true))
                 .isSameAs(permissionDenied);
         verify(statement, times(1)).execute(anyString());
+    }
+
+    @Test
+    void passesSinkOptionsThroughUnchanged() {
+        // CockroachDB takes most option values as quoted strings, for example a duration.
+        final Configuration config = baseConfig()
+                .with("cockroachdb.changefeed.sink.options", "min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause")
+                .build();
+        final List<TableId> tables = List.of(new TableId("testdb", "public", "orders"));
+
+        assertThat(source(config).buildSinkChangefeedQuery(tables, null, false))
+                .contains(" WITH full_table_name, min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause, envelope = 'enriched'");
+        assertThat(source(config).buildSinklessChangefeedQuery(tables, null, false))
+                .contains(" WITH min_checkpoint_frequency = '10s', protect_data_from_gc_on_pause, envelope = 'enriched'");
+    }
+
+    @Test
+    void putsSinkOptionsBeforeTheOptionsThatTheConnectorSets() {
+        // When an option is given twice, CockroachDB uses the last value (measured on v25.4.21 and v26.4.1).
+        // The connector depends on its own envelope, cursor and initial scan, so its options come last.
+        final Configuration config = baseConfig()
+                .with("snapshot.mode", "no_data")
+                .with("cockroachdb.changefeed.sink.options", "envelope = 'wrapped', cursor = '1.0000000000', initial_scan = 'yes'")
+                .build();
+        final List<TableId> tables = List.of(new TableId("testdb", "public", "orders"));
+
+        for (String query : List.of(source(config).buildSinkChangefeedQuery(tables, "2.0000000000", true),
+                source(config).buildSinklessChangefeedQuery(tables, "2.0000000000", true))) {
+            assertThat(query.indexOf("envelope = 'enriched'")).isGreaterThan(query.indexOf("envelope = 'wrapped'"));
+            assertThat(query.indexOf("cursor = '2.0000000000'")).isGreaterThan(query.indexOf("cursor = '1.0000000000'"));
+            assertThat(query.indexOf("initial_scan = 'no'")).isGreaterThan(query.indexOf("initial_scan = 'yes'"));
+        }
     }
 
     @Test

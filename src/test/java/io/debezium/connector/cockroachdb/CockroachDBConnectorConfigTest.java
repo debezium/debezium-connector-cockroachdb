@@ -10,13 +10,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.kafka.common.config.ConfigDef;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 
 import io.debezium.config.Configuration;
+
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 
 /**
  * Tests for CockroachDB connector configuration.
@@ -341,6 +348,47 @@ public class CockroachDBConnectorConfigTest {
         CockroachDBConnectorConfig config = new CockroachDBConnectorConfig(Configuration.from(props));
         assertThat(config).isNotNull();
         assertThat(config.getLogicalName()).isEqualTo("test");
+    }
+
+    @Test
+    public void shouldWarnThatTheSinkOptionsPropertyIsDeprecated() {
+        Map<String, String> props = new HashMap<>();
+        props.put(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS.name(), "min_checkpoint_frequency = '10s'");
+
+        // The property keeps working, so the configuration is valid.
+        assertThat(warningsOfTheValidation(props)).anyMatch(message -> message.contains(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS.name())
+                && message.contains("deprecated")
+                && message.contains(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX));
+    }
+
+    @Test
+    public void shouldNotWarnAboutTheSinkOptionsPropertyWhenItIsNotSet() {
+        Map<String, String> props = new HashMap<>();
+        props.put(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "min_checkpoint_frequency", "10s");
+
+        assertThat(warningsOfTheValidation(props)).noneMatch(message -> message.contains("deprecated"));
+    }
+
+    /** Validates a configuration that is valid apart from the given properties, and returns what the validation logged. */
+    private static List<String> warningsOfTheValidation(Map<String, String> properties) {
+        Map<String, String> props = new HashMap<>(properties);
+        props.put("database.hostname", "localhost");
+        props.put("database.user", "root");
+        props.put("database.dbname", "defaultdb");
+        props.put("topic.prefix", "test");
+        final Logger logger = ((LoggerContext) LoggerFactory.getILoggerFactory()).getLogger(CockroachDBConnectorConfig.class);
+        final ListAppender<ILoggingEvent> log = new ListAppender<>();
+        log.start();
+        logger.addAppender(log);
+        try {
+            assertThat(Configuration.from(props).validateAndRecord(
+                    CockroachDBConnectorConfig.ALL_FIELDS,
+                    CockroachDBConnectorConfigTest::failOnProblem)).isTrue();
+            return log.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
+        }
+        finally {
+            logger.detachAppender(log);
+        }
     }
 
     @Test

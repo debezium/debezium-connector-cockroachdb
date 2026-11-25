@@ -26,11 +26,13 @@ import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.json.JsonConverter;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import io.debezium.connector.cockroachdb.CockroachDBConnectorConfig;
 import io.debezium.connector.cockroachdb.CockroachDBStreamingChangeEventSource;
 
 import ch.qos.logback.classic.Logger;
@@ -552,6 +554,161 @@ public class CockroachDBRegressionScenariosIT extends AbstractCockroachDBPipelin
             assertThat(found)
                     .as("The running changefeed must carry the kafka_sink_config option")
                     .isTrue();
+        }
+    }
+
+    @Test
+    public void shouldPassQuotedSinkOptionsToTheChangefeed() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("sink-options-test", "sink_options_testdb", "public.sink_options_events");
+        // CockroachDB does not send resolved timestamps more often than min_checkpoint_frequency, which
+        // takes a quoted duration.
+        config.put("cockroachdb.changefeed.sink.options", "min_checkpoint_frequency = '10s'");
+        connection = openDatabase("sink_options_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS sink_options_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO sink_options_events VALUES (1, 'Alice')");
+        }
+
+        startTask(config);
+
+        assertThat(pollForRecords(1, 45)).as("Should receive the scan row").isNotEmpty();
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOBS] "
+                        + "WHERE status = 'running' AND description LIKE '%topic_prefix=sink-options-test.%'")) {
+            assertThat(rs.next()).as("The connector should have created a changefeed").isTrue();
+            assertThat(rs.getString(1)).contains("min_checkpoint_frequency = '10s'");
+        }
+    }
+
+    @Test
+    public void shouldPassChangefeedOptionPropertiesToTheChangefeed() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("option-properties-test", "option_properties_testdb",
+                "public.option_properties_events");
+        // One property per option: the connector quotes the value, and a property without a value gives an
+        // option without one. A quote in a value is escaped, and CockroachDB takes a backslash as it is, also
+        // in front of the closing quote.
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "min_checkpoint_frequency", "10s");
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "protect_data_from_gc_on_pause", "");
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "metrics_label", "it's a\\");
+        connection = openDatabase("option_properties_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS option_properties_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO option_properties_events VALUES (1, 'Alice')");
+        }
+
+        startTask(config);
+
+        assertThat(pollForRecords(1, 45)).as("Should receive the scan row").isNotEmpty();
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOBS] "
+                        + "WHERE status = 'running' AND description LIKE '%topic_prefix=option-properties-test.%'")) {
+            assertThat(rs.next()).as("The connector should have created a changefeed").isTrue();
+            // CockroachDB shows a value with a quote or a backslash in its escaped form.
+            assertThat(rs.getString(1)).contains("min_checkpoint_frequency = '10s'", "protect_data_from_gc_on_pause",
+                    "metrics_label = e'it\\'s a\\\\'");
+        }
+    }
+
+    @Test
+    public void shouldRefuseAReservedChangefeedOptionPropertyAlsoWhenTheChangefeedIsReused() throws Exception {
+        connection = openDatabase("option_reuse_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS option_reuse_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO option_reuse_events VALUES (1, 'Alice')");
+        }
+
+        // The first run creates the changefeed, which keeps running after the task stops.
+        startTask(baseConnectorConfig("option-reuse-test", "option_reuse_testdb", "public.option_reuse_events"));
+        assertThat(pollUntilRecordsOrError(30).records).as("First run should stream the seed row").isNotEmpty();
+        stopTask();
+        runningChangefeedJobFor("option_reuse_events");
+
+        // The second run finds that changefeed and builds no statement. The property must fail this start
+        // too, and not only a later one that has to create a changefeed.
+        final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + "resolved";
+        final Map<String, String> config = baseConnectorConfig("option-reuse-test", "option_reuse_testdb", "public.option_reuse_events");
+        config.put(property, "1s");
+        startTask(config);
+        PollOutcome outcome = pollUntilRecordsOrError(45);
+        assertThat(outcome.error).as("Second run should fail for the property instead of reusing the changefeed").isNotNull();
+        assertThat(rootCauseMessage(outcome.error)).contains(property, CockroachDBConnectorConfig.CHANGEFEED_RESOLVED_INTERVAL.name());
+        // A retriable error would restart the connector, which runs into the same property again and again.
+        assertThat(outcome.error).as("No retry can fix the property").isNotInstanceOf(RetriableException.class);
+    }
+
+    @Test
+    public void shouldLeaveSplitColumnFamiliesOutOfTheChangefeed() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("split-option-test", "split_option_testdb", "public.split_option_events");
+        // The connector cannot read a changefeed that is split by column family, so it leaves the option out.
+        // The rest of the list reaches the changefeed. CockroachDB would reject the option together with
+        // resolved for a Kafka sink.
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS.name(), "split_column_families, min_checkpoint_frequency = '10s'");
+        connection = openDatabase("split_option_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS split_option_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO split_option_events VALUES (1, 'Alice')");
+        }
+
+        startTask(config);
+
+        assertThat(pollForRecords(1, 45)).as("Should receive the scan row").isNotEmpty();
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOBS] "
+                        + "WHERE status = 'running' AND description LIKE '%topic_prefix=split-option-test.%'")) {
+            assertThat(rs.next()).as("The connector should have created a changefeed").isTrue();
+            assertThat(rs.getString(1)).contains("min_checkpoint_frequency = '10s'").doesNotContain("split_column_families");
+        }
+    }
+
+    @Test
+    public void shouldNotEmitOneRecordPerColumnFamilyForATableWithTwoColumnFamilies() throws Exception {
+        connection = openDatabase("column_families_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS column_families_events (id INT8 PRIMARY KEY, a STRING, b STRING NOT NULL, "
+                    + "FAMILY f1 (id, a), FAMILY f2 (b))");
+            stmt.execute("UPSERT INTO column_families_events VALUES (1, 'a1', 'b1')");
+        }
+        // CockroachDB accepts the option for a sinkless changefeed and then sends one event per column family.
+        // The event of the second family has no primary key, and the connector would emit it with an empty key.
+        // Without the option CockroachDB rejects a changefeed for this table.
+        final Map<String, String> config = baseConnectorConfig("column-families-test", "column_families_testdb", "public.column_families_events");
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_SINK_TYPE.name(), "sinkless");
+        config.remove(CockroachDBConnectorConfig.CHANGEFEED_SINK_URI.name());
+        config.remove(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_BOOTSTRAP_SERVERS.name());
+        config.remove(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_AUTO_OFFSET_RESET.name());
+        config.remove(CockroachDBConnectorConfig.CHANGEFEED_KAFKA_POLL_TIMEOUT_MS.name());
+        config.put(CockroachDBConnectorConfig.CHANGEFEED_SINK_OPTIONS.name(), "split_column_families");
+
+        startTask(config);
+
+        PollOutcome outcome = pollUntilRecordsOrError(30);
+        assertThat(outcome.records).as("No record should be emitted for the events of the column families").isEmpty();
+        assertThat(outcome.error).as("CockroachDB should reject the changefeed").isNotNull();
+        assertThat(rootCauseMessage(outcome.error)).contains("multiple column families");
+    }
+
+    @Test
+    public void shouldKeepItsOwnOptionsWhenTheSinkOptionsRepeatThem() throws Exception {
+        final Map<String, String> config = baseConnectorConfig("own-options-test", "own_options_testdb", "public.own_options_events");
+        // CockroachDB uses the last value of an option that is given twice. The connector can only read the
+        // enriched envelope, so its own options have to come after the configured ones.
+        config.put("cockroachdb.changefeed.sink.options", "envelope = 'wrapped', min_checkpoint_frequency = '10s'");
+        connection = openDatabase("own_options_testdb");
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS own_options_events (id INT8 PRIMARY KEY, name STRING NOT NULL)");
+            stmt.execute("UPSERT INTO own_options_events VALUES (1, 'Alice')");
+        }
+
+        startTask(config);
+
+        final List<SourceRecord> scanRows = pollForRecords(1, 45);
+        assertThat(scanRows).as("Should receive the scan row").isNotEmpty();
+        assertThat(((Struct) scanRows.get(0).value()).getStruct("after").getString("name")).isEqualTo("Alice");
+        try (Statement stmt = connection.createStatement();
+                ResultSet rs = stmt.executeQuery("SELECT description FROM [SHOW CHANGEFEED JOBS] "
+                        + "WHERE status = 'running' AND description LIKE '%topic_prefix=own-options-test.%'")) {
+            assertThat(rs.next()).as("The connector should have created a changefeed").isTrue();
+            assertThat(rs.getString(1)).contains("envelope = 'enriched'", "min_checkpoint_frequency = '10s'");
         }
     }
 
