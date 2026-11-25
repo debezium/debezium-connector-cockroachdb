@@ -7,7 +7,9 @@ package io.debezium.connector.cockroachdb;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
@@ -399,14 +401,36 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     + "Debezium offsets, never from the group, so this option has no effect on delivery "
                     + "semantics.");
 
+    /**
+     * Prefix for the properties that add one option each to the {@code WITH} clause of
+     * {@code CREATE CHANGEFEED}: {@code cockroachdb.changefeed.option.<name>=<value>}. The connector writes
+     * the option as {@code <name> = '<value>'} and quotes the value itself. A property without a value gives
+     * an option without one, for example {@code protect_data_from_gc_on_pause}.
+     */
+    public static final String CHANGEFEED_OPTION_PREFIX = "cockroachdb.changefeed.option.";
+
     public static final Field CHANGEFEED_SINK_OPTIONS = Field.create("cockroachdb.changefeed.sink.options")
             .withDisplayName("Changefeed sink options")
             .withType(Type.STRING)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withWidth(Width.LONG)
             .withImportance(Importance.LOW)
-            .withDescription("Additional options for the sink in key=value format, comma-separated. "
-                    + "Example: 'compression=gzip,retry_count=3'");
+            .withValidation(CockroachDBConnectorConfig::warnThatSinkOptionsAreDeprecated)
+            .withDescription("Deprecated, use one " + CHANGEFEED_OPTION_PREFIX + "<name> property per option. "
+                    + "Additional CockroachDB changefeed options, comma-separated, that the connector adds "
+                    + "to the WITH clause of CREATE CHANGEFEED exactly as they are written here. CockroachDB takes most "
+                    + "option values as quoted strings. Example: min_checkpoint_frequency = '10s', "
+                    + "protect_data_from_gc_on_pause. An option that the connector sets itself, such as envelope, "
+                    + "cursor, initial_scan, or resolved, keeps the connector's value.");
+
+    private static int warnThatSinkOptionsAreDeprecated(Configuration config, Field field, Field.ValidationOutput problems) {
+        final String value = config.getString(field);
+        if (value != null && !value.trim().isEmpty()) {
+            LOGGER.warn("The property {} is deprecated and will be removed in a future release. Set one property per "
+                    + "changefeed option instead, for example {}min_checkpoint_frequency=10s.", field.name(), CHANGEFEED_OPTION_PREFIX);
+        }
+        return 0;
+    }
 
     public static final Field CHANGEFEED_KAFKA_SINK_CONFIG = Field.create("cockroachdb.changefeed.kafka.sink.config")
             .withDisplayName("Changefeed kafka sink config")
@@ -1168,6 +1192,14 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public String getChangefeedSinkOptions() {
         return config.getString(CHANGEFEED_SINK_OPTIONS);
+    }
+
+    /**
+     * The changefeed options of the {@code cockroachdb.changefeed.option.<name>} properties: option name and
+     * value, in the order of the names. A property without a value has the empty string.
+     */
+    public Map<String, String> getChangefeedOptions() {
+        return new TreeMap<>(config.subset(CHANGEFEED_OPTION_PREFIX, true).asMap());
     }
 
     public String getChangefeedKafkaSinkConfig() {

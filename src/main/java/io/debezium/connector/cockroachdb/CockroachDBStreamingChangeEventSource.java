@@ -89,9 +89,33 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CockroachDBStreamingChangeEventSource.class);
 
+    private static final String CHANGEFEED_OPTION_NAME = "[A-Za-z_][A-Za-z0-9_]*";
+
+    /**
+     * The changefeed options that are reserved for the connector, with what to use in their place: the
+     * options that it writes itself, and the ones that would change what it relies on. A
+     * {@code cockroachdb.changefeed.option.<name>} property for one of them is refused.
+     */
+    private static final Map<String, String> OPTIONS_RESERVED_FOR_THE_CONNECTOR = Map.ofEntries(
+            Map.entry("envelope", "The connector reads the enriched envelope only."),
+            Map.entry("format", "The connector reads JSON only."),
+            Map.entry("full_table_name", "The connector names the topics of the changefeed."),
+            Map.entry("enriched_properties", "Use " + CockroachDBConnectorConfig.CHANGEFEED_ENRICHED_PROPERTIES.name() + "."),
+            Map.entry("updated", "Use " + CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_UPDATED.name() + "."),
+            Map.entry("diff", "Use " + CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_DIFF.name() + "."),
+            Map.entry("mvcc_timestamp", "Use " + CockroachDBConnectorConfig.CHANGEFEED_INCLUDE_MVCC_TIMESTAMP.name() + "."),
+            Map.entry("resolved", "Use " + CockroachDBConnectorConfig.CHANGEFEED_RESOLVED_INTERVAL.name() + "."),
+            Map.entry("cursor", "Use " + CockroachDBConnectorConfig.CHANGEFEED_CURSOR.name() + "."),
+            Map.entry("initial_scan", "Use " + CockroachDBConnectorConfig.SNAPSHOT_MODE.name() + "."),
+            Map.entry("initial_scan_only", "Use " + CockroachDBConnectorConfig.SNAPSHOT_MODE.name() + "."),
+            Map.entry("no_initial_scan", "Use " + CockroachDBConnectorConfig.SNAPSHOT_MODE.name() + "."),
+            Map.entry("kafka_sink_config", "Use " + CockroachDBConnectorConfig.CHANGEFEED_KAFKA_SINK_CONFIG.name() + "."));
+
     private static final int MAX_DEDUP_CACHE_SIZE = 10_000;
 
     private final CockroachDBConnectorConfig config;
+    /** The options of the {@code cockroachdb.changefeed.option.<name>} properties, as they go into a statement. */
+    private final List<String> changefeedOptionProperties;
     private final EventDispatcher<CockroachDBPartition, TableId> dispatcher;
     private final CockroachDBSchema schema;
     private final Clock clock;
@@ -178,6 +202,10 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                                                  Clock clock,
                                                  SnapshotProgressListener<CockroachDBPartition> snapshotProgressListener) {
         this.config = Objects.requireNonNull(config, "config must not be null");
+        // Checked when the task starts and not when a statement is built: a changefeed that exists already
+        // is reused as it is, so a property that cannot be used would go unnoticed until the connector has
+        // to create a changefeed.
+        this.changefeedOptionProperties = changefeedOptionProperties(config.getChangefeedOptions());
         this.dispatcher = dispatcher;
         this.schema = schema;
         this.clock = clock;
@@ -1642,6 +1670,16 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
      */
     private String buildChangefeedWithOptions(String cursor, boolean hasPriorOffset) {
         List<String> options = new ArrayList<>();
+        // The user's own options are SQL in their own right and are passed through as they are. Escaping
+        // their quotes would break every quoted value, for example min_checkpoint_frequency = '10s'.
+        // They come first: when an option is given twice, CockroachDB uses the last value, so an option
+        // that the connector sets itself keeps the connector's value.
+        String sinkOptions = config.getChangefeedSinkOptions();
+        if (sinkOptions != null && !sinkOptions.trim().isEmpty()) {
+            options.add(sinkOptions.trim());
+        }
+        // After the deprecated list, so that a property wins over it.
+        options.addAll(changefeedOptionProperties);
         // The connector parses only the enriched envelope (it relies on the 'op' and 'ts_ns' fields
         // it provides), so the envelope is fixed rather than configurable.
         options.add("envelope = 'enriched'");
@@ -1687,10 +1725,6 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
                 && !CockroachDBOffsetContext.CURSOR_NOW.equals(cursor)) {
             options.add("cursor = '" + sanitizeLiteral(cursor) + "'");
         }
-        String sinkOptions = config.getChangefeedSinkOptions();
-        if (sinkOptions != null && !sinkOptions.trim().isEmpty()) {
-            options.add(sanitizeLiteral(sinkOptions));
-        }
         // kafka_sink_config takes a JSON document as a quoted SQL literal; the value is
         // validated as JSON at configuration time and internal single quotes are doubled here.
         String kafkaSinkConfig = config.getChangefeedKafkaSinkConfig();
@@ -1698,6 +1732,33 @@ public class CockroachDBStreamingChangeEventSource implements StreamingChangeEve
             options.add("kafka_sink_config='" + sanitizeLiteral(kafkaSinkConfig) + "'");
         }
         return String.join(", ", options);
+    }
+
+    /**
+     * The options of the {@code cockroachdb.changefeed.option.<name>} properties as they go into the
+     * {@code WITH} clause: {@code <name> = '<value>'}, or the name alone for a property without a value.
+     * The name goes into the statement as it is, so it has to be a plain option name. An option that is
+     * reserved for the connector is refused: for an option that the connector writes, CockroachDB would use
+     * the connector's value anyway, and the others would change what the connector reads.
+     */
+    private static List<String> changefeedOptionProperties(Map<String, String> properties) {
+        final List<String> options = new ArrayList<>();
+        for (Map.Entry<String, String> option : properties.entrySet()) {
+            final String name = option.getKey();
+            final String property = CockroachDBConnectorConfig.CHANGEFEED_OPTION_PREFIX + name;
+            if (!name.matches(CHANGEFEED_OPTION_NAME)) {
+                throw new DebeziumException("The property " + property + " does not name a changefeed option. "
+                        + "The name of an option consists of letters, digits and underscores.");
+            }
+            final String ownProperty = OPTIONS_RESERVED_FOR_THE_CONNECTOR.get(name.toLowerCase(Locale.ROOT));
+            if (ownProperty != null) {
+                throw new DebeziumException("The property " + property + " sets a changefeed option that is reserved "
+                        + "for the connector. " + ownProperty);
+            }
+            final String value = option.getValue().trim();
+            options.add(value.isEmpty() ? name : name + " = '" + sanitizeLiteral(value) + "'");
+        }
+        return options;
     }
 
     /**
