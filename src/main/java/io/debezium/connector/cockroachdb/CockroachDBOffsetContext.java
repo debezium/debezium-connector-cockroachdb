@@ -5,6 +5,7 @@
  */
 package io.debezium.connector.cockroachdb;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
@@ -50,11 +51,36 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
      */
     public static final String CONSUMER_OFFSET_PREFIX = "consumer.offset.";
 
+    /**
+     * Prefix for the point where a new changefeed starts for a table whose changefeed is ahead of the
+     * cursor of these offsets. That is the start of a changefeed that started later than the cursor:
+     * the changefeed of a table that was created after the cursor, or on which the user got the
+     * privilege after it, or one that began with a new initial scan because CockroachDB no longer had
+     * the changes since the cursor. And it is how far a table had come that was ahead of the cursor
+     * when the cursor moved back, or when the connector replaced a failed changefeed of other tables.
+     * The key is the one of the consumer positions without the partition, so for the kafka mode the
+     * intermediate topic of the table. The entry stays until the cursor has reached the point. Until
+     * then a new changefeed for the table starts there, because CockroachDB can reject the cursor for
+     * the table, and the cursor can be older than what the table needs.
+     */
+    public static final String CHANGEFEED_START_PREFIX = "changefeed.start.";
+
+    /** Marks the stored start of a changefeed that began with an initial scan. */
+    private static final String SCAN_SUFFIX = ";scan";
+
+    /**
+     * Where a changefeed for a table starts: the cursor, and whether the changefeed begins with an
+     * initial scan as of that cursor.
+     */
+    public record ChangefeedStart(String cursor, boolean scans) {
+    }
+
     private String cursor;
     private Instant timestamp;
     private TransactionContext transactionContext;
     private final IncrementalSnapshotContext<TableId> incrementalSnapshotContext;
     private final Map<String, Long> consumerOffsets = new ConcurrentHashMap<>();
+    private final Map<String, ChangefeedStart> changefeedStarts = new ConcurrentHashMap<>();
 
     public CockroachDBOffsetContext(CockroachDBConnectorConfig connectorConfig) {
         super(new SourceInfo(connectorConfig), false);
@@ -100,8 +126,12 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
         for (Map.Entry<String, Long> entry : consumerOffsets.entrySet()) {
             offset.put(CONSUMER_OFFSET_PREFIX + entry.getKey(), entry.getValue());
         }
-        LOGGER.trace("Returning offset: cursor='{}', timestamp={}, snapshotCompleted={}, consumerOffsets={}",
-                cursor, ts, snapshotCompleted, consumerOffsets);
+        for (Map.Entry<String, ChangefeedStart> entry : changefeedStarts.entrySet()) {
+            final ChangefeedStart start = entry.getValue();
+            offset.put(CHANGEFEED_START_PREFIX + entry.getKey(), start.scans() ? start.cursor() + SCAN_SUFFIX : start.cursor());
+        }
+        LOGGER.trace("Returning offset: cursor='{}', timestamp={}, snapshotCompleted={}, consumerOffsets={}, changefeedStarts={}",
+                cursor, ts, snapshotCompleted, consumerOffsets, changefeedStarts);
         return offset;
     }
 
@@ -201,8 +231,22 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
                 }
             }
 
-            LOGGER.debug("Loaded offset from storage: cursor='{}', timestamp={}, snapshotCompleted={}, consumerOffsets={}",
-                    context.getCursor(), context.getTimestamp(), context.snapshotCompleted, context.consumerOffsets);
+            for (Map.Entry<String, ?> entry : offset.entrySet()) {
+                if (entry.getKey().startsWith(CHANGEFEED_START_PREFIX) && entry.getValue() != null) {
+                    final String key = entry.getKey().substring(CHANGEFEED_START_PREFIX.length());
+                    final String value = entry.getValue().toString();
+                    final boolean scans = value.endsWith(SCAN_SUFFIX);
+                    final String start = scans ? value.substring(0, value.length() - SCAN_SUFFIX.length()) : value;
+                    if (decimalTimestamp(start) == null) {
+                        LOGGER.warn("Invalid stored changefeed start '{}' for '{}', ignoring", value, key);
+                        continue;
+                    }
+                    context.changefeedStarts.put(key, new ChangefeedStart(start, scans));
+                }
+            }
+
+            LOGGER.debug("Loaded offset from storage: cursor='{}', timestamp={}, snapshotCompleted={}, consumerOffsets={}, changefeedStarts={}",
+                    context.getCursor(), context.getTimestamp(), context.snapshotCompleted, context.consumerOffsets, context.changefeedStarts);
             return context;
         }
     }
@@ -242,5 +286,54 @@ public class CockroachDBOffsetContext extends CommonOffsetContext<SourceInfo> {
      */
     public Map<String, Long> getConsumerOffsets() {
         return Map.copyOf(consumerOffsets);
+    }
+
+    /**
+     * Returns where a new changefeed for the given key starts, or {@code null} if it can start at the
+     * cursor (see {@link #CHANGEFEED_START_PREFIX}).
+     */
+    public ChangefeedStart getChangefeedStart(String key) {
+        return changefeedStarts.get(key);
+    }
+
+    /**
+     * Records that a new changefeed for the given key starts at the given cursor, which is later than
+     * the cursor of these offsets. It is included in {@link #getOffset()}.
+     */
+    public void setChangefeedStart(String key, String cursor, boolean scans) {
+        changefeedStarts.put(key, new ChangefeedStart(cursor, scans));
+    }
+
+    /** Returns an immutable snapshot of the recorded changefeed starts by their keys. */
+    public Map<String, ChangefeedStart> getChangefeedStarts() {
+        return Map.copyOf(changefeedStarts);
+    }
+
+    /**
+     * Forgets the changefeed starts that the given cursor has reached. From such a cursor on, a
+     * changefeed for the table can start at the cursor like the changefeeds of the other tables.
+     */
+    public void removeChangefeedStartsUpTo(String cursor) {
+        if (changefeedStarts.isEmpty()) {
+            return;
+        }
+        final BigDecimal reached = decimalTimestamp(cursor);
+        if (reached == null) {
+            return;
+        }
+        changefeedStarts.values().removeIf(start -> decimalTimestamp(start.cursor()).compareTo(reached) <= 0);
+    }
+
+    /** Parses a CockroachDB decimal timestamp. Returns {@code null} for anything else. */
+    private static BigDecimal decimalTimestamp(String timestamp) {
+        if (timestamp == null) {
+            return null;
+        }
+        try {
+            return new BigDecimal(timestamp.trim());
+        }
+        catch (NumberFormatException e) {
+            return null;
+        }
     }
 }

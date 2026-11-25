@@ -208,13 +208,16 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDescription("The interval for resolved timestamp messages. Format: '10s', '1m', etc.");
 
     public static final Field CHANGEFEED_INCLUDE_UPDATED = Field.create("cockroachdb.changefeed.include.updated")
-            .withDisplayName("Include updated column information")
+            .withDisplayName("Include updated timestamps")
             .withType(Type.BOOLEAN)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault(false)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
-            .withDescription("Whether to include information about which columns were updated in UPDATE events.");
+            .withDescription("Whether to emit the timestamp of the CockroachDB 'updated' option as source.ts_hlc. "
+                    + "The connector creates every changefeed with that option, which adds a timestamp to each "
+                    + "changefeed message, and uses the timestamp to tell rows of an initial scan from rows that are "
+                    + "inserted afterwards and to recognize events that CockroachDB delivers more than once.");
 
     public static final Field CHANGEFEED_INCLUDE_MVCC_TIMESTAMP = Field.create("cockroachdb.changefeed.include.mvcc.timestamp")
             .withDisplayName("Include MVCC timestamp")
@@ -253,7 +256,13 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     + "intermediate topics or when other tools also consume them. The connector derives its own schemas "
                     + "from JDBC table discovery and identifies each event's table from the topic it arrives on, so it "
                     + "does not read the 'schema' block; any value beyond 'source' is passed through for other consumers "
-                    + "but is not used by the connector.");
+                    + "but is not used by the connector. The connector reads the timestamp of the 'updated' option from "
+                    + "the 'source' block to tell rows of an initial scan from rows that are inserted afterwards and to "
+                    + "recognize events that CockroachDB delivers more than once. The value must include 'source' for a "
+                    + "sinkless changefeed, where the connector also reads the table of each event from that block, and "
+                    + "when cockroachdb.changefeed.include.updated or cockroachdb.changefeed.include.mvcc.timestamp is "
+                    + "enabled.")
+            .withValidation(CockroachDBConnectorConfig::validateEnrichedProperties);
 
     public static final Field CHANGEFEED_CURSOR = Field.create("cockroachdb.changefeed.cursor")
             .withDisplayName("Changefeed cursor")
@@ -982,6 +991,39 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
         return CONFIG_DEFINITION.configDef();
     }
 
+    /**
+     * The connector reads the {@code source} block of the changefeed events. A sinkless changefeed sends
+     * the events of all tables in one stream, and their table is in that block. The timestamp that is
+     * emitted as {@code source.ts_hlc} is in it as well.
+     */
+    private static int validateEnrichedProperties(Configuration config, Field field, Field.ValidationOutput problems) {
+        final String value = config.getString(field);
+        if (hasSourceProperty(value)) {
+            return 0;
+        }
+        if ("sinkless".equals(config.getString(CHANGEFEED_SINK_TYPE))) {
+            problems.accept(field, value, "Must include 'source' for a sinkless changefeed: the connector reads the table of "
+                    + "each event from the source block.");
+            return 1;
+        }
+        // snapshot.mode=initial_only ignores both properties, because CockroachDB does not allow their
+        // options together with initial_scan='only'.
+        final boolean ignoresRowTimestamps = SnapshotMode.INITIAL_ONLY.getValue().equalsIgnoreCase(config.getString(SNAPSHOT_MODE));
+        for (Field rowTimestamp : List.of(CHANGEFEED_INCLUDE_UPDATED, CHANGEFEED_INCLUDE_MVCC_TIMESTAMP)) {
+            if (!ignoresRowTimestamps && config.getBoolean(rowTimestamp)) {
+                problems.accept(field, value, "Must include 'source' when " + rowTimestamp.name() + " is enabled: the "
+                        + "connector reads the timestamp that it emits as source.ts_hlc from the source block.");
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    private static boolean hasSourceProperty(String enrichedProperties) {
+        return enrichedProperties != null
+                && Arrays.stream(enrichedProperties.split(",")).anyMatch(property -> "source".equals(property.trim()));
+    }
+
     private static int validateChangefeedSinkType(Configuration config, Field field, Field.ValidationOutput problems) {
         String value = config.getString(field);
         if (value != null && !value.equals("kafka") && !value.equals("sinkless")) {
@@ -1126,6 +1168,11 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
 
     public String getChangefeedEnrichedProperties() {
         return config.getString(CHANGEFEED_ENRICHED_PROPERTIES);
+    }
+
+    /** Returns {@code true} if the changefeed events carry the {@code source} block. */
+    public boolean hasEnrichedSourceProperty() {
+        return hasSourceProperty(getChangefeedEnrichedProperties());
     }
 
     public String getChangefeedCursor() {
