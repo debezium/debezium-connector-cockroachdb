@@ -208,13 +208,16 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
             .withDescription("The interval for resolved timestamp messages. Format: '10s', '1m', etc.");
 
     public static final Field CHANGEFEED_INCLUDE_UPDATED = Field.create("cockroachdb.changefeed.include.updated")
-            .withDisplayName("Include updated column information")
+            .withDisplayName("Include updated timestamps")
             .withType(Type.BOOLEAN)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
             .withDefault(false)
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
-            .withDescription("Whether to include information about which columns were updated in UPDATE events.");
+            .withDescription("Whether to create the changefeed with the CockroachDB 'updated' option, which adds a "
+                    + "timestamp to each changefeed message. A changefeed that the connector creates with an initial "
+                    + "scan always uses the option: the connector compares that timestamp with the cursor of the "
+                    + "changefeed to tell rows of the scan from rows that are inserted afterwards.");
 
     public static final Field CHANGEFEED_INCLUDE_MVCC_TIMESTAMP = Field.create("cockroachdb.changefeed.include.mvcc.timestamp")
             .withDisplayName("Include MVCC timestamp")
@@ -253,7 +256,8 @@ public class CockroachDBConnectorConfig extends RelationalDatabaseConnectorConfi
                     + "intermediate topics or when other tools also consume them. The connector derives its own schemas "
                     + "from JDBC table discovery and identifies each event's table from the topic it arrives on, so it "
                     + "does not read the 'schema' block; any value beyond 'source' is passed through for other consumers "
-                    + "but is not used by the connector.");
+                    + "but is not used by the connector. The connector reads the timestamp of the 'updated' option from "
+                    + "the 'source' block to tell rows of an initial scan from rows that are inserted afterwards.");
 
     public static final Field CHANGEFEED_CURSOR = Field.create("cockroachdb.changefeed.cursor")
             .withDisplayName("Changefeed cursor")
